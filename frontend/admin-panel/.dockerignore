@@ -1,0 +1,39 @@
+# ── Node modules (NEVER include — rebuild inside container) ──────────────────
+# node_modules is huge (often 200MB+). The Dockerfile runs `npm ci` to
+# install them fresh inside the container from package-lock.json.
+node_modules/
+
+# ── Next.js build cache ──────────────────────────────────────────────────────
+# .next/ is your LOCAL build output. The Dockerfile runs `npm run build`
+# inside the container to produce a fresh, clean build.
+.next/
+out/
+
+# ── Environment files ─────────────────────────────────────────────────────────
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ── Test & QA artifacts ───────────────────────────────────────────────────────
+playwright-report/
+test-results/
+tests/
+coverage/
+
+# ── IDE & OS metadata ────────────────────────────────────────────────────────
+.git/
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Docs & markdown ──────────────────────────────────────────────────────────
+*.md
+README.md
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*

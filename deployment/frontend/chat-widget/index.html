@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Booking Widget Test Page</title>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f4f7f6;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+        .container {
+            text-align: center;
+            padding: 2rem;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+        h1 { color: #1a1a1a; }
+        p { color: #666; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Welcome to Clinic XYZ</h1>
+        <p>This is a sample host website. The chat widget should appear in the bottom right.</p>
+    </div>
+
+    <!-- The Widget Script -->
+    <!-- In production, this would be a single bundled JS file -->
+    <script type="module" src="/src/index.js"></script>
+    <script>
+        // Simulation of how a client would initialize it
+        window.DotStarkBookingConfig = {
+            widgetToken: "ds_wid_yPi6s8Jwfv2sFUq8HrRPr1o9R40qM8GE",
+            apiBase: "http://127.0.0.1:8005/api/v1"
+        };
+    </script>
+</body>
+</html>

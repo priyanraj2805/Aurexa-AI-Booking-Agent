@@ -1,0 +1,6 @@
+{
+  "status_code": 401,
+  "body": {
+    "detail": "Missing authentication. Provide X-Org-API-Key or X-Widget-Token header."
+  }
+}

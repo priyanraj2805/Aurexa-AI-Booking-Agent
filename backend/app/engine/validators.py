@@ -1,0 +1,322 @@
+import re
+import bleach
+from datetime import datetime, timedelta
+from typing import Dict, Any, Tuple, Optional, List
+from dateutil.parser import parse
+from app.schemas.agent import FieldDefinition
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
+
+try:
+    from email_validator import validate_email, EmailNotValidError
+
+    HAS_EMAIL_VALIDATOR = True
+except ImportError:
+    HAS_EMAIL_VALIDATOR = False
+
+try:
+    import phonenumbers
+    from phonenumbers.phonenumberutil import NumberParseException
+
+    HAS_PHONE_NUMBERS = True
+except ImportError:
+    HAS_PHONE_NUMBERS = False
+
+
+class DataValidator:
+    """
+    The strict Python backend boundary that verifies LLM extracted entities
+    before they are ever written to the database state.
+
+    Dispatches validation by field TYPE (from FieldDefinition) instead of
+    hardcoded field NAME, making it fully dynamic for custom fields.
+    """
+
+    @staticmethod
+    def _validate_date(
+        date_str: str, tz_name: str = "UTC", max_days_ahead: int = 90
+    ) -> Tuple[Optional[str], Optional[str]]:
+        try:
+            parsed_date = parse(date_str)
+            try:
+                tz = ZoneInfo(tz_name)
+            except Exception:
+                tz = ZoneInfo("UTC")
+            now_in_tz = datetime.now(tz).date()
+            if parsed_date.date() < now_in_tz:
+                return None, "Booking date cannot be in the past."
+            max_date = now_in_tz + timedelta(days=max_days_ahead)
+            if parsed_date.date() > max_date:
+                return (
+                    None,
+                    f"Booking date cannot be more than {max_days_ahead} days in the future.",
+                )
+            return parsed_date.date().isoformat(), None
+        except ValueError:
+            return (
+                None,
+                "Invalid date format. Please use YYYY-MM-DD or say something like 'next Tuesday'.",
+            )
+
+    @staticmethod
+    def _validate_time(time_str: str) -> Tuple[Optional[str], Optional[str]]:
+        raw = (time_str or "").strip().lower()
+        if not raw:
+            return (
+                None,
+                "Invalid time format. Please provide a clear time like '2 PM' or '14:30'.",
+            )
+
+        is_date_only = bool(
+            re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw)
+            or re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", raw)
+        )
+        has_explicit_time_token = bool(
+            raw in {"noon", "midnight"}
+            or re.search(r"\b(am|pm)\b", raw)
+            or re.search(r"\b\d{1,2}:\d{2}\b", raw)
+        )
+
+        # Reject date-only / ambiguous strings that dateutil would coerce to 00:00:00.
+        if is_date_only or not has_explicit_time_token:
+            return (
+                None,
+                "Invalid time format. Please provide a clear time like '2 PM' or '14:30'.",
+            )
+
+        if raw == "noon":
+            return "12:00:00", None
+        if raw == "midnight":
+            return "00:00:00", None
+
+        try:
+            parsed_time = parse(time_str)
+            t = parsed_time.time()
+            if t.hour > 23 or t.minute > 59:
+                return (
+                    None,
+                    "Invalid time. Please provide a time like '2 PM' or '14:30'.",
+                )
+            return t.isoformat(), None
+        except ValueError:
+            return (
+                None,
+                "Invalid time format. Please provide a clear time like '2 PM' or '14:30'.",
+            )
+
+    @staticmethod
+    def _validate_email(value: str) -> Tuple[Optional[str], Optional[str]]:
+        value = value.strip().lower()
+        if HAS_EMAIL_VALIDATOR:
+            try:
+                result = validate_email(value, check_deliverability=False)
+                return result.normalized, None
+            except EmailNotValidError as e:
+                return None, f"Invalid email: {str(e)}"
+        # Fallback regex (stronger than before)
+        if re.match(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$", value):
+            return value, None
+        return None, "Invalid email format. Please provide a valid email address."
+
+    @staticmethod
+    def _validate_phone(
+        value: str, country_code: Optional[str] = None
+    ) -> Tuple[Optional[str], Optional[str], Dict[str, str]]:
+        raw_input = value.strip()
+        normalized_country = (country_code or "").strip().upper() or ""
+        metadata = {
+            "country_code": normalized_country,
+            "raw_input": raw_input,
+        }
+
+        if HAS_PHONE_NUMBERS:
+            try:
+                parsed = phonenumbers.parse(raw_input, normalized_country or None)
+                if not phonenumbers.is_valid_number(parsed):
+                    return None, "Please provide a valid phone number.", metadata
+                canonical = phonenumbers.format_number(
+                    parsed, phonenumbers.PhoneNumberFormat.E164
+                )
+                region = phonenumbers.region_code_for_number(parsed) or normalized_country
+                metadata["country_code"] = region or normalized_country
+                return canonical, None, metadata
+            except NumberParseException:
+                pass
+
+        digits = re.sub(r"\D", "", value)
+        if len(digits) < 10:
+            return None, "Phone number must have at least 10 digits.", metadata
+        if len(digits) > 15:
+            return None, "Phone number is too long.", metadata
+        # Reject obviously fake patterns (all same digit or sequential)
+        if len(set(digits)) == 1:
+            return None, "Please provide a valid phone number.", metadata
+        return f"+{digits}", None, metadata
+
+    @staticmethod
+    def _validate_number(value: str) -> Tuple[Optional[str], Optional[str]]:
+        cleaned = value.replace(",", "").strip()
+        try:
+            num = float(cleaned)
+            if num < 0:
+                return None, "Please enter a positive number."
+            return cleaned, None
+        except ValueError:
+            return None, "Please enter a valid number."
+
+    @staticmethod
+    def _validate_select(
+        value: str, options: List[str]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        if not options:
+            return value, None
+        lower_opts = {o.lower(): o for o in options}
+        if value.lower() in lower_opts:
+            return lower_opts[value.lower()], None
+        return None, f"Please choose from: {', '.join(options)}"
+
+    @staticmethod
+    def _validate_text(value: str) -> Tuple[Optional[str], Optional[str]]:
+        if len(value) > 255:
+            return None, "Input too long (max 255 chars)."
+        if len(value) < 1:
+            return None, "This field cannot be empty."
+        return value, None
+
+    @staticmethod
+    def _validate_name(value: str) -> Tuple[Optional[str], Optional[str]]:
+        if len(value) > 100:
+            return None, "Name is too long (max 100 chars)."
+        if len(value) < 2:
+            return None, "Please provide your full name."
+        # Names should not contain digits
+        if any(c.isdigit() for c in value):
+            return (
+                None,
+                "A name shouldn't contain numbers. Please provide your real name.",
+            )
+        # Must have meaningful alphabetic content (not just symbols)
+        alpha_chars = sum(1 for c in value if c.isalpha())
+        if alpha_chars < 2:
+            return (
+                None,
+                "That doesn't look like a valid name. Please provide your real name.",
+            )
+        # Clean up extra whitespace
+        cleaned = " ".join(value.split())
+        return cleaned, None
+
+    @staticmethod
+    def _validate_textarea(value: str) -> Tuple[Optional[str], Optional[str]]:
+        if len(value) > 2000:
+            return None, "Input too long (max 2000 chars)."
+        if len(value) < 1:
+            return None, "This field cannot be empty."
+        return value, None
+
+    # Type → validator dispatch table
+    TYPE_VALIDATORS = {
+        "email": lambda v, fd, tz, md: DataValidator._validate_email(v),
+        "phone": lambda v, fd, tz, md: DataValidator._validate_phone(v),
+        "date": lambda v, fd, tz, md: DataValidator._validate_date(v, tz, md),
+        "time": lambda v, fd, tz, md: DataValidator._validate_time(v),
+        "number": lambda v, fd, tz, md: DataValidator._validate_number(v),
+        "select": lambda v, fd, tz, md: DataValidator._validate_select(
+            v, fd.options if fd else []
+        ),
+        "text": lambda v, fd, tz, md: DataValidator._validate_text(v),
+        "textarea": lambda v, fd, tz, md: DataValidator._validate_textarea(v),
+    }
+
+    # Values that should be treated as "user didn't provide an answer"
+    NULL_VALUES = {"none", "null", "n/a", "na", "nil", "nothing", "-", ""}
+
+    @staticmethod
+    def validate_entities(
+        extracted_data: Dict[str, Any],
+        field_definitions: Optional[List[FieldDefinition]] = None,
+        timezone: str = "UTC",
+        max_booking_days: int = 90,
+        field_meta: Optional[Dict[str, Any]] = None,
+        include_metadata: bool = False,
+    ):
+        """
+        Validates extracted data using field definitions (type-aware).
+        Returns (valid_data, error_messages)
+        """
+        valid_data = {}
+        errors = {}
+        metadata: Dict[str, Dict[str, str]] = {}
+
+        fd_map: Dict[str, FieldDefinition] = {}
+        if field_definitions:
+            fd_map = {fd.name: fd for fd in field_definitions}
+
+        for field, value in extracted_data.items():
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                value = str(value)
+
+            value = value.strip()
+
+            # HTML sanitization — strip all HTML tags to prevent XSS/injection
+            if isinstance(value, str):
+                value = bleach.clean(value, tags=[], strip=True).strip()
+
+            if value.lower() in DataValidator.NULL_VALUES:
+                errors[field] = (
+                    f"Please provide a valid value for {field.replace('_', ' ')}."
+                )
+                continue
+
+            fd = fd_map.get(field)
+            field_context = (
+                field_meta.get(field, {})
+                if isinstance(field_meta, dict) and isinstance(field_meta.get(field), dict)
+                else {}
+            )
+            country_code = field_context.get("country_code")
+
+            if field == "phone" or (fd and fd.type == "phone"):
+                result, error, phone_meta = DataValidator._validate_phone(
+                    value, country_code=country_code
+                )
+                if phone_meta:
+                    metadata[field] = phone_meta
+            elif fd:
+                validator = DataValidator.TYPE_VALIDATORS.get(
+                    fd.type, lambda v, _fd, _tz, _md: DataValidator._validate_text(v)
+                )
+                result, error = validator(value, fd, timezone, max_booking_days)
+            else:
+                if field == "email":
+                    result, error = DataValidator._validate_email(value)
+                elif field == "phone":
+                    result, error, phone_meta = DataValidator._validate_phone(
+                        value, country_code=country_code
+                    )
+                    if phone_meta:
+                        metadata[field] = phone_meta
+                elif field == "date":
+                    result, error = DataValidator._validate_date(
+                        value, timezone, max_booking_days
+                    )
+                elif field == "time":
+                    result, error = DataValidator._validate_time(value)
+                elif field == "name":
+                    result, error = DataValidator._validate_name(value)
+                else:
+                    result, error = DataValidator._validate_text(value)
+
+            if result is not None:
+                valid_data[field] = result
+            elif error:
+                errors[field] = error
+
+        if include_metadata:
+            return valid_data, errors, metadata
+        return valid_data, errors
