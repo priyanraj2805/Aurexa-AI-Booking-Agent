@@ -159,23 +159,24 @@ export default function DashboardLayout({
       <Toaster position="bottom-right" theme="system" />
       <SidebarInset className="bg-background">
         {/* Top Bar — matches template: h-64px, border-bottom, breadcrumbs left, status+button right */}
-        <header className="flex h-16 shrink-0 items-center justify-between border-b border-border px-8 bg-background sticky top-0 z-30">
-          <div className="flex items-center gap-2">
+        <header className="flex h-16 shrink-0 items-center justify-between border-b border-border px-4 sm:px-6 md:px-8 bg-background sticky top-0 z-30">
+          <div className="flex items-center gap-2 min-w-0">
             <SidebarTrigger className="-ml-1 text-muted-foreground" />
-            <Separator orientation="vertical" className="mr-2 h-4" />
-            <span className="text-sm font-medium text-muted-foreground">
-              {breadcrumb.category} / <span className="text-foreground">{breadcrumb.page}</span>
+            <Separator orientation="vertical" className="mr-2 h-4 hidden sm:block" />
+            <span className="text-sm font-medium text-muted-foreground truncate">
+              <span className="hidden sm:inline">{breadcrumb.category} / </span>
+              <span className="text-foreground">{breadcrumb.page}</span>
             </span>
           </div>
-          <div className="flex items-center gap-3">
-            <span className="text-[11px] font-semibold uppercase px-2 py-1 rounded bg-primary/10 text-primary">
+          <div className="flex items-center gap-2 sm:gap-3">
+            <span className="hidden sm:inline text-[11px] font-semibold uppercase px-2 py-1 rounded bg-primary/10 text-primary">
               Agent Online
             </span>
             <ThemeToggle />
           </div>
         </header>
         {/* Main content — matches template: padding 40px 60px, gap 32px */}
-        <main className="flex flex-1 flex-col gap-8 px-[60px] py-10 overflow-x-hidden">
+        <main className="flex flex-1 flex-col gap-6 md:gap-8 px-4 sm:px-6 md:px-8 lg:px-[60px] py-6 md:py-10 overflow-x-hidden">
           {children}
         </main>
       </SidebarInset>

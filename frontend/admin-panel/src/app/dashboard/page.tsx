@@ -93,8 +93,8 @@ export default function DashboardPage() {
     <>
       <div className="flex items-end justify-between mb-2">
         <div>
-          <h1 className="text-[28px] font-semibold tracking-tight leading-none">Dashboard</h1>
-          <p className="text-muted-foreground text-sm mt-1">
+          <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">Dashboard</h1>
+          <p className="text-muted-foreground text-xs sm:text-sm mt-1">
             Real-time performance of your booking AI across all channels.
           </p>
         </div>
@@ -102,7 +102,7 @@ export default function DashboardPage() {
 
       {/* Onboarding Checklist */}
       {!onboardingLoading && showOnboarding && (
-        <div className="bg-card border border-border rounded-xl p-6 mb-5">
+        <div className="bg-card border border-border rounded-xl p-4 sm:p-6 mb-5">
           <div className="flex items-center gap-3 mb-4">
             <div className="flex items-center justify-center size-10 rounded-xl bg-primary/10 text-primary">
               <Rocket className="size-5" />
@@ -157,7 +157,7 @@ export default function DashboardPage() {
 
       {/* Stats Grid */}
       {statsLoading ? (
-        <div className="grid grid-cols-4 gap-5 animate-pulse py-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-5 animate-pulse py-4">
           {[...Array(4)].map((_, i) => (
             <div key={i} className="bg-card border border-border rounded-xl p-6 flex flex-col h-[114px]">
               <div className="flex items-center justify-between mb-4">
@@ -173,18 +173,18 @@ export default function DashboardPage() {
           <AlertCircle className="size-4" /> {statsError}
         </div>
       ) : (
-        <div className="grid grid-cols-4 gap-5">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-5">
           {statCards.map((stat) => (
             <div
               key={stat.title}
-              className="bg-card border border-border rounded-xl p-6 flex flex-col"
+              className="bg-card border border-border rounded-xl p-4 sm:p-6 flex flex-col"
             >
               <div className="flex items-center justify-between text-[13px] font-semibold text-muted-foreground mb-3">
                 {stat.title}
                 <stat.icon className="size-4" />
               </div>
               <div
-                className="text-[32px] font-bold tracking-tight leading-none"
+                className="text-[26px] sm:text-[32px] font-bold tracking-tight leading-none"
                 style={{ letterSpacing: "-1px" }}
               >
                 {stat.value}
@@ -197,7 +197,7 @@ export default function DashboardPage() {
         </div>
       )}
 
-      <div className="bg-card border border-border rounded-xl p-5">
+      <div className="bg-card border border-border rounded-xl p-4 sm:p-5">
         <div className="flex items-center justify-between gap-4 mb-4">
           <div className="flex items-start gap-3">
             <div className="flex items-center justify-center size-9 rounded-lg bg-primary/10 text-primary">
@@ -269,7 +269,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Recent Appointments */}
-      <div className="bg-card border border-border rounded-xl p-6">
+      <div className="bg-card border border-border rounded-xl p-4 sm:p-6">
         <div className="flex items-center justify-between mb-5">
           <h3 className="text-base font-semibold">Recent Appointments</h3>
         </div>
@@ -303,7 +303,31 @@ export default function DashboardPage() {
           </div>
         ) : (
           <div className="w-full overflow-x-auto">
-            <table className="w-full border-collapse">
+            {/* Mobile card view */}
+            <div className="md:hidden space-y-3">
+              {bookings.map((b) => (
+                <div key={b.id} className="flex items-start gap-3 p-4 border border-border rounded-lg bg-background/50">
+                  <div className="flex items-center justify-center size-8 rounded-full bg-[#27272a] text-xs font-semibold shrink-0">
+                    {getInitials(b.customer_name)}
+                  </div>
+                  <div className="flex-1 min-w-0 space-y-1">
+                    <div className="font-medium text-[13px]">{b.customer_name}</div>
+                    <div className="text-[11px] text-muted-foreground truncate">{b.customer_email}</div>
+                    {b.customer_phone && (
+                      <div className="text-[11px] text-muted-foreground">{b.customer_phone}</div>
+                    )}
+                    <div className="text-[11px] text-muted-foreground">
+                      Meeting: {formatDateTime(b.slot_start)}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      Booked: {formatDateTime(b.created_at)}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {/* Desktop table view */}
+            <table className="hidden md:table w-full border-collapse">
               <thead>
                 <tr>
                   <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">

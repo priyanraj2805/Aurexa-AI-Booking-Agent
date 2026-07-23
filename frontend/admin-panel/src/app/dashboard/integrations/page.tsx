@@ -722,8 +722,8 @@ export default function IntegrationsPage() {
   return (
     <div className="flex flex-col h-full space-y-6">
       <div>
-        <h1 className="text-[28px] font-semibold tracking-tight leading-none">Integrations</h1>
-        <p className="text-muted-foreground text-sm mt-1">
+        <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">Integrations</h1>
+        <p className="text-muted-foreground text-xs sm:text-sm mt-1">
           Connect your booking agent across multiple channels and synchronize availability.
         </p>
       </div>
@@ -860,7 +860,7 @@ export default function IntegrationsPage() {
                         return (
                           <div key={provider.key} className="border border-border rounded-lg p-4">
                             <div className="flex items-center justify-between mb-3">
-                              <div className="flex items-center gap-2">
+                        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
                                 <Video className="size-4 text-primary" />
                                 <p className="text-sm font-semibold">{provider.title}</p>
                               </div>
@@ -1039,7 +1039,7 @@ export default function IntegrationsPage() {
           {activeTab === "widget" && (
             <div className="space-y-6 animate-in fade-in duration-500 slide-in-from-bottom-2">
               <div className="bg-card border border-border rounded-2xl overflow-hidden shadow-sm">
-                <div className="flex items-center justify-between p-5 bg-secondary/40 border-b border-border/50">
+                <div className="flex flex-wrap items-center justify-between gap-3 p-4 sm:p-5 bg-secondary/40 border-b border-border/50">
                   <div className="flex items-center gap-3">
                     <div className="p-2 bg-blue-500/10 rounded-lg">
                       <Shield className="size-5 text-blue-500" />
@@ -1088,7 +1088,7 @@ export default function IntegrationsPage() {
                         <label className="text-xs font-semibold text-muted-foreground uppercase tracking-widest mb-2 block">
                           Your Active Token
                         </label>
-                        <div className="flex items-center gap-2">
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-2">
                           <div className="flex-1 flex items-center gap-3 bg-secondary/30 border border-border rounded-xl px-4 py-3">
                             <Code2 className="size-4 text-muted-foreground shrink-0" />
                             <code className="text-sm font-mono text-foreground break-all tracking-tight">
@@ -1177,7 +1177,7 @@ export default function IntegrationsPage() {
               </div>
 
               <div className="bg-card border border-border rounded-2xl overflow-hidden shadow-sm">
-                <div className="flex items-center justify-between p-5 bg-secondary/40 border-b border-border/50">
+                <div className="flex flex-wrap items-center justify-between gap-3 p-4 sm:p-5 bg-secondary/40 border-b border-border/50">
                   <div className="flex items-center gap-3">
                     <div className="p-2 bg-primary/10 rounded-lg">
                       <Code2 className="size-5 text-primary" />
@@ -1252,7 +1252,7 @@ export default function IntegrationsPage() {
 
           {activeTab === "whatsapp" && (
             <div className="bg-card border border-border rounded-2xl overflow-hidden shadow-sm animate-in fade-in duration-500 slide-in-from-bottom-2">
-              <div className="flex items-center justify-between p-5 bg-secondary/40 border-b border-border/50">
+              <div className="flex flex-wrap items-center justify-between gap-3 p-4 sm:p-5 bg-secondary/40 border-b border-border/50">
                 <div className="flex items-center gap-3">
                   <div className="p-2 bg-green-500/10 rounded-lg">
                     <MessageCircle className="size-5 text-green-500" />
@@ -1397,7 +1397,7 @@ export default function IntegrationsPage() {
 
           {activeTab === "calendar" && (
             <div className="bg-card border border-border rounded-2xl overflow-hidden shadow-sm animate-in fade-in duration-500 slide-in-from-bottom-2">
-              <div className="flex items-center justify-between p-5 bg-secondary/40 border-b border-border/50">
+              <div className="flex flex-wrap items-center justify-between gap-3 p-4 sm:p-5 bg-secondary/40 border-b border-border/50">
                 <div className="flex items-center gap-3">
                   <div className="p-2 bg-indigo-500/10 rounded-lg">
                     <CalendarDays className="size-5 text-indigo-500" />
@@ -1451,7 +1451,7 @@ export default function IntegrationsPage() {
                     </div>
                     
                     {gcState.connected ? (
-                      <div className="flex gap-2">
+                      <div className="flex flex-col sm:flex-row gap-2">
                         <button
                           onClick={() => setActiveProviderHandler("GOOGLE")}
                           disabled={settingActiveProvider || activeProvider === "GOOGLE"}
@@ -1504,7 +1504,7 @@ export default function IntegrationsPage() {
                     </div>
                     
                     {ocState.connected ? (
-                      <div className="flex gap-2">
+                      <div className="flex flex-col sm:flex-row gap-2">
                         <button
                           onClick={() => setActiveProviderHandler("OUTLOOK")}
                           disabled={settingActiveProvider || activeProvider === "OUTLOOK"}

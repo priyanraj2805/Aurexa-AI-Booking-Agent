@@ -82,7 +82,7 @@ services:
     networks:
       - app-network
 
-  # ── Cloudflare Tunnel (Public Access) ────────────────────────────────────
+# ── Cloudflare Tunnel (Public Access) ────────────────────────────────────
   # cloudflared creates a secure tunnel between your laptop and Cloudflare.
   # No port forwarding, no public IP, no paid plan needed for basic tunnels.
   #
@@ -90,14 +90,22 @@ services:
   #   1. Backend API  → public URL (shown in logs as "backend-tunnel")
   #   2. Admin Panel  → public URL (shown in logs as "admin-tunnel")
   #
+  # Default mode below uses QUICK TUNNELS (random trycloudflare.com URLs).
   # The public URLs are RANDOMLY generated and shown in the logs on startup.
   # They look like: https://random-words-here.trycloudflare.com
+  #
+  # To use NAMED TUNNELS with fixed hostnames (recommended for production):
+  #   1. Get tokens from: Cloudflare Zero Trust > Networks > Tunnels
+  #   2. Add CLOUDFLARE_TUNNEL_TOKEN_BACKEND / _ADMIN to .env
+  #   3. Uncomment the entrypoint/command blocks below and replace the command lines
+  #      with the named-mode lines (kept commented for reference).
   cloudflared-backend:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
-    # This command tells cloudflared: "tunnel my backend service publicly"
-    # --url: the internal address to tunnel (backend container on port 8005)
-    # --no-autoupdate: don't auto-update (keeps behaviour predictable)
+    # NOTE: For NAMED tunnels with fixed URLs, replace this command with:
+    #   entrypoint: ["sh", "-c"]
+    #   command: "tunnel run --token \"$TUNNEL_TOKEN\""
+    # (the cloudflared image has no shell — sh -c needs an init wrapper, kept simple here)
     command: tunnel --url http://backend:8005 --no-autoupdate
     depends_on:
       - backend

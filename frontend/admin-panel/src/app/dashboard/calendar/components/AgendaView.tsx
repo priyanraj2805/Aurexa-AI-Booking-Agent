@@ -90,7 +90,7 @@ export function AgendaView({
       )}
 
       {items.length === 0 && !loading && !error && (
-        <div className="p-24 text-center bg-muted/20 rounded-2xl border border-dashed border-border/50">
+        <div className="p-12 sm:p-24 text-center bg-muted/20 rounded-2xl border border-dashed border-border/50">
           <CalendarIcon className="size-16 text-muted-foreground/20 mx-auto mb-4" />
           <h3 className="text-lg font-bold">No upcoming bookings</h3>
           <p className="text-sm text-muted-foreground mt-1">You&apos;re all caught up for now!</p>

@@ -15,7 +15,7 @@ export default function DashboardError({
       <div className="p-4 bg-red-500/10 rounded-full mb-6 text-red-500">
         <AlertCircle className="w-12 h-12" />
       </div>
-      <h2 className="text-2xl font-semibold mb-2">Something went wrong!</h2>
+      <h2 className="text-xl sm:text-2xl font-semibold mb-2">Something went wrong!</h2>
       <p className="text-muted-foreground mb-6 max-w-md">
         We encountered an unexpected error while loading the dashboard details. Please try again.
       </p>

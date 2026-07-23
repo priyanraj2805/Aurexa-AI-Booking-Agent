@@ -75,7 +75,7 @@ function DayEventsDialog({
       <div className="relative w-full max-w-lg bg-card border border-border rounded-3xl shadow-2xl p-6 sm:p-8 animate-in zoom-in-95 duration-300">
         <div className="flex items-center justify-between mb-8">
           <div>
-            <h2 className="text-2xl font-bold tracking-tight">{dateStr}</h2>
+            <h2 className="text-xl sm:text-2xl font-bold tracking-tight">{dateStr}</h2>
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-widest mt-1">
               Daily Schedule • {events.length} Bookings
             </p>
@@ -231,17 +231,17 @@ export default function CalendarPage() {
       {/* Page header (Consistent with Business Hours) */}
       <div className="flex items-end justify-between px-1">
         <div>
-          <h1 className="text-[28px] font-semibold tracking-tight leading-none bg-gradient-to-br from-foreground to-foreground/70 bg-clip-text text-transparent">
+          <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none bg-gradient-to-br from-foreground to-foreground/70 bg-clip-text text-transparent">
             Calendar
           </h1>
-          <p className="text-muted-foreground text-sm mt-1.5 font-medium">
+          <p className="text-muted-foreground text-xs sm:text-sm mt-1.5 font-medium">
             Dynamic scheduling and appointment oversight
           </p>
         </div>
       </div>
 
       {/* Custom Tab bar (Consistent with Business Hours) */}
-      <div className="relative flex items-center gap-1 bg-secondary/50 p-1 rounded-xl w-fit border border-border">
+      <div className="relative flex items-center gap-1 bg-secondary/50 p-1 rounded-xl w-fit max-w-full overflow-x-auto border border-border">
         <div 
           className="absolute top-1 bottom-1 bg-card rounded-lg shadow-sm border border-border/50 transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"
           style={{ 
@@ -277,8 +277,8 @@ export default function CalendarPage() {
         {activeTab === "grid" ? (
           <div className="space-y-6">
             {/* Grid-specific navigation & controls (now inside the tab view) */}
-            <div className="flex flex-wrap items-center justify-between gap-4 py-2 border-b border-border/50">
-              <div className="flex items-center gap-2 p-1 bg-muted/40 rounded-xl border border-border/50">
+            <div className="flex flex-wrap items-center justify-between gap-3 sm:gap-4 py-2 border-b border-border/50">
+              <div className="flex items-center gap-1 sm:gap-2 p-1 bg-muted/40 rounded-xl border border-border/50">
                 <button
                   onClick={() => setCurrentDate(new Date())}
                   className="h-8 px-4 rounded-lg hover:bg-card hover:shadow-sm text-[10px] font-bold tracking-widest uppercase transition-all"
@@ -306,7 +306,7 @@ export default function CalendarPage() {
               </div>
 
               {/* Legend (moved inside grid tab) */}
-              <div className="flex items-center gap-6 px-4">
+              <div className="hidden sm:flex items-center gap-6 px-4">
                 <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
                   <div className="size-2 rounded-full bg-primary" /> Today
                 </div>
@@ -323,8 +323,9 @@ export default function CalendarPage() {
                 {/* Day headers */}
                 <div className="grid grid-cols-7 border-b dark:border-white/10 border-black/10 bg-muted/5">
                   {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d, i) => (
-                    <div key={d} className={`px-2 py-4 text-center text-[10px] font-semibold uppercase tracking-[0.2em] ${i === 0 || i === 6 ? "text-rose-400" : "text-muted-foreground"}`}>
-                      {d}
+                    <div key={d} className={`px-1 sm:px-2 py-3 sm:py-4 text-center text-[9px] sm:text-[10px] font-semibold uppercase tracking-[0.15em] sm:tracking-[0.2em] ${i === 0 || i === 6 ? "text-rose-400" : "text-muted-foreground"}`}>
+                      <span className="sm:hidden">{d.charAt(0)}</span>
+                      <span className="hidden sm:inline">{d}</span>
                     </div>
                   ))}
                 </div>
@@ -345,7 +346,7 @@ export default function CalendarPage() {
                         key={cellStr}
                         onClick={() => handleDayClick(day, dayEvents)}
                         className={[
-                          "group relative aspect-square sm:aspect-auto sm:min-h-[110px] p-3 cursor-pointer border-r border-b dark:border-white/10 border-black/10 transition-all duration-300",
+                          "group relative aspect-square sm:aspect-auto sm:min-h-[110px] p-1.5 sm:p-3 cursor-pointer border-r border-b dark:border-white/10 border-black/10 transition-all duration-300",
                           "hover:bg-primary/[0.03] hover:z-10",
                           isToday ? "bg-primary/[0.04] z-10" : "bg-card",
                           isWeekend ? "bg-rose-500/[0.08]" : "",
@@ -353,17 +354,17 @@ export default function CalendarPage() {
                         ].filter(Boolean).join(" ")}
                       >
                         <div className={[
-                          "size-7 flex items-center justify-center rounded-lg text-sm font-semibold transition-all group-hover:scale-110",
+                          "size-6 sm:size-7 flex items-center justify-center rounded-lg text-xs sm:text-sm font-semibold transition-all group-hover:scale-110",
                           isToday ? "bg-primary text-primary-foreground shadow-sm shadow-primary/30" : (isPast ? "text-muted-foreground/60" : "text-foreground group-hover:text-primary")
                         ].join(" ")}>
                           {day}
                         </div>
 
-                        <div className="mt-3 space-y-1">
+                        <div className="mt-2 sm:mt-3 space-y-1">
                           {dayEvents.slice(0, 3).map((ev) => (
                             <div 
                               key={ev.id} 
-                              className={`text-[9px] font-semibold px-2 py-1 rounded-md truncate border transition-all ${
+                              className={`text-[8px] sm:text-[9px] font-semibold px-1.5 sm:px-2 py-1 rounded-md truncate border transition-all ${
                                 isPast 
                                   ? "bg-muted/40 text-muted-foreground/60 border-muted-foreground/20 border-dashed" 
                                   : "bg-primary/10 text-primary border-primary/10 group-hover:border-primary/30"
@@ -373,14 +374,14 @@ export default function CalendarPage() {
                             </div>
                           ))}
                           {dayEvents.length > 3 && (
-                            <div className="text-[9px] font-bold text-muted-foreground/50 px-2 tracking-tighter">
+                            <div className="text-[8px] sm:text-[9px] font-bold text-muted-foreground/50 px-1.5 sm:px-2 tracking-tighter">
                               +{dayEvents.length - 3} OTHERS
                             </div>
                           )}
                         </div>
 
                         {/* Visual Indicators */}
-                        <div className="absolute top-3 right-3 flex flex-col gap-1">
+                        <div className="absolute top-2 right-2 sm:top-3 sm:right-3 flex flex-col gap-1">
                           {isToday && (
                              <div className="size-2 rounded-full bg-primary animate-pulse" />
                           )}

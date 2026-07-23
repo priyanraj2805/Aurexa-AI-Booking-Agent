@@ -90,8 +90,8 @@ function TranscriptPanel({
         <ArrowLeft className="size-4" /> Back to conversations
       </button>
 
-      <div className="bg-card border border-border rounded-xl p-4">
-        <h2 className="text-lg font-semibold mb-1">Chat Transcript</h2>
+      <div className="bg-card border border-border rounded-xl p-4 sm:p-4">
+        <h2 className="text-base sm:text-lg font-semibold mb-1">Chat Transcript</h2>
         <p className="text-xs text-muted-foreground mb-4 font-mono">{sessionId}</p>
 
         {loading ? (
@@ -177,8 +177,8 @@ export default function ConversationsPage() {
   return (
     <>
       <div>
-          <h1 className="text-[28px] font-semibold tracking-tight leading-none">Inbox</h1>
-        <p className="text-muted-foreground text-sm mt-1">
+          <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">Inbox</h1>
+        <p className="text-muted-foreground text-xs sm:text-sm mt-1">
           Click any session to view the full chat transcript.
         </p>
       </div>
@@ -205,7 +205,40 @@ export default function ConversationsPage() {
           <p className="text-muted-foreground text-sm py-12 text-center">No conversations yet.</p>
         ) : (
           <div className="w-full overflow-x-auto">
-            <table className="w-full border-collapse">
+            {/* Mobile card view */}
+            <div className="md:hidden divide-y divide-border">
+              {sessions.map((s) => (
+                <div
+                  key={s.id}
+                  onClick={() => setSelectedId(s.id)}
+                  className="p-4 hover:bg-secondary/50 transition-colors cursor-pointer space-y-2"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[13px] font-mono text-muted-foreground">{s.id.slice(0, 8)}…</span>
+                    <ChannelBadge channel={s.channel} />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium">{s.current_intent || "—"}</span>
+                    <span className={`text-[11px] font-semibold uppercase px-2 py-1 rounded ${statusBadge(s.session_status)}`}>
+                      {s.session_status}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-muted-foreground">
+                      {Object.keys(s.collected_data).length > 0
+                        ? Object.keys(s.collected_data).join(", ")
+                        : "—"}
+                    </span>
+                    <span className={s.missing_fields.length > 0 ? "text-yellow-500" : "text-green-500"}>
+                      {s.missing_fields.length > 0 ? `${s.missing_fields.length} missing` : "Complete"}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">{timeAgo(s.updated_at)}</div>
+                </div>
+              ))}
+            </div>
+            {/* Desktop table view */}
+            <table className="hidden md:table w-full border-collapse">
               <thead>
                 <tr>
                   <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">

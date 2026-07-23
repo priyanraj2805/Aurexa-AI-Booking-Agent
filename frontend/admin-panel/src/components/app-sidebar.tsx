@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard,
   Inbox,
@@ -20,9 +21,9 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
+  useSidebar,
 } from "@/components/ui/sidebar";
 import { useAuth } from "@/lib/auth-context";
-import { usePathname } from "next/navigation";
 
 const navApp = [
   { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
@@ -39,11 +40,29 @@ const navSettings = [
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const { user, logout } = useAuth();
   const pathname = usePathname();
+  const router = useRouter();
+  const { isMobile, setOpenMobile, openMobile } = useSidebar();
 
   const isActive = (url: string) => {
     if (url === "/dashboard") return pathname === "/dashboard";
     return pathname === url || pathname.startsWith(url + "/");
   };
+
+  // Close the mobile drawer whenever the route changes (covers clicks, back/forward).
+  React.useEffect(() => {
+    setOpenMobile(false);
+  }, [pathname, setOpenMobile]);
+
+  // Safety net: Base UI's Dialog can ignore a state flip during an active pointer
+  // event. Dispatching Escape forces it to close reliably.
+  React.useEffect(() => {
+    if (isMobile && openMobile) {
+      const t = setTimeout(() => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      }, 50);
+      return () => clearTimeout(t);
+    }
+  }, [pathname, isMobile, openMobile]);
 
   const initials = user?.full_name
     ? user.full_name
@@ -53,6 +72,17 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         .toUpperCase()
         .slice(0, 2)
     : "DS";
+
+  // On mobile: stop the default Link navigation, close the drawer, then navigate.
+  // Base UI's useRender overwrites onClick passed inside render={<Link/>}, so we
+  // pass onClick directly to SidebarMenuButton (merged via mergeProps).
+  const handleNavClick = (url: string) => (e: React.MouseEvent) => {
+    if (!isMobile) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setOpenMobile(false);
+    setTimeout(() => router.push(url), 10);
+  };
 
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -96,6 +126,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 <SidebarMenuButton
                   isActive={isActive(item.url)}
                   tooltip={item.title}
+                  onClick={handleNavClick(item.url)}
                   className={[
                     "h-10 cursor-pointer rounded-lg text-[13px] transition-all duration-200",
                     "text-muted-foreground hover:text-foreground hover:bg-accent",
@@ -142,6 +173,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 <SidebarMenuButton
                   isActive={isActive(item.url)}
                   tooltip={item.title}
+                  onClick={handleNavClick(item.url)}
                   className={[
                     "h-10 cursor-pointer rounded-lg text-[13px] transition-all duration-200",
                     "text-muted-foreground hover:text-foreground hover:bg-accent",

@@ -93,7 +93,7 @@ function FieldRow({
     <div className="border border-border rounded-lg bg-background overflow-hidden">
       {/* Collapsed row */}
       <div
-        className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-accent/30 transition-colors"
+        className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-3 cursor-pointer hover:bg-accent/30 transition-colors"
         onClick={onToggle}
       >
         <div className="flex flex-col gap-0.5">
@@ -150,8 +150,8 @@ function FieldRow({
 
       {/* Expanded editor */}
       {expanded && (
-        <div className="border-t border-border px-4 py-4 space-y-4">
-          <div className="grid grid-cols-3 gap-4">
+        <div className="border-t border-border px-3 sm:px-4 py-4 space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
               <label className="text-[12px] text-muted-foreground font-medium mb-1.5 block">
                 Field Key <span className="text-red-400">*</span>
@@ -195,7 +195,7 @@ function FieldRow({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="text-[12px] text-muted-foreground font-medium mb-1.5 block">Placeholder</label>
               <input
@@ -220,7 +220,7 @@ function FieldRow({
             </div>
           </div>
 
-          <div className="flex items-center gap-6">
+          <div className="flex flex-wrap items-center gap-4 sm:gap-6">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
@@ -445,7 +445,7 @@ export default function AgentCorePage() {
               <div className="h-3 w-64 bg-secondary rounded" />
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
             <div className="space-y-2"><div className="h-4 w-24 bg-secondary rounded" /><div className="h-10 w-full bg-secondary rounded-md" /></div>
             <div className="space-y-2"><div className="h-4 w-24 bg-secondary rounded" /><div className="h-10 w-full bg-secondary rounded-md" /></div>
             <div className="col-span-2 space-y-2"><div className="h-4 w-32 bg-secondary rounded" /><div className="h-20 w-full bg-secondary rounded-md" /></div>
@@ -453,7 +453,7 @@ export default function AgentCorePage() {
         </div>
 
         {/* Fields Box */}
-        <div className="bg-card border border-border rounded-xl p-6">
+      <div className="bg-card border border-border rounded-xl p-4 sm:p-6">
           <div className="flex items-center justify-between mb-5">
             <div className="flex items-center gap-3">
               <div className="size-9 rounded-lg bg-secondary" />
@@ -484,10 +484,10 @@ export default function AgentCorePage() {
 
   return (
     <>
-      <div className="flex items-end justify-between mb-2">
+      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-2">
         <div>
-          <h1 className="text-[28px] font-semibold tracking-tight leading-none">Agent Personalisation</h1>
-          <p className="text-muted-foreground text-sm mt-1">
+          <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">Agent Personalisation</h1>
+          <p className="text-muted-foreground text-xs sm:text-sm mt-1">
             Define how your AI acts and what data it must collect.
           </p>
         </div>
@@ -506,7 +506,7 @@ export default function AgentCorePage() {
       </div>
 
       {/* Agent Persona — full width */}
-      <div className="bg-card border border-border rounded-xl p-6">
+      <div className="bg-card border border-border rounded-xl p-4 sm:p-6">
         <div className="flex items-center gap-3 mb-5">
           <div className="flex items-center justify-center size-9 rounded-lg bg-primary/10 text-primary">
             <Bot className="size-5" />
@@ -588,8 +588,8 @@ export default function AgentCorePage() {
       </div>
 
       {/* Field Definitions — full width */}
-      <div className="bg-card border border-border rounded-xl p-6">
-        <div className="flex items-center justify-between mb-5">
+      <div className="bg-card border border-border rounded-xl p-4 sm:p-6">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
           <div className="flex items-center gap-3">
             <div className="flex items-center justify-center size-9 rounded-lg bg-primary/10 text-primary">
               <Sparkles className="size-5" />
@@ -638,7 +638,7 @@ export default function AgentCorePage() {
       </div>
 
       {/* Organization Settings */}
-      <div className="bg-card border border-border rounded-xl p-6">
+      <div className="bg-card border border-border rounded-xl p-4 sm:p-6">
         <div className="flex items-center gap-3 mb-5">
           <div className="flex items-center justify-center size-9 rounded-lg bg-primary/10 text-primary">
             <CalendarDays className="size-5" />
@@ -658,7 +658,7 @@ export default function AgentCorePage() {
               <ShieldCheck className="size-5" />
             </div>
             <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between gap-4">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 sm:gap-4">
                 <div>
                   <p className="text-[13px] font-semibold">OTP Verification</p>
                   <p className="text-[12px] text-muted-foreground mt-0.5">
@@ -694,10 +694,10 @@ export default function AgentCorePage() {
       </div>
 
       {/* Organization Info */}
-      <div className="bg-card border border-border rounded-xl p-6">
+      <div className="bg-card border border-border rounded-xl p-4 sm:p-6">
         <h3 className="text-base font-semibold mb-5">Organization Info</h3>
 
-        <div className="grid grid-cols-3 gap-5">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
           <div>
             <label className="text-[13px] text-muted-foreground font-medium mb-2 block">Org Name</label>
             <input

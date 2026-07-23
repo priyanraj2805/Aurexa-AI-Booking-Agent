@@ -121,9 +121,9 @@ function WeeklyScheduleTab() {
   return (
     <div className="space-y-6">
       {/* Meta row */}
-      <div className="bg-card border border-border rounded-xl p-5">
+      <div className="bg-card border border-border rounded-xl p-4 sm:p-5">
         <h3 className="text-sm font-semibold mb-4 text-muted-foreground uppercase tracking-wider">Global Settings</h3>
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <div>
             <label className="block text-xs font-medium text-muted-foreground mb-1.5">Slot Duration</label>
             <select
@@ -175,8 +175,8 @@ function WeeklyScheduleTab() {
         </div>
         <div className="divide-y divide-border">
           {schedule.days.map((day, idx) => (
-            <div key={day.day_of_week} className={`px-5 py-4 flex flex-col gap-3 transition-colors ${day.is_active ? "" : "opacity-50"}`}>
-              <div className="flex items-center gap-4">
+            <div key={day.day_of_week} className={`px-4 sm:px-5 py-4 flex flex-col gap-3 transition-colors ${day.is_active ? "" : "opacity-50"}`}>
+              <div className="flex flex-wrap items-center gap-3 sm:gap-4">
                 {/* Toggle */}
                 <button
                   aria-label={day.is_active ? `Deactivate ${DAY_NAMES[day.day_of_week]}` : `Activate ${DAY_NAMES[day.day_of_week]}`}
@@ -188,11 +188,11 @@ function WeeklyScheduleTab() {
                   <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${day.is_active ? "translate-x-4" : "translate-x-0"}`} />
                 </button>
                 {/* Day name */}
-                <span className="w-24 text-sm font-medium">{DAY_NAMES[day.day_of_week]}</span>
+                <span className="w-20 sm:w-24 text-sm font-medium">{DAY_NAMES[day.day_of_week]}</span>
                 {/* Times */}
                 {day.is_active && (
                   <>
-                    <div className="flex items-center gap-2 flex-1">
+                    <div className="flex items-center gap-2 flex-1 min-w-[140px]">
                       <TimeSelect
                         value={day.open_time}
                         onChange={(v) => updateDay(idx, "open_time", v)}
@@ -206,7 +206,7 @@ function WeeklyScheduleTab() {
                       />
                     </div>
                     {/* Break */}
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs text-muted-foreground">Break:</span>
                       <TimeSelect
                         value={day.break_start ?? ""}
@@ -234,7 +234,7 @@ function WeeklyScheduleTab() {
       </div>
 
       {/* Save */}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <button
           onClick={handleSave}
           disabled={saving}
@@ -304,9 +304,9 @@ function ExceptionsTab() {
   return (
     <div className="space-y-6">
       {/* Add form */}
-      <div className="bg-card border border-border rounded-xl p-5">
+      <div className="bg-card border border-border rounded-xl p-4 sm:p-5">
         <h3 className="text-sm font-semibold mb-4 text-muted-foreground uppercase tracking-wider">Add Exception</h3>
-        <div className="grid grid-cols-4 gap-4 items-end">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-end">
           <div>
             <label className="block text-xs font-medium text-muted-foreground mb-1.5">Date</label>
             <CustomDatePicker
@@ -376,7 +376,7 @@ function ExceptionsTab() {
       </div>
 
       {/* Filter */}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <span className="text-xs text-muted-foreground">Filter:</span>
         <select
           aria-label="Filter Year"
@@ -421,7 +421,7 @@ function ExceptionsTab() {
       ) : error ? (
         <ErrorState message={error} />
       ) : !exceptions || exceptions.length === 0 ? (
-        <div className="bg-card border border-border rounded-xl p-10 flex flex-col items-center text-center">
+        <div className="bg-card border border-border rounded-xl p-6 sm:p-10 flex flex-col items-center text-center">
           <CalendarOff className="size-10 text-muted-foreground/30 mb-3" />
           <p className="text-sm text-muted-foreground">No exceptions for this period.</p>
           <p className="text-xs text-muted-foreground/60 mt-1">Add closures or special hours above.</p>
@@ -432,15 +432,15 @@ function ExceptionsTab() {
             <thead>
               <tr>
                 {["Date", "Type", "Hours / Reason", ""].map((h) => (
-                  <th key={h} className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">{h}</th>
+                  <th key={h} className="px-2 sm:px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {exceptions.map((exc) => (
                 <tr key={exc.id} className="hover:bg-secondary/50 transition-colors">
-                  <td className="px-4 py-3 text-sm border-b border-border font-medium">{exc.exception_date}</td>
-                  <td className="px-4 py-3 text-sm border-b border-border">
+                  <td className="px-2 sm:px-4 py-3 text-sm border-b border-border font-medium">{exc.exception_date}</td>
+                  <td className="px-2 sm:px-4 py-3 text-sm border-b border-border">
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${
                       exc.exception_type === "CLOSED"
                         ? "bg-red-500/10 text-red-500"
@@ -450,12 +450,12 @@ function ExceptionsTab() {
                       {exc.exception_type === "CLOSED" ? "Closed" : "Custom Hours"}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-sm border-b border-border text-muted-foreground">
+                  <td className="px-2 sm:px-4 py-3 text-sm border-b border-border text-muted-foreground">
                     {exc.exception_type === "CUSTOM_HOURS" && exc.custom_open && exc.custom_close
                       ? `${exc.custom_open} – ${exc.custom_close}`
                       : exc.reason ?? "—"}
                   </td>
-                  <td className="px-4 py-3 border-b border-border">
+                  <td className="px-2 sm:px-4 py-3 border-b border-border">
                     <button
                       onClick={() => exc.id && handleDelete(exc.id)}
                       disabled={deleting === exc.id}
@@ -501,12 +501,12 @@ function PreviewTab() {
 
   return (
     <div className="space-y-6">
-      <div className="bg-card border border-border rounded-xl p-5">
+      <div className="bg-card border border-border rounded-xl p-4 sm:p-5">
         <h3 className="text-sm font-semibold mb-1 text-muted-foreground uppercase tracking-wider">Preview Computed Slots</h3>
         <p className="text-xs text-muted-foreground mb-4">
           See exactly which time slots your schedule will generate for any date range. Great for verifying before going live.
         </p>
-        <div className="flex items-end gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-end gap-3 sm:gap-4">
           <div>
             <label className="block text-xs font-medium text-muted-foreground mb-1.5">Start Date</label>
             <CustomDatePicker
@@ -538,7 +538,7 @@ function PreviewTab() {
       </div>
 
       {loading && (
-        <div className="grid grid-cols-2 gap-3 animate-pulse mt-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 animate-pulse mt-6">
           {[...Array(6)].map((_, i) => (
             <div key={i} className="bg-card border border-border rounded-xl p-4 space-y-3">
                <div className="h-4 w-28 bg-secondary rounded" />
@@ -554,7 +554,7 @@ function PreviewTab() {
       {error && <ErrorState message={error} />}
 
       {!loading && triggered && preview && (
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {preview.map((day) => (
             <div key={day.date} className="bg-card border border-border rounded-xl p-4">
               <div className="text-sm font-semibold mb-2">
@@ -582,7 +582,7 @@ function PreviewTab() {
       )}
 
       {!loading && !triggered && (
-        <div className="bg-card border border-border rounded-xl p-10 flex flex-col items-center text-center">
+        <div className="bg-card border border-border rounded-xl p-6 sm:p-10 flex flex-col items-center text-center">
           <Eye className="size-10 text-muted-foreground/30 mb-3" />
           <p className="text-sm text-muted-foreground">Set your date range and click Preview to see computed slots.</p>
         </div>
@@ -961,15 +961,15 @@ export default function AvailabilityPage() {
     <>
       <div className="flex items-end justify-between mb-6">
         <div>
-          <h1 className="text-[28px] font-semibold tracking-tight leading-none">Business Hours</h1>
-          <p className="text-muted-foreground text-sm mt-1">
+          <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">Business Hours</h1>
+          <p className="text-muted-foreground text-xs sm:text-sm mt-1">
             Define your weekly schedule once — the booking engine handles everything else automatically.
           </p>
         </div>
       </div>
 
       {/* Tab bar with sliding indicator */}
-      <div className="relative flex items-center gap-1 bg-secondary/50 p-1 rounded-xl mb-6 w-fit border border-border">
+      <div className="relative flex items-center gap-1 bg-secondary/50 p-1 rounded-xl mb-6 w-fit max-w-full overflow-x-auto border border-border">
         {/* The sliding background pill */}
         <div 
           className="absolute top-1 bottom-1 bg-card rounded-lg shadow-sm border border-border/50 transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"
