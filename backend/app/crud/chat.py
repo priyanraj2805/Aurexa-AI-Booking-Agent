@@ -1,6 +1,7 @@
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm.attributes import flag_modified
@@ -292,6 +293,8 @@ async def save_message(
     role: str,
     content: str,
     metadata: dict = None,
+    sender_type: str = "ai",
+    human_agent_id: str = None,
 ) -> ChatMessage:
     """Persist a single chat message (user or agent)."""
     msg = ChatMessage(
@@ -299,6 +302,8 @@ async def save_message(
         role=role,
         content=content,
         metadata_=metadata,
+        sender_type=sender_type,
+        human_agent_id=uuid.UUID(human_agent_id) if human_agent_id else None,
     )
     db.add(msg)
     await db.commit()
@@ -319,3 +324,95 @@ async def get_session_messages(
         .limit(limit)
     )
     return result.scalars().all()
+
+
+# ── Human Handoff helpers ────────────────────────────────────────────
+
+
+async def set_human_takeover(
+    db: AsyncSession,
+    session_id: str,
+    admin_id: str,
+    admin_name: str,
+) -> Optional[ChatSession]:
+    """Atomically set human takeover for a conversation."""
+    result = await db.execute(
+        select(ChatSession)
+        .where(ChatSession.id == session_id)
+        .with_for_update(nowait=True)
+    )
+    session = result.scalars().first()
+
+    if not session:
+        return None
+
+    session.human_agent_id = uuid.UUID(admin_id)
+    session.human_agent_active = True
+    session.ai_paused_at = func.now()
+    session.session_status = "human_active"
+
+    # Save system message
+    await save_message(
+        db, session_id, "agent",
+        f"👨‍💼 {admin_name} joined the chat",
+        sender_type="system",
+        metadata={"human_joined": True, "admin_name": admin_name}
+    )
+
+    await db.commit()
+    await db.refresh(session)
+    return session
+
+
+async def release_human_control(
+    db: AsyncSession,
+    session_id: str,
+) -> Optional[ChatSession]:
+    """Atomically release human control back to AI."""
+    result = await db.execute(
+        select(ChatSession)
+        .where(ChatSession.id == session_id)
+        .with_for_update(nowait=True)
+    )
+    session = result.scalars().first()
+
+    if not session:
+        return None
+
+    session.human_agent_id = None
+    session.human_agent_active = False
+    session.ai_paused_at = None
+    session.session_status = "active"
+
+    # Save system message
+    await save_message(
+        db, session_id, "agent",
+        "👨‍💼 Support agent left the chat. AI assistant resumed.",
+        sender_type="system",
+        metadata={"human_left": True}
+    )
+
+    await db.commit()
+    await db.refresh(session)
+    return session
+
+
+async def save_human_message(
+    db: AsyncSession,
+    session_id: str,
+    admin_id: str,
+    content: str,
+) -> ChatMessage:
+    """Save a message from human agent."""
+    msg = ChatMessage(
+        session_id=uuid.UUID(session_id),
+        role="agent",
+        content=content,
+        sender_type="human",
+        human_agent_id=uuid.UUID(admin_id),
+        metadata_={"human_agent": True},
+    )
+    db.add(msg)
+    await db.commit()
+    await db.refresh(msg)
+    return msg

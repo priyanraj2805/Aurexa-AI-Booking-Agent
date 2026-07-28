@@ -19,6 +19,8 @@ from app.models.organization import Organization
 from app.models.config import OrgConfig, MeetingMode, MeetingProviderDefault
 from app.models.session import ChatSession
 from app.models.message import ChatMessage
+from app.models.user import User
+from datetime import datetime
 from app.models.booking import BusinessSchedule
 from app.engine.slot_engine import (
     compute_slot_inventory,
@@ -198,9 +200,13 @@ async def get_widget_config(
 
 
 class WidgetMessageItem(BaseModel):
+    id: str
     role: str
     content: str
     created_at: str
+    sender_type: str = "ai"
+    human_agent_name: Optional[str] = None
+    metadata: Optional[dict] = None
 
 
 @router.get("/history", response_model=list[WidgetMessageItem])
@@ -214,11 +220,15 @@ async def get_widget_history(
     widget_token: Optional[str] = Query(
         default=None, description="Widget token (recommended)"
     ),
+    since: Optional[str] = Query(
+        default=None, description="Only return messages after this timestamp (ISO format)"
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Public endpoint — returns message history for widget session resumption.
     Validates the session belongs to the org identified by api_key or widget_token.
+    Supports incremental fetch via since parameter.
     """
     if not api_key and not widget_token:
         raise HTTPException(
@@ -244,25 +254,39 @@ async def get_widget_history(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    msg_result = await db.execute(
-        select(ChatMessage)
+    query = (
+        select(ChatMessage, User.full_name.label("human_agent_name"))
+        .outerjoin(User, ChatMessage.human_agent_id == User.id)
         .where(ChatMessage.session_id == session_id)
         .order_by(ChatMessage.created_at.asc())
         .limit(200)
     )
-    messages = msg_result.scalars().all()
+    
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace('Z', '+00:00'))
+            query = query.where(ChatMessage.created_at > since_dt)
+        except ValueError:
+            pass  # Invalid timestamp, ignore filter
+
+    msg_result = await db.execute(query)
+    rows = msg_result.all()
 
     return [
         WidgetMessageItem(
-            role=m.role,
+            id=str(row.ChatMessage.id),
+            role=row.ChatMessage.role,
             content=(
-                extract_user_visible_text(m.content)[0]
-                if str(m.role).lower() in {"agent", "assistant", "ai"}
-                else m.content
+                extract_user_visible_text(row.ChatMessage.content)[0]
+                if str(row.ChatMessage.role).lower() in {"agent", "assistant", "ai"}
+                else row.ChatMessage.content
             ),
-            created_at=m.created_at.isoformat() if m.created_at else "",
+            created_at=row.ChatMessage.created_at.isoformat() if row.ChatMessage.created_at else "",
+            sender_type=getattr(row.ChatMessage, "sender_type", "ai"),
+            human_agent_name=row.human_agent_name,
+            metadata=getattr(row.ChatMessage, "metadata_", None),
         )
-        for m in messages
+        for row in rows
     ]
 
 

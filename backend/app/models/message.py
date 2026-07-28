@@ -20,6 +20,15 @@ class ChatMessage(Base):
     metadata_ = Column("metadata", JSONB, nullable=True)  # directive, field_meta, intent, etc.
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+    # Human handoff fields
+    sender_type = Column(String(20), default="ai", nullable=False)  # "user" | "ai" | "human"
+    human_agent_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     __table_args__ = (
         Index("ix_msg_session_created", "session_id", "created_at"),
+        Index("ix_msg_sender_type", "sender_type"),
     )

@@ -1,8 +1,11 @@
 "use client";
 
-import { useState } from "react";
-import { Loader2, AlertCircle, ArrowLeft, User, Bot, Globe, MessageCircle } from "lucide-react";
-import { useConversations, useTranscript } from "@/hooks/use-dashboard";
+import { useState, useRef, useEffect } from "react";
+import { Loader2, AlertCircle, ArrowLeft, User, Bot, Globe, MessageCircle, Headset, Bot as BotIcon, Send } from "lucide-react";
+import { useConversations, useTranscript, takeoverConversation, releaseConversation, sendHumanMessage } from "@/hooks/use-dashboard";
+import { useAuth } from "@/lib/auth-context";
+import { api } from "@/lib/api";
+import { toast } from "sonner";
 
 function statusBadge(status: string) {
   switch (status) {
@@ -79,20 +82,149 @@ function TranscriptPanel({
   sessionId: string;
   onBack: () => void;
 }) {
-  const { data: messages, loading, error } = useTranscript(sessionId);
+  const { user } = useAuth();
+  const { data: messages, loading, error, refetch } = useTranscript(sessionId);
+  const [humanActive, setHumanActive] = useState(false);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [pendingMessage, setPendingMessage] = useState("");
+  const [sendingMessage, setSendingMessage] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const orgId = user?.org_id ?? "";
+
+  // Auto-scroll to bottom when messages change
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  // Detect if human is currently active by scanning ALL messages for the
+  // most recent ``human_joined`` / ``human_left`` event. Using the last
+  // message alone is unreliable because admin replies land *after* the
+  // join event and push it out of the tail position.
+  useEffect(() => {
+    if (!messages || messages.length === 0) return;
+    let lastJoined = -1;
+    let lastLeft = -1;
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      const md = (m as { metadata?: Record<string, unknown> }).metadata;
+      if (md && typeof md === "object") {
+        if ((md as Record<string, unknown>).human_joined) lastJoined = i;
+        if ((md as Record<string, unknown>).human_left) lastLeft = i;
+      }
+    }
+    if (lastJoined > lastLeft) {
+      setHumanActive(true);
+    } else if (lastLeft > lastJoined) {
+      setHumanActive(false);
+    }
+  }, [messages]);
+
+  const handleTakeover = async () => {
+    if (!orgId) {
+      toast.error("Organization ID not found");
+      return;
+    }
+    setActionLoading(true);
+    try {
+      const result = await takeoverConversation(orgId, sessionId);
+      if (result.success) {
+        setHumanActive(true);
+        toast.success(result.message);
+        await refetch();
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to take over conversation");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleRelease = async () => {
+    if (!orgId) {
+      toast.error("Organization ID not found");
+      return;
+    }
+    setActionLoading(true);
+    try {
+      const result = await releaseConversation(orgId, sessionId);
+      if (result.success) {
+        setHumanActive(false);
+        toast.success(result.message);
+        await refetch();
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to release conversation");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleSendMessage = async () => {
+    const content = pendingMessage.trim();
+    if (!content || !humanActive || !orgId) return;
+
+    setSendingMessage(true);
+    try {
+      await api.post(`/organizations/${orgId}/conversations/${sessionId}/send-human-message`, {
+        content,
+      });
+      setPendingMessage("");
+      toast.success("Message sent");
+      await refetch();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to send message");
+    } finally {
+      setSendingMessage(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
-      <button
-        onClick={onBack}
-        className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-      >
-        <ArrowLeft className="size-4" /> Back to conversations
-      </button>
+      <div className="flex items-center justify-between">
+        <button
+          onClick={onBack}
+          className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <ArrowLeft className="size-4" /> Back to conversations
+        </button>
+
+        {/* Human Control Buttons */}
+        <div className="flex items-center gap-2">
+          {!humanActive ? (
+            <button
+              onClick={handleTakeover}
+              disabled={actionLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Headset className="size-4" />
+              {actionLoading ? "Connecting..." : "Take Control"}
+            </button>
+          ) : (
+            <button
+              onClick={handleRelease}
+              disabled={actionLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <BotIcon className="size-4" />
+              {actionLoading ? "Releasing..." : "Release to AI"}
+            </button>
+          )}
+        </div>
+      </div>
 
       <div className="bg-card border border-border rounded-xl p-4 sm:p-4">
-        <h2 className="text-base sm:text-lg font-semibold mb-1">Chat Transcript</h2>
-        <p className="text-xs text-muted-foreground mb-4 font-mono">{sessionId}</p>
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-base sm:text-lg font-semibold">Chat Transcript</h2>
+            <p className="text-xs text-muted-foreground font-mono">{sessionId}</p>
+          </div>
+          {humanActive && (
+            <span className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full bg-blue-500/10 text-blue-500">
+              <Headset className="size-3" />
+              You are controlling this chat
+            </span>
+          )}
+        </div>
 
         {loading ? (
           <div className="space-y-4 max-h-[60vh] overflow-hidden pr-2 animate-pulse mt-2">
@@ -123,41 +255,116 @@ function TranscriptPanel({
           </p>
         ) : (
           <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-2">
-            {messages.map((m) => (
-              <div
-                key={m.id}
-                className={`flex gap-3 ${m.role === "user" ? "justify-end" : "justify-start"}`}
-              >
-                {m.role === "agent" && (
-                  <div className="flex-shrink-0 mt-1">
-                    <div className="size-7 rounded-full bg-primary/10 flex items-center justify-center">
-                      <Bot className="size-3.5 text-primary" />
+            {messages.map((m) => {
+              const isHumanMessage = m.sender_type === "human";
+              const isSystemMessage = m.sender_type === "system" || (m.metadata && typeof m.metadata === "object" && ("human_joined" in m.metadata || "human_left" in m.metadata));
+
+              // System notification messages (human joined/left)
+              if (isSystemMessage) {
+                return (
+                  <div key={m.id} className="flex justify-center">
+                    <span className="text-xs text-muted-foreground bg-secondary/50 px-3 py-1.5 rounded-full">
+                      {resolveTranscriptText(m.content) || "—"}
+                    </span>
+                  </div>
+                );
+              }
+
+              // Human agent message - different styling
+              if (isHumanMessage) {
+                return (
+                  <div key={m.id} className="flex gap-3 justify-start">
+                    <div className="flex-shrink-0 mt-1">
+                      <div className="size-7 rounded-full bg-blue-500 flex items-center justify-center">
+                        <Headset className="size-3.5 text-white" />
+                      </div>
+                    </div>
+                    <div className="max-w-[75%] rounded-xl px-4 py-2.5 text-sm leading-relaxed bg-blue-500/10 text-foreground rounded-bl-sm border border-blue-500/20">
+                      <p className="whitespace-pre-wrap">
+                        {resolveTranscriptText(m.content) || "—"}
+                      </p>
+                      <span className="block text-[10px] mt-1 opacity-60">
+                        {formatTime(m.created_at)}
+                      </span>
                     </div>
                   </div>
-                )}
+                );
+              }
+
+              // Regular user or AI message
+              return (
                 <div
-                  className={`max-w-[75%] rounded-xl px-4 py-2.5 text-sm leading-relaxed ${
-                    m.role === "user"
-                      ? "bg-primary text-primary-foreground rounded-br-sm"
-                      : "bg-secondary text-secondary-foreground rounded-bl-sm"
-                  }`}
+                  key={m.id}
+                  className={`flex gap-3 ${m.role === "user" ? "justify-end" : "justify-start"}`}
                 >
-                  <p className="whitespace-pre-wrap">
-                    {resolveTranscriptText(m.content) || "—"}
-                  </p>
-                  <span className="block text-[10px] mt-1 opacity-60">
-                    {formatTime(m.created_at)}
-                  </span>
-                </div>
-                {m.role === "user" && (
-                  <div className="flex-shrink-0 mt-1">
-                    <div className="size-7 rounded-full bg-muted flex items-center justify-center">
-                      <User className="size-3.5 text-muted-foreground" />
+                  {m.role === "agent" && (
+                    <div className="flex-shrink-0 mt-1">
+                      <div className="size-7 rounded-full bg-primary/10 flex items-center justify-center">
+                        <Bot className="size-3.5 text-primary" />
+                      </div>
                     </div>
+                  )}
+                  <div
+                    className={`max-w-[75%] rounded-xl px-4 py-2.5 text-sm leading-relaxed ${
+                      m.role === "user"
+                        ? "bg-primary text-primary-foreground rounded-br-sm"
+                        : "bg-secondary text-secondary-foreground rounded-bl-sm"
+                    }`}
+                  >
+                    <p className="whitespace-pre-wrap">
+                      {resolveTranscriptText(m.content) || "—"}
+                    </p>
+                    <span className="block text-[10px] mt-1 opacity-60">
+                      {formatTime(m.created_at)}
+                    </span>
                   </div>
+                  {m.role === "user" && (
+                    <div className="flex-shrink-0 mt-1">
+                      <div className="size-7 rounded-full bg-muted flex items-center justify-center">
+                        <User className="size-3.5 text-muted-foreground" />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            <div ref={messagesEndRef} />
+          </div>
+        )}
+
+        {/* Human Message Input (only visible when human is active) */}
+        {humanActive && (
+          <div className="mt-4 pt-4 border-t border-border">
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={pendingMessage}
+                onChange={(e) => setPendingMessage(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSendMessage();
+                  }
+                }}
+                placeholder="Type a message as support agent..."
+                disabled={sendingMessage}
+                className="flex-1 px-4 py-2.5 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              />
+              <button
+                onClick={handleSendMessage}
+                disabled={!pendingMessage.trim() || sendingMessage}
+                className="flex items-center justify-center size-10 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {sendingMessage ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Send className="size-4" />
                 )}
-              </div>
-            ))}
+              </button>
+            </div>
+            <p className="text-xs text-muted-foreground mt-2">
+              Your messages will be sent to the user. AI is paused while you control this chat.
+            </p>
           </div>
         )}
       </div>

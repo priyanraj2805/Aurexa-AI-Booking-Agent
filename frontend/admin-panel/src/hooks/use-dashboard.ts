@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { api } from "@/lib/api";
+import { api, uploadFile } from "@/lib/api";
 
 // ── Types matching backend response schemas ──────
 
@@ -300,4 +300,136 @@ export async function connectZoom() {
 
 export async function disconnectZoom() {
   return api.post<{ status: string }>("/dashboard/meeting-providers/zoom/disconnect");
+}
+
+// ── Human Handoff API ────────────────────────────
+
+export interface TakeoverResponse {
+  success: boolean;
+  conversation_id: string;
+  message: string;
+  previous_messages: {
+    id: string;
+    role: string;
+    content: string;
+    sender_type: string;
+    human_agent_id: string | null;
+    human_agent_name: string | null;
+    created_at: string;
+  }[];
+}
+
+export interface ReleaseResponse {
+  success: boolean;
+  conversation_id: string;
+  message: string;
+}
+
+export interface SendHumanMessageResponse {
+  success: boolean;
+  message: {
+    id: string;
+    content: string;
+    sender_type: string;
+    admin_name: string;
+    created_at: string;
+  };
+}
+
+export async function takeoverConversation(orgId: string, conversationId: string) {
+  return api.post<TakeoverResponse>(
+    `/organizations/${orgId}/conversations/${conversationId}/takeover`
+  );
+}
+
+export async function releaseConversation(orgId: string, conversationId: string) {
+  return api.post<ReleaseResponse>(
+    `/organizations/${orgId}/conversations/${conversationId}/release`
+  );
+}
+
+export async function sendHumanMessage(orgId: string, conversationId: string, content: string) {
+  return api.post<SendHumanMessageResponse>(
+    `/organizations/${orgId}/conversations/${conversationId}/send-human-message`,
+    { content }
+  );
+}
+
+// ── Knowledge Base (Vectorless RAG) Types & Hooks ──────────────────────────
+
+export const MAX_DOCS_PER_ORG = 10;
+
+export interface DocumentListItem {
+  id: string;
+  filename: string;
+  pages: number;
+  status: string;
+  uploaded_at?: string | null;
+}
+
+export interface DocumentUploadResponse {
+  id: string;
+  filename: string;
+  pages: number;
+  status: string;
+}
+
+export interface CrawlResponse {
+  crawl_id: string;
+  status: string;
+  message?: string;
+}
+
+export interface CrawlStatusResponse {
+  crawl_id: string;
+  status: string;
+  pages_crawled?: number | null;
+}
+
+function useApiNullable<T>(path: string | null, deps: unknown[] = []) {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refetch = useCallback(async () => {
+    if (!path) { setData(null); setLoading(false); return; }
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await api.get<T>(path);
+      setData(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch");
+    } finally {
+      setLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, ...deps]);
+
+  useEffect(() => { refetch(); }, [refetch]);
+
+  return { data, loading, error, refetch, setData };
+}
+
+export function useDocuments() {
+  return useApiNullable<DocumentListItem[]>("/documents/documents");
+}
+
+export async function uploadPdfDocument(file: File): Promise<DocumentUploadResponse> {
+  return uploadFile<DocumentUploadResponse>("/documents/documents/upload", file, "file");
+}
+
+export async function deletePdfDocument(docId: string): Promise<void> {
+  await api.del(`/documents/documents/${docId}`);
+}
+
+export async function startWebsiteCrawl(url: string): Promise<CrawlResponse> {
+  return api.post<CrawlResponse>("/documents/website/crawl", { url });
+}
+
+export function useCrawlStatus(crawlId: string | null) {
+  return useApiNullable<CrawlStatusResponse>(
+    crawlId ? `/documents/website/crawl/status/${crawlId}` : null,
+    [crawlId]
+  );
 }

@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useAgentConfig, type PersonaConfig, type FieldDefinition, type FieldType } from "@/hooks/use-dashboard";
 import { api } from "@/lib/api";
+import { KnowledgeBaseSection } from "./components/knowledge-base";
 
 const TONE_OPTIONS = [
   { value: "professional", label: "Professional" },
@@ -737,6 +738,9 @@ export default function AgentCorePage() {
           </div>
         </div>
       </div>
+
+      {/* Knowledge Base (Vectorless RAG: PDF upload + website crawl) */}
+      <KnowledgeBaseSection />
     </>
   );
 }

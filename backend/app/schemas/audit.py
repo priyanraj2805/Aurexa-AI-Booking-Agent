@@ -28,6 +28,10 @@ class AuditAction(str, Enum):
     # Organization operations
     ORG_CREATE = "org.create"
     ORG_UPDATE = "org.update"
+    
+    # Conversation handoff operations
+    CONVERSATION_TAKEOVER = "conversation.takeover"
+    CONVERSATION_RELEASE = "conversation.release"
 
 
 class AuditLogCreate(BaseModel):

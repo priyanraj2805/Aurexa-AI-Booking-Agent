@@ -19,6 +19,11 @@ langgraph>=0.1.1
 langchain-core>=0.2.0
 langchain-groq>=0.1.0
 
+# ── RAG Dependencies ──────────────────────
+PyMuPDF>=1.23.0          # fitz for PDF processing
+firecrawl-py>=1.0.0      # Firecrawl API
+python-multipart>=0.0.9  # required for FastAPI UploadFile endpoints
+
 # ── Test Dependencies ──────────────────────
 pytest>=8.0.0
 pytest-asyncio>=0.23.0

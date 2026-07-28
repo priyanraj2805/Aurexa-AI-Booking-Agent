@@ -74,6 +74,9 @@
       this._directiveDrafts = {};
       this._activeFieldMeta = null;
       this._skipToken = "__DOTSTARK_SKIP__";
+      this._lastMessageTimestamp = null;
+      this._pollInterval = null;
+      this._humanActive = false;
     }
 
     _sessionStorageKey() {
@@ -122,25 +125,100 @@
       }
     }
 
-    async _loadHistory() {
+    async _loadHistory(sinceTimestamp = null) {
       if (!this.sessionId || !CONFIG.widgetToken) return false;
       try {
         const base = CONFIG.apiBase.replace(/\/api\/v1\/?$/, "") + "/api/v1";
-        const url = `${base}/widget/history?session_id=${encodeURIComponent(this.sessionId)}&widget_token=${encodeURIComponent(CONFIG.widgetToken)}`;
+        let url = `${base}/widget/history?session_id=${encodeURIComponent(this.sessionId)}&widget_token=${encodeURIComponent(CONFIG.widgetToken)}`;
+        if (sinceTimestamp) {
+          url += `&since=${encodeURIComponent(sinceTimestamp)}`;
+        }
         const res = await fetch(url);
         if (!res.ok) return false;
         const messages = await res.json();
         if (!messages || messages.length === 0) return false;
         for (const m of messages) {
+          const isHumanJoined = m.metadata && m.metadata.human_joined;
+          const isHumanLeft = m.metadata && m.metadata.human_left;
           const content =
             m.role === "agent"
               ? this._resolveAssistantText(m.content)
               : String(m.content || "");
-          if (content) this._appendBubble(m.role, content);
+          // Skip appending human_joined/human_left system messages (we show them in header instead)
+          if (!isHumanJoined && !isHumanLeft && content) {
+            const meta = m.sender_type === "human" ? { admin_name: m.human_agent_name } : {};
+            this._appendBubble(m.role, content, meta);
+          }
+          // Track the latest message timestamp for incremental polling
+          if (m.created_at) {
+            this._lastMessageTimestamp = m.created_at;
+          }
+          // Check for human_left in metadata
+          if (m.metadata && m.metadata.human_left) {
+            this._onHumanLeft();
+          }
+          // Check for human_joined in metadata
+          if (m.metadata && m.metadata.human_joined) {
+            const adminName = m.metadata.admin_name || "Support agent";
+            this._updateHumanStatus(adminName, true);
+            this._startFastPolling();
+          }
+          // Also trigger fast polling if a human agent sent a message
+          if (m.sender_type === "human") {
+            this._startFastPolling();
+          }
         }
         return true;
       } catch (e) {
         return false;
+      }
+    }
+
+    /* ─────────── POLLING FOR HUMAN HANDOFF ─────────── */
+    _startPolling() {
+      if (this._pollInterval) return;
+      // Fast polling (3s) when human is active, slow polling (10s) when inactive
+      const interval = this._humanActive ? 3000 : 10000;
+      this._pollInterval = setInterval(() => {
+        if (this.isOpen && this.sessionId) {
+          this._loadHistory(this._lastMessageTimestamp);
+        }
+      }, interval);
+    }
+
+    _stopPolling(preserveHumanActive = false) {
+      if (this._pollInterval) {
+        clearInterval(this._pollInterval);
+        this._pollInterval = null;
+      }
+      if (!preserveHumanActive) {
+        this._humanActive = false;
+      }
+    }
+
+    _startFastPolling() {
+      if (this._humanActive) return;
+      this._humanActive = true;
+      this._stopPolling(true);
+      this._startPolling();
+    }
+
+    _onHumanLeft() {
+      this._updateHumanStatus(null, false);
+      this._stopPolling();
+    }
+
+    _updateHumanStatus(adminName, isActive) {
+      const statusText = this.shadowRoot.getElementById("status-text");
+      const statusDot = this.shadowRoot.querySelector(".status-dot");
+      if (!statusText) return;
+      
+      if (isActive && adminName) {
+        statusText.textContent = `👨‍💼 ${adminName} is now assisting you`;
+        if (statusDot) statusDot.style.background = "#f59e0b"; // amber for human agent
+      } else {
+        statusText.textContent = "Online — Ready to help";
+        if (statusDot) statusDot.style.background = "#22c55e"; // green for AI
       }
     }
 
@@ -156,7 +234,7 @@
                         </div>
                         <div class="header-info">
                             <h3 id="agent-name-title">${this._agentConfig?.agent_name || "Booking Assistant"}</h3>
-                            <p><span class="status-dot"></span> Online — Ready to help</p>
+                            <p><span class="status-dot"></span> <span id="status-text">Online — Ready to help</span></p>
                         </div>
                         <button class="header-close" id="close-btn" title="Close chat">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -212,7 +290,9 @@
         if (e.key === "Escape" && this.isOpen) this._toggle();
       };
 
-      // Add initial greeting OR restore history from a previous session
+      // Add initial greeting OR restore history from a previous session.
+      // When a session exists, also start polling so the widget picks up
+      // human takeover events and human-sent messages in real time.
       if (this.sessionId) {
         this._loadHistory().then((restored) => {
           if (!restored) {
@@ -221,6 +301,9 @@
               "Hello! 👋 I'm your booking assistant. How can I help you schedule an appointment today?";
             this._appendBubble("agent", greeting);
           }
+          // Always start polling when we have an active session so the widget
+          // detects human_joined / human_left events as soon as the admin acts.
+          this._startPolling();
         });
       } else {
         const greeting =
@@ -648,6 +731,14 @@
             fieldMeta || {},
           );
           this._clearSkipAction();
+        } else if (directive === "HUMAN_ACTIVE") {
+          // Human agent has taken over - show notification and start polling
+          this._clearDirectiveCards();
+          this._appendSystem("👨‍💼 Support agent joined the chat");
+          this._updateInputMode("text", "Type a message...");
+          this._clearSkipAction();
+          this._humanActive = true;
+          this._startPolling();
         } else {
           // Reset input to default mode for unknown directives
           this._clearDirectiveCards();
@@ -666,6 +757,10 @@
         this._input.disabled = false;
         this._sendBtn.disabled = false;
         this._input.focus();
+        // Only fetch new messages if human agent is active (polling for human messages)
+        if (this.sessionId && this._humanActive) {
+          this._loadHistory(this._lastMessageTimestamp);
+        }
       }
     }
 

@@ -1,0 +1,135 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Master Docker Compose — Booking Agent
+#
+# What this file does:
+#   - Starts ALL services with a single command: docker-compose up --build
+#   - Services can talk to each other using their SERVICE NAME as hostname
+#     (e.g., the backend connects to postgres at host "postgres", not "localhost")
+#   - Cloudflared creates free public tunnels so anyone can reach your app
+#
+# Services:
+#   postgres     → PostgreSQL database (stores all your data)
+#   redis        → Redis cache/queue
+#   backend      → Your FastAPI Python API (port 8005)
+#   admin-panel  → Your Next.js admin dashboard (port 3002)
+#   cloudflared  → Cloudflare Tunnel (makes backend + admin publicly accessible)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── PostgreSQL Database ───────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      # Named volume — data persists even if the container is removed
+      - postgres_data:/var/lib/postgresql/data
+    # Health check: Docker won't start backend until DB is actually ready
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - app-network
+
+  # ── Redis Cache ───────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - app-network
+
+  # ── FastAPI Backend ───────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8005:8005"
+    # Load environment variables from the docker-specific env file
+    env_file:
+      - ./backend/.env.docker
+    # Wait for postgres AND redis to be healthy before starting
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  # ── Next.js Admin Panel ───────────────────────────────────────────────────
+  admin-panel:
+    build:
+      context: ./frontend/admin-panel
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3002:3002"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+
+# ── Cloudflare Tunnel (Public Access) ────────────────────────────────────
+  # cloudflared creates a secure tunnel between your laptop and Cloudflare.
+  # No port forwarding, no public IP, no paid plan needed for basic tunnels.
+  #
+  # This runs TWO tunnels:
+  #   1. Backend API  → public URL (shown in logs as "backend-tunnel")
+  #   2. Admin Panel  → public URL (shown in logs as "admin-tunnel")
+  #
+  # Default mode below uses QUICK TUNNELS (random trycloudflare.com URLs).
+  # The public URLs are RANDOMLY generated and shown in the logs on startup.
+  # They look like: https://random-words-here.trycloudflare.com
+  #
+  # To use NAMED TUNNELS with fixed hostnames (recommended for production):
+  #   1. Get tokens from: Cloudflare Zero Trust > Networks > Tunnels
+  #   2. Add CLOUDFLARE_TUNNEL_TOKEN_BACKEND / _ADMIN to .env
+  #   3. Uncomment the entrypoint/command blocks below and replace the command lines
+  #      with the named-mode lines (kept commented for reference).
+  cloudflared-backend:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    # NOTE: For NAMED tunnels with fixed URLs, replace this command with:
+    #   entrypoint: ["sh", "-c"]
+    #   command: "tunnel run --token \"$TUNNEL_TOKEN\""
+    # (the cloudflared image has no shell — sh -c needs an init wrapper, kept simple here)
+    command: tunnel --url http://backend:8005 --no-autoupdate
+    depends_on:
+      - backend
+    networks:
+      - app-network
+
+  cloudflared-admin:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --url http://admin-panel:3002 --no-autoupdate
+    depends_on:
+      - admin-panel
+    networks:
+      - app-network
+
+# ── Shared Network ────────────────────────────────────────────────────────────
+# All containers join "app-network" so they can talk to each other by name.
+# Without this, containers are isolated and can't communicate.
+networks:
+  app-network:
+    driver: bridge
+
+# ── Persistent Volumes ────────────────────────────────────────────────────────
+# postgres_data lives on your hard drive even when containers stop/restart.
+# Your database data is SAFE across container restarts.
+volumes:
+  postgres_data:

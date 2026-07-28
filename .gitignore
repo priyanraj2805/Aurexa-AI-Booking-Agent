@@ -16,7 +16,7 @@ __pycache__/
 *.egg-info/
 venv/
 .venv/
-
+.venv-test
 # Node
 node_modules/
 dist/

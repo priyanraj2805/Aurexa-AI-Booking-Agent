@@ -735,6 +735,8 @@ async def process_message(
         chat_session.current_intent,
         persona=persona,
         field_definitions=field_definitions,
+        org_id=str(org.id) if org else None,
+        db=db,
     )
 
     intent = unified_result.get("intent", chat_session.current_intent or "PROVIDE_DATA")

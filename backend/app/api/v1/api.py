@@ -13,6 +13,8 @@ from app.api.v1.endpoints import (
     widget,
     slots_bulk,
     integrations,
+    documents,
+    firecrawl_webhook,
 )
 
 api_router = APIRouter()
@@ -33,3 +35,5 @@ api_router.include_router(widget.router, prefix="/widget", tags=["widget"])
 api_router.include_router(
     integrations.router, prefix="/integrations", tags=["integrations"]
 )
+api_router.include_router(documents.router, prefix="/documents", tags=["documents"])
+api_router.include_router(firecrawl_webhook.router, prefix="/firecrawl", tags=["firecrawl"])

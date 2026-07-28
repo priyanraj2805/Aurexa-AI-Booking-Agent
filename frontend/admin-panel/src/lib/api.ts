@@ -68,3 +68,57 @@ export const api = {
     apiFetch<T>(path, { method: "PUT", body: body ? JSON.stringify(body) : undefined }),
   del: <T = unknown>(path: string) => apiFetch<T>(path, { method: "DELETE" }),
 };
+
+/**
+ * Upload a File using multipart/form-data. Bypasses the default JSON
+ * Content-Type so the browser sets the correct boundary automatically.
+ * Auth is via HttpOnly cookie (same as `apiFetch`).
+ */
+export async function uploadFile<T = unknown>(
+  path: string,
+  file: File,
+  fieldName = "file"
+): Promise<T> {
+  const formData = new FormData();
+  formData.append(fieldName, file);
+
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      "X-Requested-With": "XMLHttpRequest", // CSRF protection; NO Content-Type - browser sets boundary
+    },
+    credentials: "include",
+    body: formData,
+  });
+
+  if (response.status === 401) {
+    if (
+      typeof window !== "undefined" &&
+      !window.location.pathname.startsWith("/login") &&
+      !window.location.pathname.startsWith("/register")
+    ) {
+      window.dispatchEvent(new Event("auth:unauthorized"));
+    }
+    throw new Error("Unauthorized");
+  }
+
+  if (!response.ok) {
+    const errBody = await response.json().catch(() => ({}));
+    const detail = errBody.detail;
+    let message: string;
+    if (Array.isArray(detail)) {
+      message = detail
+        .map((d: { msg?: string }) => d.msg || "Validation error")
+        .join(", ");
+    } else if (typeof detail === "string") {
+      message = detail;
+    } else if (typeof errBody?.detail === "object" && errBody.detail?.message) {
+      message = String(errBody.detail.message);
+    } else {
+      message = `API Error: ${response.status}`;
+    }
+    throw new Error(message);
+  }
+
+  return response.json();
+}

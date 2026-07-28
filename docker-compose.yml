@@ -57,7 +57,11 @@ services:
     restart: unless-stopped
     ports:
       - "8005:8005"
-    # Load environment variables from the docker-specific env file
+    # Load environment variables from the docker-specific env file.
+    # NOTE: FIRECRAWL_API_KEY and all secrets come from ./backend/.env.docker.
+    # Do NOT also list them under `environment:` — the `environment:` block
+    # interpolates ${VAR} against the HOST shell (often empty), which would
+    # override the env_file value with an empty string.
     env_file:
       - ./backend/.env.docker
     # Wait for postgres AND redis to be healthy before starting
@@ -77,6 +81,9 @@ services:
     restart: unless-stopped
     ports:
       - "3002:3002"
+    environment:
+      # Backend API URL for admin panel to communicate with backend
+      - INTERNAL_API_URL=http://backend:8005
     depends_on:
       - backend
     networks:
@@ -106,7 +113,7 @@ services:
     #   entrypoint: ["sh", "-c"]
     #   command: "tunnel run --token \"$TUNNEL_TOKEN\""
     # (the cloudflared image has no shell — sh -c needs an init wrapper, kept simple here)
-    command: tunnel --url http://backend:8005 --no-autoupdate
+    command: tunnel --url http://backend:8005 --no-autoupdate --protocol http2
     depends_on:
       - backend
     networks:
@@ -115,7 +122,7 @@ services:
   cloudflared-admin:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
-    command: tunnel --url http://admin-panel:3002 --no-autoupdate
+    command: tunnel --url http://admin-panel:3002 --no-autoupdate --protocol http2
     depends_on:
       - admin-panel
     networks:

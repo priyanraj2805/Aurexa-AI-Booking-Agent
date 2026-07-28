@@ -188,13 +188,15 @@ class LLMOrchestrator:
         return parsed
 
     async def process_turn(
-        self, 
-        user_message: str, 
-        missing_fields: List[str], 
+        self,
+        user_message: str,
+        missing_fields: List[str],
         collected_data: Dict[str, Any],
         current_intent: str,
         persona: Optional[Dict[str, Any]] = None,
-        field_definitions: Optional[list] = None
+        field_definitions: Optional[list] = None,
+        org_id: Optional[str] = None,
+        db: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Unified Orchestration Call.
@@ -202,16 +204,36 @@ class LLMOrchestrator:
         - "intent"
         - "extracted_entities"
         - "response_message"
+
+        When ``org_id`` and ``db`` are provided, performs vectorless RAG
+        (PostgreSQL BM25 + LLM rerank) over uploaded documents and crawled
+        website content for this organization.
         """
+        rag_context = None
+        if org_id and db is not None:
+            try:
+                from app.services.retrieval_service import retrieve_and_rerank
+                rag_context = await retrieve_and_rerank(
+                    db=db,
+                    org_id=str(org_id),
+                    query=user_message,
+                    top_k=5,
+                    candidate_k=20,
+                )
+            except Exception as _rag_err:
+                logger.warning(f"RAG retrieval skipped due to error: {_rag_err}")
+                rag_context = None
+
         prompt = PromptGenerator.build_unified_turn_prompt(
-            user_message, 
-            missing_fields, 
-            collected_data, 
+            user_message,
+            missing_fields,
+            collected_data,
             current_intent,
             persona=persona,
-            field_definitions=field_definitions
+            field_definitions=field_definitions,
+            rag_context=rag_context,
         )
-        
+
         result = await self._call_llm(
             prompt,
             system_prompt="You are a professional AI Booking Assistant Core.",

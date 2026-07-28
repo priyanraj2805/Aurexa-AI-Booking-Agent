@@ -83,6 +83,7 @@ Output:"""
         current_intent: str,
         persona: Optional[Dict[str, Any]] = None,
         field_definitions: Optional[List[FieldDefinition]] = None,
+        rag_context: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
         UNIFIED PROMPT:
@@ -161,6 +162,24 @@ Output:"""
             else:
                 next_field_label = first_missing.replace("_", " ").title()
 
+        # Build RAG context block from retrieved+reranked chunks (vectorless).
+        rag_block = ""
+        if rag_context:
+            chunk_lines = []
+            for i, ch in enumerate(rag_context, 1):
+                content = (ch.get("content") or "").strip()
+                source = ch.get("source_type") or "document"
+                if ch.get("source_url"):
+                    source += f" ({ch['source_url']})"
+                snippet = content[:800]
+                chunk_lines.append(f"[{i}] (source: {source})\n{snippet}")
+            rag_block = (
+                "### COMPANY KNOWLEDGE CONTEXT (from uploaded docs / crawled website):\n"
+                "Use this to answer questions about the business, services, pricing, "
+                "hours, policies, and FAQs. If the answer isn't here, say so honestly.\n\n"
+                + "\n\n".join(chunk_lines)
+            )
+
         prompt = f"""You are the Unified Intelligence Core for a generalized AI Booking Assistant.
 {persona_block}
 
@@ -171,7 +190,9 @@ Output:"""
 - NEXT FIELD TO ASK FOR: {next_field_label}
 - Last Known Intent: {current_intent}
 
-{field_block}
+        {field_block}
+
+{rag_block}
 
 ### USER'S NEW MESSAGE:
 "{user_message}"

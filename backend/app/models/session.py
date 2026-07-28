@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, ForeignKey, DateTime, Boolean, Index
+from sqlalchemy import Column, String, ForeignKey, DateTime, Boolean, Index, Text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.sql import func
 from app.db.base import Base
@@ -29,6 +29,15 @@ class ChatSession(Base):
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+    # Human handoff fields
+    human_agent_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    human_agent_active = Column(Boolean, default=False, nullable=False)
+    ai_paused_at = Column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index("ix_session_org_status", "org_id", "session_status"),
