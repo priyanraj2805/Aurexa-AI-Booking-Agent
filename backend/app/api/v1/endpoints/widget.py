@@ -227,6 +227,15 @@ async def get_widget_history(
 ):
     """
     Public endpoint — returns message history for widget session resumption.
+
+    Phase 10 role (refactored):
+    - Initial history load (widget opens with stored session_id)
+    - Browser refresh
+    - Missed-message recovery (WebSocket reconnect fallback)
+    - NOT the primary real-time channel — that role moved to
+      GET /ws/widget (WebSocket) which pushes human_joined,
+      human_message, and human_left events directly to the widget.
+
     Validates the session belongs to the org identified by api_key or widget_token.
     Supports incremental fetch via since parameter.
     """

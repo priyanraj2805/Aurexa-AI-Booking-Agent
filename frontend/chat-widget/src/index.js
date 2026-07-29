@@ -77,6 +77,13 @@
       this._lastMessageTimestamp = null;
       this._pollInterval = null;
       this._humanActive = false;
+      // Phase 4: WebSocket lifecycle state
+      this._ws = null;
+      this._wsReconnectTimer = null;
+      this._wsReconnectAttempts = 0;
+      this._wsConnected = false;
+      // Phase 6/9: track rendered message ids to avoid duplicates when WS + poll overlap
+      this._renderedMessageIds = new Set();
     }
 
     _sessionStorageKey() {
@@ -174,16 +181,17 @@
       }
     }
 
-    /* ─────────── POLLING FOR HUMAN HANDOFF ─────────── */
+    /* ─────────── POLLING (fallback only when WS is down) ─────────── */
     _startPolling() {
       if (this._pollInterval) return;
-      // Fast polling (3s) when human is active, slow polling (10s) when inactive
-      const interval = this._humanActive ? 3000 : 10000;
+      // Slow polling (10s) when WS is connected, fast polling (3s) when
+      // human is active and WS is down (recovery path).
+      const baseInterval = this._wsConnected ? 30000 : (this._humanActive ? 3000 : 10000);
       this._pollInterval = setInterval(() => {
         if (this.isOpen && this.sessionId) {
           this._loadHistory(this._lastMessageTimestamp);
         }
-      }, interval);
+      }, baseInterval);
     }
 
     _stopPolling(preserveHumanActive = false) {
@@ -212,13 +220,116 @@
       const statusText = this.shadowRoot.getElementById("status-text");
       const statusDot = this.shadowRoot.querySelector(".status-dot");
       if (!statusText) return;
-      
+
       if (isActive && adminName) {
         statusText.textContent = `👨‍💼 ${adminName} is now assisting you`;
         if (statusDot) statusDot.style.background = "#f59e0b"; // amber for human agent
       } else {
         statusText.textContent = "Online — Ready to help";
         if (statusDot) statusDot.style.background = "#22c55e"; // green for AI
+      }
+    }
+
+    /* ─────────── WEBSOCKET (real-time channel; Phase 4) ─────────── */
+
+    _wsBaseUrl() {
+      // Convert http(s) → ws(s) and strip /api/v1 suffix because the WS
+      // endpoint lives at /ws/widget (under api/v1).
+      const base = (CONFIG.apiBase || "").replace(/\/+$/, "");
+      if (base.startsWith("https://")) return "wss://" + base.slice(8);
+      if (base.startsWith("http://")) return "ws://" + base.slice(7);
+      return base;
+    }
+
+    _connectWebSocket() {
+      if (!this.sessionId || !CONFIG.widgetToken) return;
+      if (this._ws && this._ws.readyState <= 1) return; // CONNECTING or OPEN
+      try {
+        const url = `${this._wsBaseUrl()}/ws/widget?widget_token=${encodeURIComponent(CONFIG.widgetToken)}&session_id=${encodeURIComponent(this.sessionId)}`;
+        const ws = new WebSocket(url);
+        this._ws = ws;
+
+        ws.onopen = () => {
+          this._wsConnected = true;
+          this._wsReconnectAttempts = 0;
+          // Restart polling with the slow "WS-connected" cadence so it
+          // exists as a recovery safety net but doesn't hammer the server.
+          if (this._pollInterval) {
+            this._stopPolling(true);
+            this._startPolling();
+          }
+        };
+
+        ws.onmessage = (e) => {
+          let event;
+          try { event = JSON.parse(e.data); } catch { return; }
+          this._handleWsEvent(event);
+        };
+
+        ws.onclose = () => {
+          this._wsConnected = false;
+          this._ws = null;
+          // Reconnect with exponential backoff (capped at 30s)
+          const delay = Math.min(30000, 1000 * Math.pow(2, this._wsReconnectAttempts));
+          this._wsReconnectAttempts++;
+          if (this._wsReconnectTimer) clearTimeout(this._wsReconnectTimer);
+          this._wsReconnectTimer = setTimeout(() => this._connectWebSocket(), delay);
+          // While WS is down, ensure polling is active at the human-aware rate
+          if (this._pollInterval) {
+            this._stopPolling(true);
+            this._startPolling();
+          }
+        };
+
+        ws.onerror = () => {
+          // onclose will fire after; nothing extra to do here.
+        };
+      } catch (e) {
+        // Construction failure → retry via onclose path on next tick
+        this._wsConnected = false;
+        if (this._wsReconnectTimer) clearTimeout(this._wsReconnectTimer);
+        this._wsReconnectTimer = setTimeout(() => this._connectWebSocket(), 3000);
+      }
+    }
+
+    _handleWsEvent(event) {
+      switch (event.type) {
+        case "connected":
+          // Server confirmed registration; nothing else to do.
+          break;
+        case "human_joined":
+          this._updateHumanStatus(event.admin_name || "Support agent", true);
+          this._startFastPolling();
+          // Idempotent: skip if a system message for this join already shown
+          if (!this._humanJoinedShownFor) {
+            this._humanJoinedShownFor = event.session_id;
+            this._appendSystem(`👨‍💼 ${event.admin_name || "Support agent"} joined the chat`);
+          }
+          break;
+        case "human_left":
+          this._updateHumanStatus(null, false);
+          this._humanJoinedShownFor = null;
+          this._appendSystem("👨‍💼 Support agent left. AI assistant resumed.");
+          this._stopPolling();
+          // Reconnect polling at slow cadence
+          this._startPolling();
+          break;
+        case "human_message":
+          // Phase 6/9: render as a distinct human bubble
+          if (event.message_id && this._renderedMessageIds.has(event.message_id)) {
+            return; // de-dupe
+          }
+          this._appendHumanBubble(event);
+          if (event.message_id) {
+            this._renderedMessageIds.add(event.message_id);
+            this._lastMessageTimestamp = event.created_at || this._lastMessageTimestamp;
+          }
+          break;
+        case "customer_message":
+          // Echo of our own message; no-op (already shown via _handleSend)
+          break;
+        default:
+          break;
       }
     }
 
@@ -301,8 +412,9 @@
               "Hello! 👋 I'm your booking assistant. How can I help you schedule an appointment today?";
             this._appendBubble("agent", greeting);
           }
-          // Always start polling when we have an active session so the widget
-          // detects human_joined / human_left events as soon as the admin acts.
+          // Phase 4: open WebSocket first (real-time channel); polling acts
+          // as a safety net that auto-disables when WS is connected.
+          this._connectWebSocket();
           this._startPolling();
         });
       } else {
@@ -792,6 +904,38 @@
 
       // Screen reader announcement
       this._announceToSR(sender === "agent" ? "Agent: " + text : "");
+      return div;
+    }
+
+    /* Phase 6/9: distinct bubble for human agent messages */
+    _appendHumanBubble(event) {
+      const div = document.createElement("div");
+      div.className = "message human-agent";
+      div.setAttribute("role", "log");
+
+      const label = document.createElement("div");
+      label.className = "human-label";
+      label.textContent = event.admin_name || "Support agent";
+      div.appendChild(label);
+
+      const text = document.createElement("div");
+      text.className = "human-text";
+      text.textContent = event.content || "";
+      div.appendChild(text);
+
+      const ts = document.createElement("span");
+      ts.className = "msg-time";
+      try {
+        const dt = event.created_at ? new Date(event.created_at) : new Date();
+        ts.textContent = dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      } catch {
+        ts.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      }
+      div.appendChild(ts);
+
+      this._msgList.appendChild(div);
+      this._scrollToBottom();
+      this._announceToSR(`Support agent: ${event.content || ""}`);
       return div;
     }
 
@@ -2707,6 +2851,47 @@
                     margin-top: 12px;
                     font-size: 12px;
                     color: var(--text-sec);
+                }
+
+                /* ── HUMAN AGENT MESSAGE (Phase 6/9) ───────────────── */
+                .message.human-agent {
+                    background: linear-gradient(135deg, rgba(245, 158, 11, 0.12) 0%, rgba(245, 158, 11, 0.04) 100%);
+                    border-left: 3px solid #f59e0b;
+                    border-radius: 10px;
+                    padding: 10px 12px;
+                    margin: 6px 0;
+                    max-width: 88%;
+                    align-self: flex-start;
+                    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+                }
+                .message.human-agent .human-label {
+                    font-size: 11px;
+                    font-weight: 700;
+                    color: #b45309;
+                    margin-bottom: 4px;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                    display: flex;
+                    align-items: center;
+                    gap: 4px;
+                }
+                .message.human-agent .human-label::before {
+                    content: "👨‍💼";
+                    font-size: 12px;
+                }
+                .message.human-agent .human-text {
+                    font-size: 14px;
+                    line-height: 1.45;
+                    color: var(--text-pri);
+                    white-space: pre-wrap;
+                    word-wrap: break-word;
+                }
+                .message.human-agent .msg-time {
+                    display: block;
+                    margin-top: 6px;
+                    font-size: 10px;
+                    color: var(--text-muted);
+                    text-align: right;
                 }
             `;
     }

@@ -11,6 +11,7 @@ from app.api.v1.endpoints import (
     monitoring,
     whatsapp,
     widget,
+    widget_ws,
     slots_bulk,
     integrations,
     documents,
@@ -32,6 +33,7 @@ api_router.include_router(email.router, prefix="/email", tags=["email"])
 api_router.include_router(monitoring.router, prefix="/monitoring", tags=["monitoring"])
 api_router.include_router(slots_bulk.router, prefix="/slots-bulk", tags=["slots_bulk"])
 api_router.include_router(widget.router, prefix="/widget", tags=["widget"])
+api_router.include_router(widget_ws.router, tags=["widget-ws"])
 api_router.include_router(
     integrations.router, prefix="/integrations", tags=["integrations"]
 )

@@ -131,38 +131,23 @@ async def route_web_message(
             extra={"error_type": type(recovery_error).__name__, "error_message": str(recovery_error)},
         )
 
-    try:
-        return await process_message_with_graph(
-            db=db,
-            org=org,
-            org_config=org_config,
-            chat_session=chat_session,
-            message_text=message_text,
-            background_tasks=background_tasks,
-            recovery_metadata=recovery_meta,
-        )
-    except Exception as error:
-        if not is_retryable_runtime_failure(error):
-            raise
+    # Delegate routing decision to ConversationManager. When no human is
+    # active, the manager falls through to the existing LangGraph path with
+    # the same canary-fallback behavior as before. When a human is active,
+    # the manager short-circuits the AI path (Phase 1+).
+    from app.engine.conversation_manager import ConversationManager
 
-        if not settings.RUNTIME_CANARY_FALLBACK_ENABLED:
-            raise
-
-        if settings.RUNTIME_FALLBACK_SUNSET_ENFORCED:
-            raise FallbackSunsetError(
-                "Automatic fallback is disabled by Phase 2 sunset gate."
-            ) from error
-
-        emit_fallback_event(_build_fallback_event("web", chat_session, error))
-
-        return await process_message(
-            db=db,
-            org=org,
-            org_config=org_config,
-            chat_session=chat_session,
-            message_text=message_text,
-            background_tasks=background_tasks,
-        )
+    manager = ConversationManager(
+        db=db,
+        org=org,
+        org_config=org_config,
+        chat_session=chat_session,
+    )
+    return await manager.dispatch(
+        message_text=message_text,
+        background_tasks=background_tasks,
+        recovery_metadata=recovery_meta,
+    )
 
 
 async def route_whatsapp_message(

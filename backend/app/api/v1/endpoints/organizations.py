@@ -13,6 +13,7 @@ from app.models.session import ChatSession
 from app.models.message import ChatMessage
 from app.api.v1.endpoints.auth import get_current_user
 from app.core.audit import log_audit_event
+from app.core.ws_manager import ws_manager
 from app.schemas.audit import AuditAction
 import uuid
 
@@ -86,7 +87,22 @@ async def takeover_conversation(
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    
+
+    # Best-effort real-time broadcast to the customer widget (Phase 3+5).
+    # Never raises — booking flow is unaffected if no widget is connected.
+    try:
+        await ws_manager.broadcast_to_session(
+            str(conversation_id),
+            {
+                "type": "human_joined",
+                "session_id": str(conversation_id),
+                "admin_id": str(user.id),
+                "admin_name": user.full_name,
+            },
+        )
+    except Exception:
+        pass
+
     return TakeoverResponse(
         success=True,
         conversation_id=str(conversation_id),
@@ -127,7 +143,19 @@ async def release_conversation(
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    
+
+    # Best-effort real-time broadcast to the customer widget (Phase 3+5).
+    try:
+        await ws_manager.broadcast_to_session(
+            str(conversation_id),
+            {
+                "type": "human_left",
+                "session_id": str(conversation_id),
+            },
+        )
+    except Exception:
+        pass
+
     return ReleaseResponse(
         success=True,
         conversation_id=str(conversation_id),
@@ -158,7 +186,27 @@ async def send_human_message(
     
     # Save human message
     message = await crud_chat.save_human_message(db, str(conversation_id), str(user.id), payload.content)
-    
+
+    # Best-effort real-time broadcast to the customer widget (Phase 3+5).
+    try:
+        await ws_manager.broadcast_to_session(
+            str(conversation_id),
+            {
+                "type": "human_message",
+                "session_id": str(conversation_id),
+                "message_id": str(message.id),
+                "content": message.content,
+                "sender_type": "human",
+                "admin_id": str(user.id),
+                "admin_name": user.full_name,
+                "created_at": (
+                    message.created_at.isoformat() if message.created_at else None
+                ),
+            },
+        )
+    except Exception:
+        pass
+
     return {
         "success": True,
         "message": {

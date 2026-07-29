@@ -46,43 +46,84 @@ Turn your website visitors into booked customers with an AI assistant that handl
 
 ## ⚡ Quick Start (5 Minutes)
 
+### Prerequisites
+
+| Requirement | Verified State |
+|---|---|
+| Python 3.11+ | 3.11.4 ✓ |
+| Node.js 18+ | required for admin + widget |
+| PostgreSQL 14+ | **18.4 running on `localhost:5432`** ✓ |
+| Database `dotstark_v2` | owned by `postgres` ✓ |
+
 ### Step 1: Setup & Configure
 
-```bash
+```powershell
 git clone <repository-url>
 cd booking_agent
 
+# Backend
 cd backend
-cp .env.example .env
-# Open .env and add your API keys
+cp .env.example .env       # or use the existing .env
+# Edit .env — confirm POSTGRES_*, LLM_*, SMTP_* values
 ```
 
-### Step 2: Start in 3 Terminals
+### Step 2: Start the services (3 terminals)
 
-**Terminal 1** - Backend Server:
-```bash
-cd booking_agent/backend
-python run.py
+**Terminal 1** — Backend API server (FastAPI on port 8005):
+```powershell
+cd C:\Users\priyanshuraj\OneDrive\Desktop\dotstark\booking_agent\backend
+.\venv\Scripts\Activate.ps1
+python run.py --no-browser --skip-preflight
 ```
 
-**Terminal 2** - Admin Dashboard:
-```bash
-cd booking_agent/frontend/admin-panel
+**Terminal 2** — Admin Dashboard (Next.js on port 3002):
+```powershell
+cd C:\Users\priyanshuraj\OneDrive\Desktop\dotstark\booking_agent\frontend\admin-panel
+npm install        # first time only
 npm run dev
 ```
 
-**Terminal 3** - Chat Widget:
-```bash
-cd booking_agent/frontend/chat-widget
-npm run dev
+**Terminal 3** *(only if you change widget source)* — Rebuild widget bundle:
+```powershell
+cd C:\Users\priyanshuraj\OneDrive\Desktop\dotstark\booking_agent\frontend\chat-widget
+npm install        # first time only
+npm run build      # outputs to backend/static/widget/widget.js
+```
+> The chat widget is a **Web Component served by the backend** at
+> `http://localhost:8005/static/widget/widget.js`. Embed it on any page
+> with the snippet from the admin dashboard — no separate dev server needed.
+
+### Step 3: Open your apps
+
+| App | URL |
+|---|---|
+| 🎛️ Admin Dashboard | http://localhost:3002 |
+| 📖 API Docs (Swagger) | http://localhost:8005/docs |
+| 🔌 Backend root | http://localhost:8005 |
+| 💚 Health check | http://localhost:8005/api/v1/health |
+| 🧩 Widget bundle (JS) | http://localhost:8005/static/widget/widget.js |
+
+**That's it!** Now embed the widget on any website — copy the snippet from the admin dashboard.
+
+---
+
+### Optional: Run the human-handoff verification suite
+
+After the backend is running, in a separate terminal:
+
+```powershell
+cd C:\Users\priyanshuraj\OneDrive\Desktop\dotstark\booking_agent\tests
+
+C:\Users\priyanshuraj\OneDrive\Desktop\dotstark\booking_agent\backend\venv\Scripts\python.exe verify_phase01.py
+C:\Users\priyanshuraj\OneDrive\Desktop\dotstark\booking_agent\backend\venv\Scripts\python.exe verify_phase35.py
+C:\Users\priyanshuraj\OneDrive\Desktop\dotstark\booking_agent\backend\venv\Scripts\python.exe verify_phase4.py
+C:\Users\priyanshuraj\OneDrive\Desktop\dotstark\booking_agent\backend\venv\Scripts\python.exe verify_final.py
 ```
 
-### Step 3: Open Your Apps
-
-- 🎛️ **Admin Dashboard:** http://localhost:3002
-- 💬 **Chat Widget Demo:** http://localhost:5174
-
-**That's it!** Now embed the widget on any website.
+`verify_final.py` exercises all 15 success criteria of the admin-inbox → customer-widget real-time handoff and prints
+```
+=== ALL 15 SUCCESS CRITERIA PASSED ===
+```
 
 ---
 
@@ -91,28 +132,40 @@ npm run dev
 ### High-Level Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Your Website                             │
-│  ┌─────────────────────┐     ┌──────────────────────────┐  │
-│  │   Chat Widget       │     │   Admin Panel            │  │
-│  │   (Web Component)  │     │   (Next.js Dashboard)    │  │
-│  │   :5174            │     │   :3002                  │  │
-│  └──────────┬──────────┘     └────────────┬─────────────┘  │
-│             │                             │                 │
-│             └──────────┬──────────────────┘                 │
-│                        ▼                                    │
-│              ┌─────────────────────┐                        │
-│              │    FastAPI Backend   │                        │
-│              │    (Port 8000)       │                        │
-│              └──────────┬──────────┘                        │
-│                         │                                    │
-│    ┌────────────────────┼────────────────────┐             │
-│    ▼                    ▼                    ▼             │
-│ ┌────────┐       ┌────────────┐       ┌──────────┐        │
-│ │   LLM  │       │ PostgreSQL │       │   SMTP   │        │
-│ │ (Groq) │       │ (State/DB) │       │ (Email)  │        │
-│ └────────┘       └────────────┘       └──────────┘        │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                          Your Website                                 │
+│  ┌─────────────────────┐          ┌──────────────────────────┐       │
+│  │   Chat Widget       │          │   Admin Panel            │       │
+│  │   (Web Component)   │          │   (Next.js Dashboard)    │       │
+│  │   served from :8005 │          │   :3002                  │       │
+│  └──────────┬──────────┘          └────────────┬─────────────┘       │
+│             │ HTTP                                │ HTTP + WS          │
+│             │ WebSocket (real-time)              │                    │
+│             └────────────────┬───────────────────┘                    │
+│                              ▼                                        │
+│                    ┌─────────────────────┐                            │
+│                    │    FastAPI Backend   │                            │
+│                    │    (Port 8005)       │                            │
+│                    │                     │                            │
+│                    │  /chat/message/     │  /ws/widget  (push)       │
+│                    │  /widget/history    │  human_joined             │
+│                    │  /api/v1/admin/...  │  human_message            │
+│                    │                     │  human_left               │
+│                    └──────────┬──────────┘                            │
+│                               │                                        │
+│       ┌───────────────────────┼──────────────────────┐                │
+│       ▼                       ▼                      ▼                │
+│  ┌────────┐             ┌────────────┐           ┌──────────┐         │
+│  │   LLM  │             │ PostgreSQL │           │   SMTP   │         │
+│  │ (Groq) │             │ (State/DB) │           │ (Email)  │         │
+│  └────────┘             └────────────┘           └──────────┘         │
+└─────────────────────────────────────────────────────────────────────┘
+
+  Real-time channels (after the human-handoff refactor):
+    • Admin ↔ Backend:  WebSocket at /ws/admin (existing)
+    • Customer ↔ Backend: WebSocket at /ws/widget?widget_token=...&session_id=...
+      Pushes: human_joined, human_message, human_left
+    • HTTP polling fallback: GET /api/v1/widget/history
 ```
 
 ### Core Design Principle: "Dumb LLM, Smart Python"
