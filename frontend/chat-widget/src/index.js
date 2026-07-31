@@ -624,10 +624,11 @@
           return {
             id: slot.slot_id,
             label:
-              slot.label_user_tz ||
-              (userDate ? this._formatClockTime(userDate, this.userTimezone) : ""),
-            orgLabel: orgDate
-              ? this._formatClockTime(orgDate, this.orgTimezone)
+              orgDate
+                ? this._formatClockTime(orgDate, this.orgTimezone)
+                : slot.label_user_tz,
+            userLabel: userDate
+              ? this._formatClockTime(userDate, this.userTimezone)
               : null,
             sortKey: userDate ? userDate.getTime() : Number.MAX_SAFE_INTEGER,
             available: slot.available !== false,
@@ -1337,10 +1338,10 @@
         localText.className = "slot-local-time";
         localText.textContent = opt.label;
         btn.appendChild(localText);
-        if (opt.orgLabel) {
+        if (opt.userLabel) {
           const orgText = document.createElement("span");
           orgText.className = "slot-org-time";
-          orgText.textContent = `Org time: ${opt.orgLabel}`;
+          orgText.textContent = `Your time: ${opt.userLabel}`;
           btn.appendChild(orgText);
         }
         if (!opt.available) {
@@ -2495,8 +2496,8 @@
                 }
 
                 .select-options-grid {
-                    display: flex;
-                    flex-wrap: wrap;
+                    display: grid;
+                    grid-template-columns: 1fr 1fr;
                     gap: 8px;
                     margin-top: 8px;
                 }

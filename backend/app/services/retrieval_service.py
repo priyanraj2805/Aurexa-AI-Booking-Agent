@@ -45,7 +45,7 @@ async def retrieve_chunks(
     sanitized = [_sanitize(k) for k in keywords if _sanitize(k)]
     if not sanitized:
         return []
-    tsquery_str = " & ".join(sanitized)
+    tsquery_str = " | ".join(sanitized)
 
     query_sql = """
         SELECT
@@ -132,7 +132,7 @@ async def retrieve_and_rerank(
     org_id: str,
     query: str,
     top_k: int = 5,
-    candidate_k: int = 20,
+    candidate_k: int = 30,
 ) -> List[Dict]:
     """Full retrieval pipeline: BM25 -> LLM rerank."""
     chunks = await retrieve_chunks(db, org_id, query, k=candidate_k)
@@ -206,5 +206,16 @@ async def delete_document_chunks(db: AsyncSession, org_id: str, doc_id: str) -> 
             "DELETE FROM document_chunks WHERE org_id = :org_id AND doc_id = :doc_id"
         ),
         {"org_id": org_id, "doc_id": doc_id},
+    )
+    return result.rowcount or 0
+
+
+async def delete_website_chunks(db: AsyncSession, org_id: str) -> int:
+    """Delete all website-crawl chunks for an org. Returns row count."""
+    result = await db.execute(
+        text(
+            "DELETE FROM document_chunks WHERE org_id = :org_id AND source_type = 'website'"
+        ),
+        {"org_id": org_id},
     )
     return result.rowcount or 0

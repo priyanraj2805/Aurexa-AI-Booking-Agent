@@ -20,7 +20,7 @@ from app.models.user import User
 from app.api.v1.endpoints.auth import get_current_user
 from app.services.pdf_processor import process_pdf, compute_content_hash
 from app.services.firecrawl_service import get_firecrawl_service
-from app.services.retrieval_service import store_document_chunks, delete_document_chunks
+from app.services.retrieval_service import store_document_chunks, delete_document_chunks, delete_website_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class DocumentListItem(BaseModel):
 
 
 class CrawlRequest(BaseModel):
-    url: HttpUrl
+    url: str
 
 
 class CrawlResponse(BaseModel):
@@ -227,6 +227,29 @@ async def delete_document(
     return {"success": True, "deleted_chunks": deleted, "doc_id": doc_id}
 
 
+@router.delete("/website")
+async def delete_website_data(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Delete all crawled website data for this org."""
+    org_id = user.org_id
+
+    deleted = await delete_website_chunks(db, str(org_id))
+    
+    # Clear website-related fields on org_config
+    await db.execute(
+        text(
+            "UPDATE org_configs SET website_url = NULL, crawl_status = NULL, "
+            "crawl_started_at = NULL, crawl_completed_at = NULL, total_pages_crawled = NULL "
+            "WHERE org_id = :org_id"
+        ),
+        {"org_id": str(org_id)},
+    )
+    await db.commit()
+    return {"success": True, "deleted_chunks": deleted}
+
+
 # ─── Website Crawl Endpoints ───────────────────────────────────────────────
 
 
@@ -244,6 +267,11 @@ async def crawl_website(
     and the admin UI polls ``/website/crawl/status/{crawl_id}`` for results.
     """
     org_id = user.org_id
+
+    # Normalize URL — prepend https:// if missing
+    raw_url = str(payload.url).strip()
+    if not raw_url.startswith(("http://", "https://")):
+        raw_url = "https://" + raw_url
 
     public_api_url = (
         getattr(settings, "PUBLIC_API_URL", "")
@@ -263,7 +291,7 @@ async def crawl_website(
     firecrawl = get_firecrawl_service()
     try:
         crawl_id = await firecrawl.crawl_website(
-            url=str(payload.url),
+            url=raw_url,
             webhook_url=webhook_url,
         )
         if not crawl_id:
@@ -271,7 +299,7 @@ async def crawl_website(
 
         # Persist crawl context on org_configs for admin UI status
         await _set_crawl_state(
-            db, str(org_id), url=str(payload.url),
+            db, str(org_id), url=raw_url,
             crawl_id=crawl_id, status="started",
         )
         await db.commit()
@@ -295,19 +323,80 @@ async def crawl_website(
 @router.get("/website/crawl/status/{crawl_id}", response_model=CrawlStatusResponse)
 async def get_crawl_status(
     crawl_id: str,
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Check Firecrawl crawl status by crawl_id."""
+    """Check Firecrawl crawl status by crawl_id.
+
+    When the crawl completes, this endpoint also **ingests** the results into
+    ``document_chunks`` so the admin UI does not need a separate download step.
+    """
     firecrawl = get_firecrawl_service()
     try:
-        status = await firecrawl.get_crawl_status(crawl_id)
-        if isinstance(status, dict):
-            return CrawlStatusResponse(
-                crawl_id=crawl_id,
-                status=str(status.get("status") or "unknown"),
-                pages_crawled=status.get("total"),
-            )
-        return CrawlStatusResponse(crawl_id=crawl_id, status=str(status))
+        result = await firecrawl.get_crawl_status(crawl_id)
+        if not isinstance(result, dict):
+            return CrawlStatusResponse(crawl_id=crawl_id, status=str(result))
+
+        status_str = str(result.get("status") or "unknown")
+        pages_data = result.get("data") or []
+        total = result.get("total") or len(pages_data)
+
+        # If the crawl completed and we have data, ingest it
+        if status_str == "completed" and pages_data and db:
+            from app.services.pdf_processor import chunk_text
+            all_chunks = []
+            for page in pages_data:
+                if not isinstance(page, dict):
+                    continue
+                markdown = page.get("markdown") or page.get("html") or ""
+                if not markdown:
+                    continue
+                url = page.get("url") or page.get("sourceURL") or ""
+                page_meta = page.get("metadata") or {}
+                title = ""
+                if isinstance(page_meta, dict):
+                    title = page_meta.get("title") or page_meta.get("ogTitle") or ""
+                for chunk in chunk_text(markdown):
+                    all_chunks.append({
+                        "content": chunk,
+                        "source_type": "website",
+                        "source_url": url,
+                        "metadata": {
+                            "title": title,
+                            "crawl_id": crawl_id,
+                        },
+                    })
+
+            if all_chunks:
+                from app.services.retrieval_service import store_document_chunks
+                doc_id = await store_document_chunks(
+                    db,
+                    org_id=str(user.org_id),
+                    chunks=all_chunks,
+                    source_type="website",
+                )
+                await _set_crawl_state(
+                    db, str(user.org_id), status="completed",
+                )
+                # Update total_pages_crawled
+                await db.execute(
+                    text(
+                        "UPDATE org_configs SET total_pages_crawled = :t "
+                        "WHERE org_id = :org_id"
+                    ),
+                    {"t": len(pages_data), "org_id": str(user.org_id)},
+                )
+                await db.commit()
+                logger.info(
+                    f"Ingested {len(all_chunks)} chunks from {len(pages_data)} pages "
+                    f"for crawl {crawl_id}"
+                )
+
+        return CrawlStatusResponse(
+            crawl_id=crawl_id,
+            status=status_str,
+            pages_crawled=total,
+        )
     except Exception as exc:
         logger.error(f"Crawl status fetch failed: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
@@ -355,21 +444,31 @@ async def _set_crawl_state(
     crawl_id: Optional[str] = None,
     status: str = "started",
 ) -> None:
-    result = await db.execute(select(OrgConfig).where(OrgConfig.org_id == org_id))
-    cfg = result.scalars().first()
-    if not cfg:
-        return
+    """Persist crawl state on org_configs so the admin UI can restore it
+    after a page refresh. All fields are upserted independently."""
+    sets = []
+    params: dict = {"org_id": str(org_id)}
     if url is not None:
-        cfg.website_url = url
+        sets.append("website_url = :url")
+        params["url"] = url
     if crawl_id is not None:
-        # store crawl_id in custom_prompts metadata? Better: dedicated column was added.
-        await db.execute(
-            text(
-                "UPDATE org_configs SET website_url = :url, crawl_status = :status "
-                "WHERE org_id = :org_id"
-            ),
-            {"url": url, "status": status, "org_id": org_id},
-        )
+        sets.append("crawl_id = :crawl_id")
+        params["crawl_id"] = crawl_id
+    sets.append("crawl_status = :status")
+    params["status"] = status
+    if status == "started":
+        sets.append("crawl_started_at = NOW()")
+        sets.append("crawl_completed_at = NULL")
+    elif status in ("completed", "failed", "cancelled"):
+        sets.append("crawl_completed_at = NOW()")
+    if not sets:
+        return
+    await db.execute(
+        text(
+            "UPDATE org_configs SET " + ", ".join(sets) + " WHERE org_id = :org_id"
+        ),
+        params,
+    )
     await db.flush()
 
 

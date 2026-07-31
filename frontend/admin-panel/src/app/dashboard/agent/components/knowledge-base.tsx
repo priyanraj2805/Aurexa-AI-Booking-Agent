@@ -6,7 +6,7 @@ import {
   Globe, RefreshCw, X, FileUp,
 } from "lucide-react";
 import {
-  useDocuments, useCrawlStatus,
+  useDocuments, useCrawlStatus, useAgentConfig,
   uploadPdfDocument, deletePdfDocument, startWebsiteCrawl,
   MAX_DOCS_PER_ORG,
   type DocumentListItem,
@@ -221,6 +221,18 @@ function WebsiteCrawlerSection({ push, onCrawlId }: {
   const [starting, setStarting] = useState(false);
   const [crawlId, setCrawlId] = useState<string | null>(null);
   const { data: status, refetch } = useCrawlStatus(crawlId);
+  const { data: agentConfig } = useAgentConfig();
+
+  // Restore in-progress crawl state after page refresh
+  useEffect(() => {
+    if (!agentConfig) return;
+    if (agentConfig.website_url && !crawlId) {
+      setUrl(agentConfig.website_url);
+    }
+    if (agentConfig.crawl_id && !crawlId) {
+      setCrawlId(agentConfig.crawl_id);
+    }
+  }, [agentConfig]);
 
   useEffect(() => {
     onCrawlId(crawlId);
@@ -275,7 +287,7 @@ function WebsiteCrawlerSection({ push, onCrawlId }: {
 
       <form onSubmit={onCrawl} className="flex flex-col sm:flex-row gap-2">
         <input
-          type="url"
+          type="text"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           placeholder="https://your-website.com"

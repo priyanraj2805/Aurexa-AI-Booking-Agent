@@ -217,6 +217,37 @@ async def call_model(
     context_block = build_context_block(collected, missing, "ACTIVE")
     if active_summary:
         context_block = f"{context_block}\n\nConversation summary:\n{active_summary}"
+
+    # 3b. Retrieve relevant knowledge from uploaded documents and crawled websites
+    if latest_user_message and db:
+        try:
+            from app.services.retrieval_service import retrieve_and_rerank
+            rag_chunks = await retrieve_and_rerank(
+                db=db,
+                org_id=str(state.get("org_id", "")),
+                query=latest_user_message,
+                top_k=5,
+                candidate_k=30,
+            )
+            if rag_chunks:
+                knowledge_lines = []
+                for i, ch in enumerate(rag_chunks, 1):
+                    content = (ch.get("content") or "").strip()
+                    source = ch.get("source_type") or "document"
+                    if ch.get("source_url"):
+                        source += f" ({ch['source_url']})"
+                    snippet = content[:1000]
+                    knowledge_lines.append(f"[{i}] (source: {source})\n{snippet}")
+                knowledge = "\n\n".join(knowledge_lines)
+                context_block = (
+                    f"{context_block}\n\n"
+                    f"## COMPANY KNOWLEDGE\n"
+                    f"The following information is from the company's business documents "
+                    f"and website. Use it to answer the user's question if relevant:\n"
+                    f"{knowledge}"
+                )
+        except Exception:
+            logger.warning("RAG retrieval failed", exc_info=True)
     
     full_system_msg = SystemMessage(content=f"{sys_prompt}\n\n{context_block}")
     

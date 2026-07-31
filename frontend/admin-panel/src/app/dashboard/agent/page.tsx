@@ -301,6 +301,7 @@ export default function AgentCorePage() {
 
   // Organization settings
   const [brandColor, setBrandColor] = useState("#3B82F6");
+  const [businessName, setBusinessName] = useState("");
 
   // Persona state
   const [persona, setPersona] = useState<PersonaConfig>({
@@ -322,6 +323,7 @@ export default function AgentCorePage() {
   useEffect(() => {
     if (config) {
       setBrandColor(config.ui_brand_color || "#3B82F6");
+      setBusinessName(config.business_name || "");
       setRequireOtp(config.require_otp ?? true);
       if (config.custom_prompts && typeof config.custom_prompts === "object") {
         setPersona({
@@ -384,6 +386,7 @@ export default function AgentCorePage() {
         ui_brand_color: brandColor,
         custom_prompts: persona,
         require_otp: requireOtp,
+        business_name: businessName,
       });
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 2000);
@@ -700,13 +703,16 @@ export default function AgentCorePage() {
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
           <div>
-            <label className="text-[13px] text-muted-foreground font-medium mb-2 block">Org Name</label>
+            <label className="text-[13px] text-muted-foreground font-medium mb-2 block">Business Name</label>
             <input
               type="text"
-              value={config?.org_name || ""}
-              disabled
-              className="w-full bg-background border border-border text-muted-foreground px-3.5 py-2.5 rounded-md text-[13px] font-sans cursor-not-allowed"
+              value={businessName}
+              onChange={(e) => setBusinessName(e.target.value)}
+              className="w-full bg-background border border-border text-foreground px-3.5 py-2.5 rounded-md text-[13px] font-sans focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
             />
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Used for RAG retrieval filtering. Set to your company name (e.g., "dotstark").
+            </p>
           </div>
 
           <div>

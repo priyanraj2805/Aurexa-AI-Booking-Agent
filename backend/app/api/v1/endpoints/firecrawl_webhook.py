@@ -12,10 +12,12 @@ Firecrawl v4 fires **per-page** events during a crawl, not a single
     }
 
 For ``crawl.page`` events we ingest the single page's markdown into BM25.
-For ``crawl.completed`` / ``crawl.failed`` events we just acknowledge.
+For ``crawl.completed`` / ``crawl.failed`` events we persist the terminal
+status back to org_configs so the admin UI sees completion.
 """
 
 from fastapi import APIRouter, Request, HTTPException
+from sqlalchemy import text
 import logging
 
 from app.db.database import AsyncSessionLocal
@@ -24,6 +26,27 @@ from app.services.pdf_processor import chunk_text
 
 router = APIRouter(tags=["Firecrawl Webhook"])
 logger = logging.getLogger(__name__)
+
+
+async def _update_crawl_status(org_id: str, crawl_id: str, status: str,
+                                 total_pages: int = 0) -> None:
+    """Update org_configs crawl state when a terminal webhook fires."""
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            text(
+                "UPDATE org_configs SET crawl_status = :status, "
+                "crawl_completed_at = NOW(), "
+                "total_pages_crawled = :total_pages "
+                "WHERE org_id = :org_id AND crawl_id = :crawl_id"
+            ),
+            {
+                "status": status,
+                "total_pages": total_pages,
+                "org_id": str(org_id),
+                "crawl_id": crawl_id,
+            },
+        )
+        await db.commit()
 
 
 @router.post("/webhook")
@@ -49,7 +72,12 @@ async def firecrawl_webhook(request: Request):
 
         if event_type == "crawl.failed":
             logger.error(f"Firecrawl crawl {crawl_id} failed: {payload.get('metadata')}")
+            await _update_crawl_status(org_id, crawl_id, "failed")
             return {"success": True}
+
+        if event_type == "crawl.completed":
+            await _update_crawl_status(org_id, crawl_id, "completed")
+            # still fall through to ingest any data in the payload
 
         if event_type not in ("crawl.page", "crawl.completed"):
             return {"success": True}

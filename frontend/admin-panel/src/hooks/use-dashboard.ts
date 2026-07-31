@@ -72,6 +72,7 @@ export interface AgentConfig {
   timezone: string;
   ui_brand_color: string;
   org_name: string;
+  business_name?: string | null;
   api_key: string;
   require_otp: boolean;
   max_booking_days_ahead: number;
@@ -83,6 +84,12 @@ export interface AgentConfig {
     updated_at: string | null;
     updated_by: string | null;
   };
+  website_url?: string | null;
+  crawl_id?: string | null;
+  crawl_status?: string | null;
+  crawl_started_at?: string | null;
+  crawl_completed_at?: string | null;
+  total_pages_crawled?: number | null;
 }
 
 export interface SlotItem {

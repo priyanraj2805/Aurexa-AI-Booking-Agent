@@ -322,6 +322,8 @@ async def process_message_with_graph(
 
     # Convert org_config to a clean dictionary removing SQLAlchemy's internal state
     org_config_dict = {k: v for k, v in org_config.__dict__.items() if not k.startswith('_')}
+    # Use business_name for RAG filtering (falls back to org.name if not set)
+    org_config_dict["business_name"] = org_config_dict.get("business_name") or org.name
 
     # 1. Prepare configuration for LangGraph (passed as configurable dict)
     config = {

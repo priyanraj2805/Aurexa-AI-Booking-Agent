@@ -172,12 +172,18 @@ class OrgConfig(Base):
     # Widget token (separate from API key for secure embed)
     widget_token = Column(String(64), nullable=True)
 
+    # Business name — used for RAG filtering (separate from legal org name)
+    business_name = Column(String(255), nullable=True)
+
     # Vectorless RAG data sources (PDFs + crawled website content).
     # These columns back the admin "Agent Personalization" panel and are
     # populated by uploads/ crawls. Chunk text itself lives in document_chunks.
     website_url = Column(String(2048), nullable=True)
+    business_name = Column(String(255), nullable=True)
+    crawl_id = Column(String(128), nullable=True)
     crawl_status = Column(String(32), nullable=True)
     crawl_started_at = Column(DateTime(timezone=True), nullable=True)
     crawl_completed_at = Column(DateTime(timezone=True), nullable=True)
     total_pages_crawled = Column(Integer, nullable=True)
     uploaded_docs = Column(JSONB, nullable=True)
+    org_name = Column(String(255), nullable=True)

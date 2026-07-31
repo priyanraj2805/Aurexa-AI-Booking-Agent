@@ -382,6 +382,7 @@ class AgentConfigResponse(BaseModel):
     timezone: str
     ui_brand_color: str
     org_name: str
+    business_name: Optional[str] = None
     api_key: str
     require_otp: bool = True
     max_booking_days_ahead: int = 90
@@ -389,6 +390,14 @@ class AgentConfigResponse(BaseModel):
     session_cleanup_frequency: str = "daily"
     session_cleanup_hour_utc: int = 0
     meeting_policy: dict
+    # Website crawl state — surfaced so the admin UI can restore in-progress
+    # crawl context after a page refresh.
+    website_url: Optional[str] = None
+    crawl_id: Optional[str] = None
+    crawl_status: Optional[str] = None
+    crawl_started_at: Optional[str] = None
+    crawl_completed_at: Optional[str] = None
+    total_pages_crawled: Optional[int] = None
 
 
 class AgentConfigUpdate(BaseModel):
@@ -397,6 +406,7 @@ class AgentConfigUpdate(BaseModel):
     custom_prompts: Optional[dict] = None
     timezone: Optional[str] = None
     ui_brand_color: Optional[str] = None
+    org_name: Optional[str] = None
     require_otp: Optional[bool] = None
     max_booking_days_ahead: Optional[int] = None
     session_retention_days: Optional[int] = Field(default=None, ge=7, le=365)
@@ -694,7 +704,8 @@ async def get_agent_config(
         custom_prompts=config.custom_prompts,
         timezone=config.timezone or "UTC",
         ui_brand_color=config.ui_brand_color or "#3B82F6",
-        org_name=org.name if org else "Unknown",
+        org_name=config.org_name if getattr(config, "org_name", None) else (org.name if org else "Unknown"),
+        business_name=getattr(config, "business_name", None),
         api_key=masked_api_key,
         require_otp=config.require_otp if hasattr(config, "require_otp") else True,
         max_booking_days_ahead=config.max_booking_days_ahead
@@ -710,6 +721,20 @@ async def get_agent_config(
         if hasattr(config, "session_cleanup_hour_utc")
         else 0,
         meeting_policy=_meeting_policy_payload(config),
+        website_url=getattr(config, "website_url", None),
+        crawl_id=getattr(config, "crawl_id", None),
+        crawl_status=getattr(config, "crawl_status", None),
+        crawl_started_at=(
+            config.crawl_started_at.isoformat()
+            if getattr(config, "crawl_started_at", None)
+            else None
+        ),
+        crawl_completed_at=(
+            config.crawl_completed_at.isoformat()
+            if getattr(config, "crawl_completed_at", None)
+            else None
+        ),
+        total_pages_crawled=getattr(config, "total_pages_crawled", None),
     )
 
 
@@ -809,6 +834,8 @@ async def update_agent_config(
         config.meeting_provider_default = update.meeting_provider_default
         config.meeting_policy_updated_at = datetime.now(timezone.utc)
         config.meeting_policy_updated_by = user.email
+    if update.org_name is not None:
+        config.org_name = update.org_name
 
     from sqlalchemy.orm.attributes import flag_modified
 
