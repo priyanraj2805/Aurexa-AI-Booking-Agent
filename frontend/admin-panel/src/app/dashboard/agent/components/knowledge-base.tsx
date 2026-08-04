@@ -211,7 +211,9 @@ function DocumentsSection({ push }: { push: (m: string, k?: Toast["kind"]) => vo
 
 // ─── Website crawler section ─────────────────────────────────────────────
 
-const CRAWL_POLL_MS = 5000;
+// Poll every 30s: Firecrawl's default plan rate limit is 6 req/min, so a
+// faster cadence exhausts the quota (each poll is one API call).
+const CRAWL_POLL_MS = 30000;
 
 function WebsiteCrawlerSection({ push, onCrawlId }: {
   push: (m: string, k?: Toast["kind"]) => void;
@@ -223,13 +225,17 @@ function WebsiteCrawlerSection({ push, onCrawlId }: {
   const { data: status, refetch } = useCrawlStatus(crawlId);
   const { data: agentConfig } = useAgentConfig();
 
-  // Restore in-progress crawl state after page refresh
+  // Restore in-progress crawl state after page refresh.
+  // Skip terminal states (completed/failed/cancelled) so an expired
+  // Firecrawl job does not get resurrected and polled forever.
   useEffect(() => {
     if (!agentConfig) return;
     if (agentConfig.website_url && !crawlId) {
       setUrl(agentConfig.website_url);
     }
-    if (agentConfig.crawl_id && !crawlId) {
+    const terminal = ["completed", "failed", "cancelled"];
+    const storedStatus = (agentConfig.crawl_status || "").toLowerCase();
+    if (agentConfig.crawl_id && !crawlId && !terminal.includes(storedStatus)) {
       setCrawlId(agentConfig.crawl_id);
     }
   }, [agentConfig]);

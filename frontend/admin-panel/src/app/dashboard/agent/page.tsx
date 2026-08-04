@@ -711,7 +711,7 @@ export default function AgentCorePage() {
               className="w-full bg-background border border-border text-foreground px-3.5 py-2.5 rounded-md text-[13px] font-sans focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
             />
             <p className="text-[11px] text-muted-foreground mt-1">
-              Used for RAG retrieval filtering. Set to your company name (e.g., "dotstark").
+              Used for RAG retrieval filtering. Set to your company name (e.g., &apos;dotstark&apos;).
             </p>
           </div>
 

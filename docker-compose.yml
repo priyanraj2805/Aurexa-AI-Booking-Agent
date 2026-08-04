@@ -89,6 +89,42 @@ services:
     networks:
       - app-network
 
+  # ── FastAPI Super Admin Backend (Phase 0) ────────────────────────────────
+  # Separate control-plane backend. Reads tenant data via the SELECT-only
+  # super_admin_readonly DB role; writes ONLY to the super_admin schema.
+  backend-super:
+    build:
+      context: ./backend-super
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8006:8006"
+    env_file:
+      - ./backend-super/.env.docker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  # ── Next.js Super Admin Panel (Phase 0) ──────────────────────────────────
+  super-admin:
+    build:
+      context: ./frontend/super-admin
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3003:3003"
+    environment:
+      # Backend API URL for super admin panel to communicate with backend-super
+      - INTERNAL_API_URL=http://backend-super:8006
+    depends_on:
+      - backend-super
+    networks:
+      - app-network
+
 # ── Cloudflare Tunnel (Public Access) ────────────────────────────────────
   # cloudflared creates a secure tunnel between your laptop and Cloudflare.
   # No port forwarding, no public IP, no paid plan needed for basic tunnels.

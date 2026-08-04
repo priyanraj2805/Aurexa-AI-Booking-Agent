@@ -33,6 +33,17 @@ class AuditAction(str, Enum):
     CONVERSATION_TAKEOVER = "conversation.takeover"
     CONVERSATION_RELEASE = "conversation.release"
 
+    # Super Admin bridge operations (Phase 2)
+    ORG_SUSPEND = "org.suspend"
+    ORG_RESTORE = "org.restore"
+    ORG_DELETE = "org.delete"
+    USER_DISABLE = "user.disable"
+    USER_ENABLE = "user.enable"
+
+    # System alert operations (Phase 6, via bridge)
+    ALERT_ACKNOWLEDGE = "alert.acknowledge"
+    ALERT_RESOLVE = "alert.resolve"
+
 
 class AuditLogCreate(BaseModel):
     """Schema for creating audit log entries."""

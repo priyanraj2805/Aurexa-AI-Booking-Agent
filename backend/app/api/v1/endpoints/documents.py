@@ -341,6 +341,12 @@ async def get_crawl_status(
         pages_data = result.get("data") or []
         total = result.get("total") or len(pages_data)
 
+        # Persist terminal failure (e.g. expired Firecrawl job) so the UI
+        # stops polling and a page refresh does not resurrect it.
+        if status_str in ("failed", "cancelled"):
+            await _set_crawl_state(db, str(user.org_id), status=status_str)
+            await db.commit()
+
         # If the crawl completed and we have data, ingest it
         if status_str == "completed" and pages_data and db:
             from app.services.pdf_processor import chunk_text

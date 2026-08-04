@@ -21,7 +21,7 @@ async def run_migrations():
 
     logger.info("Running database migrations...")
     subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        [sys.executable, "-m", "alembic", "upgrade", "heads"],
         check=True,
         cwd=os.path.dirname(os.path.abspath(__file__)),
         env={**os.environ, "DATABASE_URL": settings.SQLALCHEMY_DATABASE_URI},

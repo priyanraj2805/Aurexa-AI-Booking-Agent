@@ -67,6 +67,28 @@ class Settings(BaseSettings):
         in ("true", "1", "yes")
     )
 
+    # ── Super Admin internal bridge (Phase 2) ─────────────────────────────
+    # When disabled (default), the bridge router is NOT registered and every
+    # bridge call returns 404. Enable only for the GA cutover, or in a
+    # dedicated sidecar instance for testing.
+    INTERNAL_BRIDGE_ENABLED: bool = (
+        os.getenv("INTERNAL_BRIDGE_ENABLED", "false").lower()
+        in ("true", "1", "yes")
+    )
+    INTERNAL_BRIDGE_SECRET: str = os.getenv(
+        "INTERNAL_BRIDGE_SECRET", ""
+    )
+    # Timestamp window (seconds) for bridge HMAC replay protection.
+    INTERNAL_BRIDGE_MAX_SKEW_SECONDS: int = int(
+        os.getenv("INTERNAL_BRIDGE_MAX_SKEW_SECONDS", "300")
+    )
+
+    # ── Telemetry (Phase 2) ───────────────────────────────────────────────
+    # Writes usage_events counters (super_admin schema). Default OFF.
+    TELEMETRY_ENABLED: bool = (
+        os.getenv("TELEMETRY_ENABLED", "false").lower() in ("true", "1", "yes")
+    )
+
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> str:
         return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"

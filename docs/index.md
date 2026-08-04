@@ -1,3 +1,4 @@
+
 # Documentation Hub
 
 Welcome to the DotStark AI Booking Agent documentation. Here you'll find everything you need to understand, set up, and extend the platform.
