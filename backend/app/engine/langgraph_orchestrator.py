@@ -18,7 +18,7 @@ from app.engine.agent.graph import booking_agent
 from app.engine.evaluator import StateEvaluator
 from app.engine import message_processor
 from app.engine.recipient_resolution import resolve_email_from_collected_data
-from app.engine.user_visible_text import extract_user_visible_text
+from app.engine.user_visible_text import extract_user_visible_text, looks_like_confirmation_claim
 from app.schemas.agent import FieldDefinition, parse_field_definitions, order_field_definitions
 
 logger = logging.getLogger(__name__)
@@ -26,16 +26,6 @@ MAX_RUNTIME_CONTEXT_MESSAGES = 6
 OTP_COOLDOWN_SECONDS = 30
 OTP_RESEND_CAP = 3
 OTP_VALID_FOR_SECONDS = 300
-CONFIRMATION_CLAIM_PATTERN = re.compile(
-    r"\b("
-    r"booking\s+(is\s+)?confirm(ed|ation)|"
-    r"appointment\s+(is\s+)?confirm(ed|ation)|"
-    r"reservation\s+(is\s+)?(saved|confirm(ed|ation))|"
-    r"successfully\s+booked|"
-    r"your\s+slot\s+is\s+booked"
-    r")\b",
-    flags=re.IGNORECASE,
-)
 
 
 def _extract_user_visible_message(raw_message: Any) -> tuple[str, Dict[str, Any]]:
@@ -219,10 +209,6 @@ def _enforce_runtime_contact_requirements(
     return required
 
 
-def _looks_like_confirmation_claim(message: str) -> bool:
-    return bool(CONFIRMATION_CLAIM_PATTERN.search(message or ""))
-
-
 def _is_non_terminal_directive(directive: str) -> bool:
     return directive in {
         "TEXT_INPUT",
@@ -249,7 +235,7 @@ def _guard_user_visible_booking_message(
 ) -> str:
     if directive == "BOOKING_CONFIRMED_CARD":
         return assistant_message
-    if not _looks_like_confirmation_claim(assistant_message):
+    if not looks_like_confirmation_claim(assistant_message):
         return assistant_message
 
     if directive in {

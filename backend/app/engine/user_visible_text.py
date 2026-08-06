@@ -7,6 +7,57 @@ _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*? response", flags=re.IGNORECASE 
 _THINK_TAG_RE = re.compile(r"</?think\b[^>]*>", flags=re.IGNORECASE)
 
 
+CONFIRMATION_CLAIM_PATTERN = re.compile(
+    r"\b("
+    r"(?:booking|appointment|reservation|slot)\s+"
+    r"(?:(?:has\s+been\s+|was\s+|is\s+)(?:now\s+|successfully\s+)?|(?:now\s+|successfully\s+))"
+    r"(?:confirmed|booked|reserved|scheduled|finalized)|"
+    r"\b(?:your|the|a)\s+(?:booking|appointment|reservation|slot)\s+"
+    r"(?:(?:has\s+been|was|is)\s+)?(?:now\s+|successfully\s+)?"
+    r"(?:confirmed|booked|reserved|scheduled|finalized)|"
+    r"(?:booking|appointment|reservation)\s+(?:is\s+)?confirmed|"
+    r"successfully\s+(?:booked|confirmed|reserved|scheduled)|"
+    r"(?:booked|confirmed|reserved|scheduled)\s+successfully|"
+    r"\bdone!\s*(?:your|.)?\s*(?:booking|appointment|slot)"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+CONFIRMATION_NEGATION_PATTERN = re.compile(
+    r"\b(?:not|no|never|cannot|can't|isn't|wasn't|hasn't|haven't|won't)\s+"
+    r"(?:confirmed|booked|reserved|scheduled|finalized|locked)",
+    flags=re.IGNORECASE,
+)
+
+
+def looks_like_confirmation_claim(message: str) -> bool:
+    """True when the message asserts a booking/appointment was completed.
+
+    Question forms ("is your slot booked?"), negations ("your slot is not
+    booked") and requests ("please confirm the booking") never count.
+    """
+    text = message or ""
+    if CONFIRMATION_NEGATION_PATTERN.search(text):
+        return False
+    match = CONFIRMATION_CLAIM_PATTERN.search(text)
+    if not match:
+        return False
+    sentence_start = max(
+        text.rfind(".", 0, match.start()),
+        text.rfind("!", 0, match.start()),
+        text.rfind("?", 0, match.start()),
+    ) + 1
+    sentence = text[sentence_start:].strip()
+    if sentence.endswith("?"):
+        return False
+    prefix = text[max(0, match.start() - 30) : match.start()].lower()
+    if re.search(
+        r"\b(?:not|no|never|unable|isn't|wasn't|hasn't|haven't|didn't|cannot|can't)\b",
+        prefix,
+    ):
+        return False
+    return True
+
+
 def sanitize_user_visible_text(raw_message: Any) -> str:
     text = str(raw_message or "")
     text = _THINK_BLOCK_RE.sub("", text)

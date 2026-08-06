@@ -2,6 +2,7 @@ import logging
 from typing import List, Dict, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
+import asyncio
 import json
 import re
 
@@ -9,6 +10,8 @@ from app.services.keyword_extractor import extract_keywords
 from app.engine.orchestrator import LLMOrchestrator
 
 logger = logging.getLogger(__name__)
+
+RERANK_HARD_TIMEOUT_SECONDS = 6.0
 
 _rerank_orchestrator: Optional[LLMOrchestrator] = None
 
@@ -99,10 +102,13 @@ async def rerank_chunks(query: str, chunks: List[dict], top_k: int = 5) -> List[
 
     try:
         orchestrator = _get_rerank_orchestrator()
-        raw = await orchestrator._call_llm(
-            prompt=user_prompt,
-            system_prompt=system_prompt,
-            json_mode=True,
+        raw = await asyncio.wait_for(
+            orchestrator._call_llm(
+                prompt=user_prompt,
+                system_prompt=system_prompt,
+                json_mode=True,
+            ),
+            timeout=RERANK_HARD_TIMEOUT_SECONDS,
         )
         if not raw:
             return chunks[:top_k]

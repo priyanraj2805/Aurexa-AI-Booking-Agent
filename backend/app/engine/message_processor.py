@@ -1162,6 +1162,23 @@ async def process_message(
                     agent_name=persona.get("agent_name", "Booking Assistant"),
                 )
 
+    from app.engine.user_visible_text import looks_like_confirmation_claim
+
+    if (
+        looks_like_confirmation_claim(msg)
+        and directive != "BOOKING_CONFIRMED_CARD"
+        and str(chat_session.session_status).upper() != "CONFIRMED"
+    ):
+        msg = _build_context_aware_response(
+            directive=directive,
+            field_meta=field_meta,
+            collected_data=chat_session.collected_data,
+            valid_data={},
+            errors={},
+            llm_generated_msg=msg,
+            agent_name=persona.get("agent_name", "Booking Assistant"),
+        )
+
     action = ActionPayload(
         message=msg, widget_directive=directive, field_meta=field_meta
     )

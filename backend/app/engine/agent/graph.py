@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -30,6 +31,73 @@ DATEISH_TOKEN_RE = re.compile(
     r"\b(today|tomorrow|next\s+\w+|this\s+\w+)\b|^\d{4}-\d{2}-\d{2}$|^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$",
     flags=re.IGNORECASE,
 )
+
+# Hard ceilings so a slow provider degrades gracefully instead of blocking
+# the customer chat for 30+ seconds (C4). Values are deliberate for a
+# serverless/free-tier model; raise if a faster provider is configured.
+RERANK_HARD_TIMEOUT_SECONDS = 6.0
+MAIN_LLM_HARD_TIMEOUT_SECONDS = 20.0
+
+_RAG_SKIP_PATTERNS = (
+    re.compile(r"^\s*\d{1,2}(:\d{2})\s*(am|pm)?\s*$", flags=re.IGNORECASE),
+    re.compile(r"^\s*\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\s*$"),
+    re.compile(r"^\s*\d{4}-\d{2}-\d{2}\s*$"),
+    re.compile(r"^\s*\+?\d[\d\s().-]{6,}\s*$"),
+    re.compile(r"^\s*[^@\s]+@[^@\s]+\.[^@\s]+\s*$"),
+    re.compile(r"^\s*virtual\|[\w-]+\|[\dTZ:.\-+]+(Z|\+\d{2}:\d{2})?\s*$"),
+)
+
+_CONFIRMATION_STARTER_RE = re.compile(
+    r"^\s*(yes|yep|yeah|sure|ok|okay|alright|fine|perfect|great|thanks|thank you|"
+    r"correct|confirmed|go ahead|please)([,.\s]|$)",
+    flags=re.IGNORECASE,
+)
+
+_KNOWLEDGE_QUERY_TOKEN_RE = re.compile(
+    r"\b(what|which|when|where|who|whom|whose|why|how|can|could|would|should|will|"
+    r"do|does|did|tell me|explain|offer|offers|services|service|hours|pricing|price|"
+    r"cost|available|open|policy|policies)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _looks_like_booking_field_value(message_text: str) -> bool:
+    """True when a user message is a bare field value or short confirmation.
+
+    Such turns cannot be knowledge questions, so skipping RAG avoids an
+    extra LLM rerank round-trip (~5-20s) on every booking step (C4).
+    """
+    text = str(message_text or "").strip()
+    if not text:
+        return True
+    if "?" in text:
+        return False
+    if len(text.split()) <= 6 and _CONFIRMATION_STARTER_RE.match(text):
+        return True
+    return len(text.split()) <= 4 and any(
+        pattern.search(text) for pattern in _RAG_SKIP_PATTERNS
+    )
+
+
+def _is_potential_knowledge_question(message_text: str) -> bool:
+    """True when a turn plausibly asks for company/business knowledge.
+
+    Booking statements ("I want to book an appointment"), field values and
+    confirmations are never knowledge questions; running the RAG pipeline
+    on them wastes an LLM rerank call per turn (C4).
+    """
+    text = str(message_text or "").strip()
+    if not text:
+        return False
+    if text.endswith("?"):
+        return True
+    return bool(_KNOWLEDGE_QUERY_TOKEN_RE.search(text))
+
+
+def _should_skip_rag(message_text: str) -> bool:
+    return _looks_like_booking_field_value(message_text) or not _is_potential_knowledge_question(
+        message_text
+    )
 
 
 def _normalize_llm_base_url(raw_url: str) -> str:
@@ -220,8 +288,14 @@ async def call_model(
     if active_summary:
         context_block = f"{context_block}\n\nConversation summary:\n{active_summary}"
 
-    # 3b. Retrieve relevant knowledge from uploaded documents and crawled websites
-    if latest_user_message and db:
+    # 3b. Retrieve relevant knowledge from uploaded documents and crawled websites.
+    # Only for knowledge-question turns: booking statements, field values and
+    # confirmations never need RAG, and the rerank call costs seconds (C4).
+    if (
+        latest_user_message
+        and db
+        and not _should_skip_rag(latest_user_message)
+    ):
         try:
             from app.services.retrieval_service import retrieve_and_rerank
             rag_chunks = await retrieve_and_rerank(
@@ -257,7 +331,37 @@ async def call_model(
     # In LangGraph, we prepend the system message to the message history
     messages = [full_system_msg] + active_messages
     
-    response = await llm.ainvoke(messages)
+    try:
+        response = await asyncio.wait_for(
+            llm.ainvoke(messages),
+            timeout=MAIN_LLM_HARD_TIMEOUT_SECONDS,
+        )
+    except Exception as llm_error:
+        is_timeout = isinstance(llm_error, asyncio.TimeoutError)
+        if is_timeout:
+            logger.warning(
+                "main_llm_hard_timeout",
+                extra={
+                    "session_id": state.get("session_id"),
+                    "timeout_seconds": MAIN_LLM_HARD_TIMEOUT_SECONDS,
+                },
+            )
+        else:
+            logger.warning("main_llm_call_failed", exc_info=True)
+        fallback_message = (
+            f"Could I get your {'next detail' if missing else 'confirmation'}? "
+            "Please reply and I'll continue."
+        )
+        return {
+            "messages": [AIMessage(content=fallback_message)],
+            "summary": active_summary,
+            "context_window": [_serialize_message(message) for message in active_messages],
+            "context_window_size": len(active_messages),
+            "context_compacted": context_compacted,
+            "collected_fields": dict(state.get("collected_fields", {})),
+            "follow_up_fields": list(state.get("follow_up_fields", [])),
+            "current_intent": str(state.get("current_intent") or "START_BOOKING"),
+        }
     
     # Emit AI token telemetry (gated no-op while TELEMETRY_ENABLED is false)
     usage_metadata = getattr(response, "usage_metadata", None)
