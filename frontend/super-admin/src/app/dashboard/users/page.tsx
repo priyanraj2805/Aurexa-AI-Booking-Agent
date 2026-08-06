@@ -110,7 +110,14 @@ export default function UsersPage() {
             {!loading &&
               data?.items.map((u) => (
                 <tr key={u.id}>
-                  <td className="px-4 py-3 font-medium">{u.full_name ?? "—"}</td>
+                  <td className="px-4 py-3 font-medium">
+                    <Link
+                      href={`/dashboard/users/${u.id}`}
+                      className="text-indigo-400 hover:underline"
+                    >
+                      {u.full_name ?? "—"}
+                    </Link>
+                  </td>
                   <td className="px-4 py-3 text-slate-300">{u.email}</td>
                   <td className="px-4 py-3">
                     <Link
