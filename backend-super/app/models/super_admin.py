@@ -107,6 +107,7 @@ class AdminSession(Base):
         index=True,
     )
     refresh_token_hash = Column(String(255), nullable=False)
+    jti = Column(String(64), nullable=True)
     ip_address = Column(String(45))
     user_agent = Column(Text)
     expires_at = Column(DateTime(timezone=True), nullable=False)

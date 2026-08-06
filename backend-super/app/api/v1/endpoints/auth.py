@@ -247,6 +247,7 @@ async def mfa_verify(
         AdminSession(
             admin_id=admin.id,
             refresh_token_hash=generate_token_hash(refresh_token),
+            jti=jti,
             ip_address=_client_ip(request),
             user_agent=request.headers.get("user-agent", "")[:500],
             expires_at=datetime.now(timezone.utc)
@@ -344,7 +345,7 @@ async def refresh(
     ).scalar_one_or_none()
     if not session or session.revoked_at is not None:
         raise HTTPException(status_code=401, detail="Refresh token revoked")
-    if session.id != jti:
+    if session.jti != jti:
         raise HTTPException(status_code=401, detail="Refresh token mismatch")
 
     admin = (
@@ -361,6 +362,7 @@ async def refresh(
         AdminSession(
             admin_id=admin.id,
             refresh_token_hash=generate_token_hash(new_refresh),
+            jti=new_jti,
             ip_address=_client_ip(request),
             user_agent=request.headers.get("user-agent", "")[:500],
             expires_at=datetime.now(timezone.utc)
@@ -448,7 +450,7 @@ async def change_password(
     settings_row = await get_security_settings(db)
     validate_password_policy(payload.new_password, settings_row["password_policy"])
 
-    admin.hashed_password = hash_password(payload.new_password)
+    admin.password_hash = hash_password(payload.new_password)
     await db.commit()
     await write_audit_log(
         actor_email=admin.email,
