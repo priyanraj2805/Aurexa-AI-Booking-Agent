@@ -170,6 +170,69 @@ async def create_subscription(
     return {"ok": True, "subscription_id": str(sub_id), "provider": provider.name}
 
 
+@router.post("/subscriptions/{subscription_id}/cancel")
+async def cancel_subscription(
+    subscription_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: CurrentAdmin = Depends(require_permission("billing.manage")),
+):
+    """Cancel an active subscription immediately (at the provider + in DB)."""
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT s.id, s.org_id, o.name AS org_name, s.plan_id, p.code AS plan_code,
+                       s.provider, s.status, s.provider_sub_id
+                FROM super_admin.subscriptions s
+                JOIN super_admin.plans p ON p.id = s.plan_id
+                JOIN public.organizations o ON o.id = s.org_id
+                WHERE s.id = :subscription_id
+                """
+            ),
+            {"subscription_id": subscription_id},
+        )
+    ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+    if row["status"] != "active":
+        raise HTTPException(
+            status_code=422, detail=f"Cannot cancel a {row['status']} subscription"
+        )
+
+    provider = get_provider()
+    try:
+        await provider.cancel_subscription(row["provider_sub_id"] or "")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Provider cancel failed: {exc}"
+        )
+
+    await db.execute(
+        text(
+            """
+            UPDATE super_admin.subscriptions
+            SET status = 'canceled', canceled_at = now(), cancel_at_period_end = FALSE
+            WHERE id = :subscription_id
+            """
+        ),
+        {"subscription_id": subscription_id},
+    )
+    await db.commit()
+
+    await write_audit_log(
+        actor_id=admin.id,
+        actor_email=admin.email,
+        action="billing.subscription.cancel",
+        resource_type="organization",
+        resource_id=str(row["org_id"]),
+        new_values={"org_name": row["org_name"], "plan_code": row["plan_code"]},
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return {"ok": True, "subscription_id": str(subscription_id)}
+
+
 @router.get("/invoices")
 async def list_invoices(
     org_id: Optional[UUID] = Query(None),

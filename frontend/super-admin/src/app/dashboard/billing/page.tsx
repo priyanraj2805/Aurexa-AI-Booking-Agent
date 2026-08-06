@@ -109,6 +109,9 @@ export default function BillingPage() {
 
   const [retryingId, setRetryingId] = useState<string | null>(null);
 
+  const [cancelTarget, setCancelTarget] = useState<SubscriptionRow | null>(null);
+  const [cancelBusy, setCancelBusy] = useState(false);
+
   const loadAll = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -157,6 +160,21 @@ export default function BillingPage() {
       toast("error", e instanceof Error ? e.message : "Subscription failed");
     } finally {
       setSubBusy(false);
+    }
+  };
+
+  const cancelSubscription = async () => {
+    if (!cancelTarget) return;
+    setCancelBusy(true);
+    try {
+      await api.post(`/billing/subscriptions/${cancelTarget.id}/cancel`);
+      toast("success", "Subscription canceled");
+      setCancelTarget(null);
+      void loadAll();
+    } catch (e) {
+      toast("error", e instanceof Error ? e.message : "Cancel failed");
+    } finally {
+      setCancelBusy(false);
     }
   };
 
@@ -405,12 +423,13 @@ export default function BillingPage() {
                 <th className="px-4 py-3">Status</th>
                 <th className="px-4 py-3">Period</th>
                 <th className="px-4 py-3">Provider</th>
+                <th className="px-4 py-3">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800 bg-slate-900/50">
               {loading && (
                 <tr>
-                  <td colSpan={5} className="px-4 py-3 text-slate-500">Loading…</td>
+                  <td colSpan={6} className="px-4 py-3 text-slate-500">Loading…</td>
                 </tr>
               )}
               {!loading &&
@@ -432,11 +451,22 @@ export default function BillingPage() {
                         : "—"}
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-slate-500">{s.provider}</td>
+                    <td className="px-4 py-3">
+                      {s.status === "active" && can("billing.manage") && (
+                        <button
+                          onClick={() => setCancelTarget(s)}
+                          disabled={cancelBusy}
+                          className="rounded-md border border-red-600 bg-red-950/50 px-3 py-1 text-xs text-red-300 hover:bg-red-950 disabled:opacity-50"
+                        >
+                          Cancel
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               {!loading && subs.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="px-4 py-8 text-center text-slate-400">
+                  <td colSpan={6} className="px-4 py-8 text-center text-slate-400">
                     No subscriptions
                   </td>
                 </tr>
@@ -751,6 +781,35 @@ export default function BillingPage() {
               className="rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50"
             >
               {refundBusy ? "Processing…" : "Refund"}
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {cancelTarget && (
+        <Modal
+          title="Cancel subscription"
+          onClose={() => setCancelTarget(null)}
+        >
+          <p className="text-slate-300">
+            Cancel <strong className="text-slate-100">{cancelTarget.org_name}</strong>'s{" "}
+            <strong className="text-slate-100">{cancelTarget.plan_name}</strong> subscription
+            ({cancelTarget.provider}) immediately?
+          </p>
+          <div className="mt-5 flex justify-end gap-2">
+            <button
+              onClick={() => setCancelTarget(null)}
+              disabled={cancelBusy}
+              className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={cancelSubscription}
+              disabled={cancelBusy}
+              className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+            >
+              {cancelBusy ? "Canceling…" : "Yes, cancel subscription"}
             </button>
           </div>
         </Modal>

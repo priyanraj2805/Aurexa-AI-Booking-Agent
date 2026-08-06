@@ -35,6 +35,10 @@ class BillingProvider(ABC):
         """Provision the subscription externally; returns provider IDs."""
 
     @abstractmethod
+    async def cancel_subscription(self, provider_sub_id: str) -> dict:
+        """Cancel an existing subscription at the provider."""
+
+    @abstractmethod
     async def retry_invoice(self, provider_invoice_id: str) -> dict:
         """Attempt payment for an open invoice; returns {'paid': bool}."""
 
@@ -53,6 +57,9 @@ class MockProvider(BillingProvider):
             "provider_customer_id": f"cus_mock_{org_id[:8]}",
             "provider_sub_id": f"sub_mock_{uuid_mod.uuid4().hex[:12]}",
         }
+
+    async def cancel_subscription(self, provider_sub_id: str) -> dict:
+        return {"ok": True, "provider_sub_id": provider_sub_id}
 
     async def retry_invoice(self, provider_invoice_id: str) -> dict:
         return {"paid": True, "payment_intent": f"pi_mock_{provider_invoice_id[:8]}"}
@@ -79,6 +86,11 @@ class StripeProvider(BillingProvider):
             items=[{"price": plan_code}],
         )
         return {"provider_customer_id": sub.customer, "provider_sub_id": sub.id}
+
+    async def cancel_subscription(self, provider_sub_id: str) -> dict:
+        stripe = self._stripe()
+        sub = stripe.Subscription.cancel(provider_sub_id)
+        return {"ok": sub.status in ("canceled", "past_due", "unpaid"), "status": sub.status}
 
     async def retry_invoice(self, provider_invoice_id: str) -> dict:
         stripe = self._stripe()
