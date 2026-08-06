@@ -22,6 +22,17 @@ logger = logging.getLogger(__name__)
 
 BRIDGE_PATH = "/api/v1/internal/bridge"
 
+DEV_BRIDGE_SECRET = "dev_bridge_secret_2026"
+
+
+def _assert_secret_policy() -> None:
+    """Fail loudly when the well-known dev secret is used outside DEBUG mode."""
+    if not settings.DEBUG and settings.INTERNAL_BRIDGE_SECRET == DEV_BRIDGE_SECRET:
+        raise BridgeError(
+            500,
+            "INTERNAL_BRIDGE_SECRET must be overridden when DEBUG=false",
+        )
+
 
 class BridgeError(HTTPException):
     def __init__(self, status_code: int, detail: str) -> None:
@@ -51,6 +62,7 @@ async def bridge_call(
     json_body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Perform an HMAC-signed request against the main backend bridge."""
+    _assert_secret_policy()
     url = settings.INTERNAL_API_URL.rstrip("/") + BRIDGE_PATH + path
     body = b""
     if json_body is not None:
