@@ -40,6 +40,39 @@ type OrgDetail = {
   config: OrgConfig;
 };
 
+type OrgSubRow = {
+  id: string;
+  org_id: string;
+  org_name: string;
+  plan_id: string;
+  plan_code: string;
+  plan_name: string;
+  provider: string;
+  status: string;
+  current_period_start: string | null;
+  current_period_end: string | null;
+  cancel_at_period_end: boolean;
+  canceled_at: string | null;
+  created_at: string | null;
+};
+
+type OrgInvoiceRow = {
+  id: string;
+  org_id: string;
+  org_name: string;
+  number: string;
+  amount_cents: number;
+  currency: string;
+  status: string;
+  invoice_url: string | null;
+  description: string | null;
+  due_at: string | null;
+  paid_at: string | null;
+  refunded_at: string | null;
+  refund_amount_cents: number;
+  created_at: string | null;
+};
+
 type Booking = {
   id: string;
   customer_name: string;
@@ -158,6 +191,8 @@ export default function OrgDetailPage({
   const [users, setUsers] = useState<OrgUser[]>([]);
   const [usage, setUsage] = useState<UsageRow[]>([]);
   const [audit, setAudit] = useState<AuditRow[]>([]);
+  const [billingSubs, setBillingSubs] = useState<OrgSubRow[]>([]);
+  const [billingInvoices, setBillingInvoices] = useState<OrgInvoiceRow[]>([]);
   const [tabError, setTabError] = useState<string | null>(null);
   const [unmask, setUnmask] = useState(false);
   const canUnmask = can("pii.unmask");
@@ -212,6 +247,17 @@ export default function OrgDetailPage({
             `/tenants/orgs/${id}/usage`
           );
           setUsage(u.items);
+        } else if (t === "Billing") {
+          const [s, inv] = await Promise.all([
+            api.get<{ items: OrgSubRow[] }>(
+              `/billing/subscriptions?org_id=${id}`
+            ),
+            api.get<{ items: OrgInvoiceRow[] }>(
+              `/billing/invoices?org_id=${id}`
+            ),
+          ]);
+          setBillingSubs(s.items);
+          setBillingInvoices(inv.items);
         } else if (t === "Audit") {
           const a = await api.get<{ items: AuditRow[] }>(
             `/tenants/orgs/${id}/audit`
@@ -810,8 +856,140 @@ export default function OrgDetailPage({
       )}
 
       {tab === "Billing" && (
-        <div className="mt-4">
-          <EmptyState text="Billing data (invoices, MRR, plans) arrives in Phase 5." />
+        <div className="mt-4 space-y-6">
+          {tabError && (
+            <div className="rounded-lg border border-red-800 bg-red-950/50 p-3 text-sm text-red-300">
+              {tabError}
+            </div>
+          )}
+          <div>
+            <h3 className="mb-2 text-sm font-medium uppercase tracking-wide text-slate-400">
+              Subscriptions
+            </h3>
+            {billingSubs.length === 0 ? (
+              <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-6 text-center text-sm text-slate-500">
+                No subscriptions for this organization
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                {billingSubs.map((s) => (
+                  <div
+                    key={s.id}
+                    className="rounded-lg border border-slate-800 bg-slate-900/50 p-4"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-slate-200">
+                        {s.plan_name}
+                      </span>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                          s.status === "active"
+                            ? "bg-green-900/60 text-green-300"
+                            : s.status === "canceled"
+                              ? "bg-slate-800 text-slate-400"
+                              : "bg-amber-900/60 text-amber-300"
+                        }`}
+                      >
+                        {s.status.toUpperCase()}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-xs text-slate-500">
+                      {s.plan_code} · {s.provider}
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-400">
+                      <div>
+                        <div className="text-slate-500">Period</div>
+                        <div>
+                          {s.current_period_start
+                            ? `${new Date(s.current_period_start).toLocaleDateString()} → ${s.current_period_end ? new Date(s.current_period_end).toLocaleDateString() : "—"}`
+                            : "—"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-slate-500">Created</div>
+                        <div>
+                          {s.created_at
+                            ? new Date(s.created_at).toLocaleDateString()
+                            : "—"}
+                        </div>
+                      </div>
+                    </div>
+                    {s.canceled_at && (
+                      <div className="mt-2 text-xs text-red-400">
+                        Canceled{" "}
+                        {new Date(s.canceled_at).toLocaleDateString()}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div>
+            <h3 className="mb-2 text-sm font-medium uppercase tracking-wide text-slate-400">
+              Invoices
+            </h3>
+            {billingInvoices.length === 0 ? (
+              <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-6 text-center text-sm text-slate-500">
+                No invoices for this organization
+              </div>
+            ) : (
+              <div className="overflow-x-auto rounded-lg border border-slate-800">
+                <table className="w-full text-left text-sm">
+                  <thead className="border-b border-slate-800 bg-slate-900 text-xs uppercase tracking-wide text-slate-400">
+                    <tr>
+                      <th className="px-4 py-3">Invoice</th>
+                      <th className="px-4 py-3">Amount</th>
+                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3">Issued</th>
+                      <th className="px-4 py-3">Due</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800 bg-slate-900/50">
+                    {billingInvoices.map((inv) => (
+                      <tr key={inv.id}>
+                        <td className="px-4 py-3 font-mono text-slate-300">
+                          {inv.number}
+                        </td>
+                        <td className="px-4 py-3 text-slate-200">
+                          {(inv.amount_cents / 100).toLocaleString("en-US", {
+                            style: "currency",
+                            currency: inv.currency || "USD",
+                          })}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                              inv.status === "paid"
+                                ? "bg-green-900/60 text-green-300"
+                                : inv.status === "refunded"
+                                  ? "bg-indigo-900/60 text-indigo-300"
+                                  : inv.status === "open"
+                                    ? "bg-amber-900/60 text-amber-300"
+                                    : "bg-slate-800 text-slate-400"
+                            }`}
+                          >
+                            {inv.status.toUpperCase()}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-xs text-slate-400">
+                          {inv.created_at
+                            ? new Date(inv.created_at).toLocaleDateString()
+                            : "—"}
+                        </td>
+                        <td className="px-4 py-3 text-xs text-slate-400">
+                          {inv.due_at
+                            ? new Date(inv.due_at).toLocaleDateString()
+                            : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
