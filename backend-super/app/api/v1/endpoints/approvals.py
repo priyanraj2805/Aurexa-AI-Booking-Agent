@@ -22,6 +22,7 @@ from app.core.audit import write_audit_log
 from app.core.billing import execute_refund
 from app.core.bridge_client import bridge_call
 from app.core.rbac import CurrentAdmin, require_any_permission, require_permission
+from app.core.stepup import require_stepup
 from app.db.database import get_db
 
 router = APIRouter()
@@ -166,6 +167,8 @@ async def approve_approval(
         raise HTTPException(
             status_code=403, detail="Second-person rule: you cannot approve your own request"
         )
+    if row["request_type"] == "org.delete":
+        require_stepup(request, admin)
     if datetime.now(timezone.utc) > row["expires_at"]:
         await db.execute(
             text("UPDATE super_admin.approvals SET status = 'EXPIRED' WHERE id = :id"),

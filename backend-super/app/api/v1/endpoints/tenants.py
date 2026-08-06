@@ -5,7 +5,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 
-from app.core.rbac import require_permission
+from app.core.pii import mask_value
+from app.core.rbac import CurrentAdmin, require_permission
 from app.db.database import get_readonly_db
 from app.schemas.tenant import (
     BookingListResponse,
@@ -34,6 +35,33 @@ def _mask_api_key(key: str) -> str:
     if len(key) <= 12:
         return key[:4] + "…" if key else ""
     return key[:4] + "…" + key[-4:]
+
+
+def _can_unmask(admin: CurrentAdmin, unmask: bool) -> bool:
+    """True when the caller holds pii.unmask AND asked for unmasked data."""
+    return unmask and admin.has_permission("pii.unmask")
+
+
+def _masked_user_row(row: dict, can_unmask: bool) -> dict:
+    out = dict(row)
+    if not can_unmask:
+        if out.get("email"):
+            out["email"] = mask_value("email", out["email"])
+        if out.get("full_name"):
+            out["full_name"] = mask_value("full_name", out["full_name"])
+    return out
+
+
+def _masked_booking_rows(rows, can_unmask: bool) -> list:
+    out = []
+    for r in rows:
+        row = dict(r)
+        if not can_unmask:
+            for key in ("customer_name", "customer_email", "customer_phone"):
+                if row.get(key):
+                    row[key] = mask_value(key, row[key])
+        out.append(BookingSummary(**{k: row.get(k) for k in BookingSummary.model_fields}))
+    return out
 
 
 @router.get("/orgs", response_model=OrgListResponse)
@@ -148,9 +176,15 @@ async def get_organization(
         timezone=row["timezone"],
         require_otp=bool(row["require_otp"]),
         allow_same_day_booking=bool(row["allow_same_day_booking"]),
-        slot_cutoff_minutes=row["slot_cutoff_minutes"],
-        max_booking_days_ahead=row["max_booking_days_ahead"],
-        session_retention_days=row["session_retention_days"],
+        slot_cutoff_minutes=row["slot_cutoff_minutes"]
+        if row["slot_cutoff_minutes"] is not None
+        else 5,
+        max_booking_days_ahead=row["max_booking_days_ahead"]
+        if row["max_booking_days_ahead"] is not None
+        else 90,
+        session_retention_days=row["session_retention_days"]
+        if row["session_retention_days"] is not None
+        else 30,
         meeting_mode=row["meeting_mode"],
         active_calendar_provider=row["active_calendar_provider"],
         active_meeting_provider=row["active_meeting_provider"],
@@ -179,10 +213,11 @@ async def get_organization(
 @router.get("/orgs/{org_id}/bookings", response_model=BookingListResponse)
 async def list_org_bookings(
     org_id: UUID,
+    unmask: bool = Query(False),
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
     db: AsyncSession = Depends(get_readonly_db),
-    _: dict = Depends(require_permission("orgs.view")),
+    admin: CurrentAdmin = Depends(require_permission("orgs.view")),
 ):
     exists = (
         await db.execute(
@@ -192,6 +227,7 @@ async def list_org_bookings(
     if not exists:
         raise HTTPException(status_code=404, detail="Organization not found")
 
+    can_unmask = _can_unmask(admin, unmask)
     offset = (page - 1) * page_size
     total = (
         await db.execute(
@@ -215,7 +251,7 @@ async def list_org_bookings(
             {"org_id": org_id, "limit": page_size, "offset": offset},
         )
     ).mappings()
-    items = [BookingSummary(**{k: r.get(k) for k in BookingSummary.model_fields}) for r in rows]
+    items = _masked_booking_rows(rows, can_unmask)
     return BookingListResponse(total=total or 0, page=page, page_size=page_size, items=items)
 
 
@@ -267,10 +303,11 @@ async def search_users(
     search: Optional[str] = Query(None, max_length=100),
     org_id: Optional[UUID] = Query(None),
     is_active: Optional[bool] = Query(None),
+    unmask: bool = Query(False),
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
     db: AsyncSession = Depends(get_readonly_db),
-    _: dict = Depends(require_permission("users.view")),
+    admin: CurrentAdmin = Depends(require_permission("users.view")),
 ):
     where = []
     params: dict = {}
@@ -308,7 +345,11 @@ async def search_users(
             {"limit": page_size, "offset": offset, **params},
         )
     ).mappings()
-    items = [UserSummary(**{k: r.get(k) for k in UserSummary.model_fields}) for r in rows]
+    can_unmask = _can_unmask(admin, unmask)
+    items = [
+        UserSummary(**{k: r.get(k) for k in UserSummary.model_fields})
+        for r in (_masked_user_row(dict(row), can_unmask) for row in rows)
+    ]
     return UserListResponse(total=total or 0, page=page, page_size=page_size, items=items)
 
 
@@ -425,10 +466,11 @@ async def top_orgs(
 @router.get("/orgs/{org_id}/users", response_model=UserListResponse)
 async def list_org_users(
     org_id: UUID,
+    unmask: bool = Query(False),
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
     db: AsyncSession = Depends(get_readonly_db),
-    _: dict = Depends(require_permission("users.view")),
+    admin: CurrentAdmin = Depends(require_permission("users.view")),
 ):
     exists = (
         await db.execute(
@@ -438,6 +480,7 @@ async def list_org_users(
     if not exists:
         raise HTTPException(status_code=404, detail="Organization not found")
 
+    can_unmask = _can_unmask(admin, unmask)
     offset = (page - 1) * page_size
     total = (
         await db.execute(
@@ -461,7 +504,10 @@ async def list_org_users(
             {"org_id": org_id, "limit": page_size, "offset": offset},
         )
     ).mappings()
-    items = [UserSummary(**{k: r.get(k) for k in UserSummary.model_fields}) for r in rows]
+    items = [
+        UserSummary(**{k: r.get(k) for k in UserSummary.model_fields})
+        for r in (_masked_user_row(dict(row), can_unmask) for row in rows)
+    ]
     return UserListResponse(total=total or 0, page=page, page_size=page_size, items=items)
 
 
@@ -558,8 +604,9 @@ async def org_audit(
 @router.get("/users/{user_id}", response_model=UserProfile)
 async def get_user_profile(
     user_id: UUID,
+    unmask: bool = Query(False),
     db: AsyncSession = Depends(get_readonly_db),
-    _: dict = Depends(require_permission("users.view")),
+    admin: CurrentAdmin = Depends(require_permission("users.view")),
 ):
     row = (
         await db.execute(
@@ -603,21 +650,20 @@ async def get_user_profile(
         )
     ).mappings()
 
+    can_unmask = _can_unmask(admin, unmask)
+    user = _masked_user_row(dict(row), can_unmask)
     return UserProfile(
-        id=row["id"],
-        org_id=row["org_id"],
-        org_name=row["org_name"],
-        email=row["email"],
-        full_name=row["full_name"],
-        is_active=row["is_active"],
-        created_at=row["created_at"],
-        booking_count=row["booking_count"] or 0,
-        conversation_count=row["conversation_count"] or 0,
-        last_activity_at=row["last_activity_at"],
-        recent_bookings=[
-            BookingSummary(**{k: r.get(k) for k in BookingSummary.model_fields})
-            for r in bookings
-        ],
+        id=user["id"],
+        org_id=user["org_id"],
+        org_name=user["org_name"],
+        email=user["email"],
+        full_name=user["full_name"],
+        is_active=user["is_active"],
+        created_at=user["created_at"],
+        booking_count=user["booking_count"] or 0,
+        conversation_count=user["conversation_count"] or 0,
+        last_activity_at=user["last_activity_at"],
+        recent_bookings=_masked_booking_rows(bookings, can_unmask),
     )
 
 

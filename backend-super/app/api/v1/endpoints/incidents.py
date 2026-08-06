@@ -13,6 +13,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import write_audit_log
+from app.core.incident_notify import (
+    notify_incident_created,
+    notify_incident_escalated,
+)
 from app.core.rbac import CurrentAdmin, require_permission
 from app.db.database import get_db
 
@@ -145,6 +149,13 @@ async def create_incident(
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
+    notify_incident_created(
+        incident_id=str(row["id"]),
+        title=payload.title,
+        severity=payload.severity,
+        component=payload.component,
+        message=payload.message,
+    )
     return {"ok": True, "incident_id": str(row["id"])}
 
 
@@ -183,7 +194,7 @@ async def update_incident(
     existing = (
         await db.execute(
             text(
-                "SELECT id, title, severity, status, resolved_at FROM super_admin.incidents WHERE id = :incident_id"
+                "SELECT id, title, severity, status, component, resolved_at FROM super_admin.incidents WHERE id = :incident_id"
             ),
             {"incident_id": incident_id},
         )
@@ -202,6 +213,11 @@ async def update_incident(
         "status" in changes
         and changes["status"] != "resolved"
         and existing["resolved_at"] is not None
+    )
+    will_escalate = (
+        "severity" in changes
+        and changes["severity"] in ("critical", "major")
+        and changes["severity"] != existing["severity"]
     )
 
     sets = []
@@ -239,4 +255,11 @@ async def update_incident(
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
+    if will_escalate:
+        notify_incident_escalated(
+            incident_id=str(incident_id),
+            title=changes.get("title") or existing["title"],
+            severity=changes["severity"],
+            component=changes.get("component") or existing["component"],
+        )
     return {"ok": True, "incident_id": str(incident_id)}

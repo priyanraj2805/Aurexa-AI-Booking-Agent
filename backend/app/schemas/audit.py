@@ -44,6 +44,10 @@ class AuditAction(str, Enum):
     ALERT_ACKNOWLEDGE = "alert.acknowledge"
     ALERT_RESOLVE = "alert.resolve"
 
+    # Impersonation operations (Phase 8, via bridge)
+    IMPERSONATION_START = "impersonation.start"
+    IMPERSONATION_END = "impersonation.end"
+
 
 class AuditLogCreate(BaseModel):
     """Schema for creating audit log entries."""

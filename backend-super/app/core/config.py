@@ -25,13 +25,17 @@ class Settings(BaseSettings):
     )
 
     # ── Auth (Phase 1) ────────────────────────────────────────────────────
+    # slowapi limit string for POST /auth/login. Default 10/minute; raise it
+    # (e.g. 120/minute) only for automated E2E runs, never in production.
+    LOGIN_RATE_LIMIT: str = os.getenv("LOGIN_RATE_LIMIT", "10/minute")
+
     SUPER_ADMIN_JWT_SECRET_KEY: str = os.getenv(
         "SUPER_ADMIN_JWT_SECRET_KEY",
         "dev-super-admin-secret-2026-change-in-prod",
     )
     SUPER_ADMIN_JWT_ALGORITHM: str = "HS256"
     SUPER_ADMIN_ACCESS_TOKEN_EXPIRE_MINUTES: int = int(
-        os.getenv("SUPER_ADMIN_ACCESS_TOKEN_EXPIRE_MINUTES", "15")
+        os.getenv("SUPER_ADMIN_ACCESS_TOKEN_EXPIRE_MINUTES", "10080")
     )
     SUPER_ADMIN_REFRESH_TOKEN_EXPIRE_DAYS: int = int(
         os.getenv("SUPER_ADMIN_REFRESH_TOKEN_EXPIRE_DAYS", "7")
@@ -78,6 +82,16 @@ class Settings(BaseSettings):
 
     # Frontend
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:3003")
+
+    # ── Incident email notify (Phase 6, task 5) ───────────────────────────
+    # When INCIDENT_NOTIFY_TO is empty, incident emails are skipped (no-op).
+    SMTP_HOST: str = os.getenv("SMTP_HOST", "")
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USER: str = os.getenv("SMTP_USER", "")
+    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+    SMTP_FROM: str = os.getenv("SMTP_FROM", "DotStark Ops <no-reply@dotstark.local>")
+    # Comma-separated list of recipients for incident notifications.
+    INCIDENT_NOTIFY_TO: str = os.getenv("INCIDENT_NOTIFY_TO", "")
 
     class Config:
         case_sensitive = True

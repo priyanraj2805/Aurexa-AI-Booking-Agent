@@ -89,6 +89,16 @@ class Settings(BaseSettings):
         os.getenv("TELEMETRY_ENABLED", "false").lower() in ("true", "1", "yes")
     )
 
+    # ── Feature flags (Phase 7) ───────────────────────────────────────────
+    # Main backend reads super_admin.feature_flags on every request via the
+    # cached evaluator (app.core.feature_flags). While the gate is OFF every
+    # evaluation short-circuits to the caller's default — no behavior change.
+    FEATURE_FLAGS_ENABLED: bool = (
+        os.getenv("FEATURE_FLAGS_ENABLED", "false").lower() in ("true", "1", "yes")
+    )
+    # Cache TTL for the flag registry snapshot (seconds).
+    FLAGS_CACHE_TTL_SECONDS: int = int(os.getenv("FLAGS_CACHE_TTL_SECONDS", "15"))
+
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> str:
         return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"

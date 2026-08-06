@@ -2035,7 +2035,6 @@ async def _execute_booking(
         # In the virtual slot model, the lock step already created/found the TimeSlot row.
         # We just need to find that lock row by org + exact start_time and confirm it.
         from app.engine.slot_engine import compute_available_slots, format_slot_time
-        from datetime import datetime, timezone
         from dateutil.parser import parse as req_parse
 
         try:

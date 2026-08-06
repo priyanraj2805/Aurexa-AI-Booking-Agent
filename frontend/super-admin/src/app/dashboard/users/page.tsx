@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
 
 type UserRow = {
   id: string;
@@ -22,10 +23,14 @@ type UserList = {
 };
 
 export default function UsersPage() {
+  const { can } = useAuth();
   const [data, setData] = useState<UserList | null>(null);
   const [search, setSearch] = useState("");
+  const [unmask, setUnmask] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+
+  const canUnmask = can("pii.unmask");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -33,13 +38,14 @@ export default function UsersPage() {
     try {
       const params = new URLSearchParams();
       if (search) params.set("search", search);
+      if (unmask && canUnmask) params.set("unmask", "true");
       setData(await api.get<UserList>(`/tenants/users?${params.toString()}`));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load users");
     } finally {
       setLoading(false);
     }
-  }, [search]);
+  }, [search, unmask, canUnmask]);
 
   useEffect(() => {
     load();
@@ -49,7 +55,7 @@ export default function UsersPage() {
     <div>
       <h1 className="text-2xl font-bold">Users</h1>
       <p className="mt-1 text-sm text-slate-400">
-        Cross-organization user search.
+        Cross-organization user search. Emails and names are masked by default.
       </p>
 
       <div className="mt-4 flex items-center gap-3">
@@ -62,6 +68,18 @@ export default function UsersPage() {
         <span className="text-sm text-slate-400">
           {data ? `${data.total} users` : ""}
         </span>
+        {canUnmask && (
+          <button
+            onClick={() => setUnmask((v) => !v)}
+            className={`ml-auto rounded-md border px-3 py-2 text-sm ${
+              unmask
+                ? "border-amber-700 bg-amber-950/40 text-amber-300"
+                : "border-slate-700 text-slate-300 hover:bg-slate-800"
+            }`}
+          >
+            {unmask ? "Showing unmasked PII" : "Unmask PII"}
+          </button>
+        )}
       </div>
 
       {error && (

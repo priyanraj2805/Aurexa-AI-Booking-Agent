@@ -11,6 +11,7 @@
 
 ## 📋 Table of Contents
 - [Quick Start](#-quick-start)
+- [Super Admin Control Plane](#-super-admin-control-plane)
 - [What Is This?](#-what-is-this)
 - [Architecture](#-architecture)
 - [Project Structure](#-project-structure)
@@ -18,6 +19,52 @@
 - [Security](#-security-features)
 - [Documentation](#-documentation)
 - [Getting Help](#-need-help)
+
+---
+
+## 🛡️ Super Admin Control Plane
+
+Platform operator dashboard for managing all tenant organizations: org lifecycle (create/suspend/restore/delete with 2-person approval), users, plans & billing, analytics (12 report types), monitoring (dependency health, alerts, incidents), feature flags, impersonation, PII-masked support tools — all with full audit trails and RBAC (5 roles), TOTP MFA, and step-up auth.
+
+### Prerequisites
+
+- The **main backend** must be running on `:8005` (it serves the tenant bridge and dependency health that the control plane proxies).
+- PostgreSQL 18 running on `localhost:5432` (same `dotstark_v2` database).
+
+### Start the services (3 terminals)
+
+**Terminal 1** — Main backend (FastAPI on port 8005):
+```powershell
+cd C:\Users\priyanshuraj\OneDrive\Desktop\dotstark\booking_agent\backend
+venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8005
+```
+
+**Terminal 2** — Super Admin backend (FastAPI on port 8006):
+```powershell
+cd C:\Users\priyanshuraj\OneDrive\Desktop\dotstark\booking_agent\backend-super
+venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8006
+```
+
+**Terminal 3** — Super Admin frontend (Next.js on port 3003):
+```powershell
+cd C:\Users\priyanshuraj\OneDrive\Desktop\dotstark\booking_agent\frontend\super-admin
+npm install     # first time only
+npm run dev
+```
+
+### Login
+
+| App | URL |
+|---|---|
+| 🛡️ Super Admin Dashboard | http://localhost:3003 |
+| 🔑 Email | `priyanthakur3020@gmail.com` |
+| 🔑 Password | `Priy@nshu2003` |
+| 🔐 TOTP Secret (MFA) | `WDP744WSN74F4PTNKMVDKA6C43SW2QV5` — add to Google Authenticator/Authy |
+
+> MFA is mandatory. Generate a one-time code from the secret above in your
+> authenticator app (or `pyotp.TOTP('<secret>').now()` in the backend-super venv).
+> The bootstrap/owner admins are seeded in `super_admin.super_admins` (see
+> `docs/SUPERADMIN_IMPLEMENTATION_PLAN.md` for the full 10-phase build).
 
 ---
 

@@ -148,13 +148,29 @@ middleware work).
 > creation from tenant side already exists; task 3's Redis/Firecrawl/Calendar probes not
 > implemented (DB/LLM/email only), task 5's incident notify (email) not implemented.
 
+**Update 2026-08-05 — remaining Phase 6 closed:**
+
+- **Frontend done and browser-verified (live against :3003/:8005/:8006):** `/dashboard/reports`
+  (12 report types with month filter, JSON + CSV export), `/dashboard/alerts` (severity/status
+  filters, ack/resolve), `/dashboard/incidents` (status/severity filters, create + lifecycle),
+  `/dashboard/monitoring` renders all five dependency checks.
+- **Task 3 probes:** `build_dependency_health_payload` (main backend) now also checks
+  `firecrawl` (FIRECRAWL_API_KEY) and `calendar` (GOOGLE_CLIENT_ID/SECRET or
+  MICROSOFT_CLIENT_ID/SECRET, status `degraded` with error when absent). Redis is deliberately
+  NOT probed — Redis was never part of this stack (no code path uses it), so a check would
+  report false alarms; the plan's Redis entry is dropped for that reason.
+- **Task 5 incident notify:** `backend-super/app/core/incident_notify.py` — SMTP email
+  (`SMTP_HOST/PORT/USER/PASSWORD/FROM`, recipients `INCIDENT_NOTIFY_TO` comma-separated;
+  STARTTLS on 587) sent on incident create and on severity escalation to critical/major;
+  fail-open (errors logged, never block CRUD), no-op when unconfigured.
+
 | # | Task | Deliverable |
 |---|---|---|
 | 1 | 12 report types | Revenue, Usage, Performance, Growth, Health, Storage, AI, API, Bookings, Conversations, KB, Widget |
 | 2 | Report engine | Query builder over `usage_events` + tenant tables + CSV export |
-| 3 | Dependency health | Health probes: DB, Redis, LLM, Firecrawl, Email, Calendar (health endpoint in main backend, consumed by backend-super) |
+| 3 | Dependency health | Health probes: DB, LLM, Firecrawl, Email, Calendar (health endpoint in main backend, consumed by backend-super); Redis not part of the stack — intentionally no probe |
 | 4 | Alerts | Create, acknowledge, resolve; alert inbox on dashboard |
-| 5 | Incidents | Create, notify (email/notification), resolve; status shown on dashboard |
+| 5 | Incidents | Create, notify (email — SMTP, create + escalation), resolve; status shown on dashboard |
 
 ## Phase 7 — Ops tools (Weeks 12–13)
 

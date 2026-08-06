@@ -35,12 +35,30 @@ if not _jwt_secret:
 SECRET_KEY = _jwt_secret
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
+IMPERSONATION_TOKEN_EXPIRE_MINUTES = 30  # Phase 8: impersonation tokens
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_impersonation_token(user_email: str, org_id: str, jti: str) -> str:
+    """Short-lived token letting a super admin act as an org admin.
+
+    Payload carries imp=true and a jti that get_current_user checks against
+    public.impersonation_sessions, so revocation works before JWT expiry.
+    """
+    to_encode = {
+        "sub": user_email,
+        "org_id": org_id,
+        "imp": True,
+        "jti": jti,
+        "exp": datetime.now(timezone.utc)
+        + timedelta(minutes=IMPERSONATION_TOKEN_EXPIRE_MINUTES),
+    }
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 

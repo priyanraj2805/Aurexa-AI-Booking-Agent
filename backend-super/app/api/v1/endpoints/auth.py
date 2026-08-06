@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
+from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +24,7 @@ from app.core.security import (
     random_jti,
     verify_password,
 )
+from app.core.security_policy import get_security_settings, validate_password_policy
 from app.db.database import get_db
 from app.models.super_admin import AdminMFA, AdminSession, LoginAttempt, SuperAdmin
 from app.schemas.auth import (
@@ -93,7 +95,7 @@ async def _is_locked_out(db: AsyncSession, email: str, ip: str) -> bool:
 
 
 @router.post("/login", response_model=LoginResponse)
-@limiter.limit("10/minute")
+@limiter.limit(settings.LOGIN_RATE_LIMIT)
 async def login(
     payload: LoginRequest,
     request: Request,
@@ -167,7 +169,9 @@ async def mfa_enroll(
     if existing and existing.is_verified:
         raise HTTPException(status_code=400, detail="MFA already enrolled")
 
-    secret = pyotp.random_base32()
+    # Reuse the pending secret so a page reload (which re-runs enroll) does
+    # not invalidate the QR the user already scanned.
+    secret = existing.totp_secret if existing and not existing.is_verified else pyotp.random_base32()
     otpauth_url = pyotp.totp.TOTP(secret).provisioning_uri(
         name=payload.get("email", "admin"),
         issuer_name="DotStark Super Admin",
@@ -222,7 +226,7 @@ async def mfa_verify(
     if not mfa or not mfa.totp_secret:
         raise HTTPException(status_code=400, detail="MFA not enrolled")
 
-    if not pyotp.TOTP(mfa.totp_secret).verify(payload.code, valid_window=1):
+    if not pyotp.TOTP(mfa.totp_secret).verify(payload.code, valid_window=2):
         raise HTTPException(status_code=401, detail="Invalid MFA code")
 
     if not mfa.is_verified:
@@ -299,7 +303,7 @@ async def mfa_stepup(
     if not mfa or not mfa.totp_secret or not mfa.is_verified:
         raise HTTPException(status_code=403, detail="MFA not enrolled")
 
-    if not pyotp.TOTP(mfa.totp_secret).verify(payload.code, valid_window=1):
+    if not pyotp.TOTP(mfa.totp_secret).verify(payload.code, valid_window=2):
         raise HTTPException(status_code=401, detail="Invalid MFA code")
 
     stepup = create_stepup_token(admin.id)
@@ -419,3 +423,38 @@ async def me(current: CurrentAdmin = Depends(get_current_admin)):
         role_name=current.role_name,
         permissions=current.permissions,
     )
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@router.post("/change-password")
+async def change_password(
+    payload: ChangePasswordRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current: CurrentAdmin = Depends(get_current_admin),
+):
+    """Change the current admin's password, enforcing the platform password
+    policy from super_admin.security_settings."""
+    admin = (
+        await db.execute(select(SuperAdmin).where(SuperAdmin.id == current.id))
+    ).scalar_one()
+    if not verify_password(payload.current_password, admin.password_hash):
+        raise HTTPException(status_code=403, detail="Current password is incorrect")
+
+    settings_row = await get_security_settings(db)
+    validate_password_policy(payload.new_password, settings_row["password_policy"])
+
+    admin.hashed_password = hash_password(payload.new_password)
+    await db.commit()
+    await write_audit_log(
+        actor_email=admin.email,
+        action="admin.password_change",
+        resource_type="super_admin",
+        resource_id=str(admin.id),
+        ip_address=_client_ip(request),
+    )
+    return {"ok": True}

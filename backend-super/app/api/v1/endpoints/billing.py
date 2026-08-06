@@ -22,7 +22,7 @@ from app.core.audit import write_audit_log
 from app.core.billing import execute_refund, get_provider
 from app.core.config import settings
 from app.core.rbac import CurrentAdmin, require_permission
-from app.core.security import PURPOSE_STEPUP, decode_token
+from app.core.stepup import require_stepup
 from app.db.database import get_db
 
 router = APIRouter()
@@ -42,16 +42,6 @@ class InvoiceCreate(BaseModel):
 
 class RefundRequest(BaseModel):
     reason: str
-
-
-def _require_stepup(request: Request, admin: CurrentAdmin) -> None:
-    token = request.cookies.get(settings.SUPER_ADMIN_STEPUP_COOKIE_NAME, "")
-    payload = decode_token(token or "", expected_purpose=PURPOSE_STEPUP)
-    if not payload or payload.get("sub") != str(admin.id):
-        raise HTTPException(
-            status_code=403,
-            detail="MFA step-up required: re-verify your code via /auth/mfa/stepup",
-        )
 
 
 async def _get_invoice_or_404(db: AsyncSession, invoice_id: UUID):
@@ -323,7 +313,7 @@ async def refund_invoice(
     db: AsyncSession = Depends(get_db),
     admin: CurrentAdmin = Depends(require_permission("billing.refund")),
 ):
-    _require_stepup(request, admin)
+    require_stepup(request, admin)
     row = await _get_invoice_or_404(db, invoice_id)
     if row["status"] != "paid":
         raise HTTPException(status_code=409, detail=f"Invoice is {row['status']}")

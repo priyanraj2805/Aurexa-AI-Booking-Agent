@@ -1,3 +1,4 @@
+import os
 import time
 from typing import Optional
 
@@ -15,6 +16,8 @@ async def build_dependency_health_payload(
         "database": {"status": "ok", "latency_ms": None, "error": None},
         "llm": {"status": "ok", "latency_ms": None, "error": None},
         "email": {"status": "ok", "latency_ms": None, "error": None},
+        "firecrawl": {"status": "ok", "latency_ms": None, "error": None},
+        "calendar": {"status": "ok", "latency_ms": None, "error": None},
     }
 
     db_start = time.perf_counter()
@@ -47,6 +50,25 @@ async def build_dependency_health_payload(
     ):
         checks["email"]["status"] = "down"
         checks["email"]["error"] = "Primary and fallback providers unavailable"
+
+    firecrawl_start = time.perf_counter()
+    if not settings.FIRECRAWL_API_KEY:
+        checks["firecrawl"]["status"] = "degraded"
+        checks["firecrawl"]["error"] = "FIRECRAWL_API_KEY not set"
+    checks["firecrawl"]["latency_ms"] = round((time.perf_counter() - firecrawl_start) * 1000, 2)
+
+    calendar_start = time.perf_counter()
+    google_ok = bool(os.getenv("GOOGLE_CLIENT_ID")) and bool(os.getenv("GOOGLE_CLIENT_SECRET"))
+    outlook_ok = bool(os.getenv("MICROSOFT_CLIENT_ID")) and bool(
+        os.getenv("MICROSOFT_CLIENT_SECRET")
+    )
+    if not google_ok and not outlook_ok:
+        checks["calendar"]["status"] = "degraded"
+        checks["calendar"]["error"] = (
+            "No calendar OAuth credentials configured (GOOGLE_CLIENT_ID/SECRET or "
+            "MICROSOFT_CLIENT_ID/SECRET)"
+        )
+    checks["calendar"]["latency_ms"] = round((time.perf_counter() - calendar_start) * 1000, 2)
 
     if any(value["status"] == "down" for value in checks.values()):
         status = "down"

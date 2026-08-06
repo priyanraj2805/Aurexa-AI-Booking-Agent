@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import uuid
 from typing import Any, Dict, List, Tuple
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
@@ -9,6 +10,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from app.core.config import settings
+from app.core.telemetry import increment_usage
 from app.engine.agent.state import BookingAgentState
 from app.engine.agent.prompts import build_system_prompt, build_context_block
 from app.engine.agent.context_builder import AgentContextBuilder
@@ -256,6 +258,23 @@ async def call_model(
     messages = [full_system_msg] + active_messages
     
     response = await llm.ainvoke(messages)
+    
+    # Emit AI token telemetry (gated no-op while TELEMETRY_ENABLED is false)
+    usage_metadata = getattr(response, "usage_metadata", None)
+    total_tokens = (
+        usage_metadata.get("total_tokens")
+        if isinstance(usage_metadata, dict)
+        else None
+    )
+    if total_tokens:
+        try:
+            await increment_usage(
+                uuid.UUID(str(state.get("org_id") or "")),
+                "ai_tokens",
+                delta=int(total_tokens),
+            )
+        except Exception:
+            logger.warning("ai_tokens telemetry emission failed", exc_info=True)
     
     # 5. Extract structured data from response (if provided in JSON)
     try:

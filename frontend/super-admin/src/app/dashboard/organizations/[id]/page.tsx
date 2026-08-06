@@ -71,6 +71,44 @@ type AuditRow = {
   created_at: string | null;
 };
 
+type Conversation = {
+  id: string;
+  channel: string;
+  channel_user_id: string | null;
+  session_status: string;
+  current_intent: string | null;
+  human_agent_active: boolean;
+  message_count: number;
+  updated_at: string;
+};
+
+type PeekMessage = {
+  id: string;
+  role: string;
+  content: string;
+  sender_type: string;
+  created_at: string;
+};
+
+type PeekResult = {
+  session_id: string;
+  channel: string;
+  channel_user_id: string | null;
+  session_status: string;
+  state_data: Record<string, unknown>;
+  messages: PeekMessage[];
+};
+
+type ImpActive = {
+  id: string;
+  org_id: string;
+  org_name: string;
+  user_email: string;
+  started_at: string;
+  expires_at: string;
+  status: string;
+};
+
 const TABS = [
   "Overview",
   "Users",
@@ -121,6 +159,9 @@ export default function OrgDetailPage({
   const [usage, setUsage] = useState<UsageRow[]>([]);
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [tabError, setTabError] = useState<string | null>(null);
+  const [unmask, setUnmask] = useState(false);
+  const canUnmask = can("pii.unmask");
+  const canImpersonate = can("support.impersonate");
 
   const [confirm, setConfirm] = useState<
     | { kind: "suspend" }
@@ -154,15 +195,16 @@ export default function OrgDetailPage({
   const loadTab = useCallback(
     async (t: Tab) => {
       setTabError(null);
+      const pii = unmask && canUnmask ? "&unmask=true" : "";
       try {
         if (t === "Overview") {
           const b = await api.get<{ items: Booking[] }>(
-            `/tenants/orgs/${id}/bookings?page_size=10`
+            `/tenants/orgs/${id}/bookings?page_size=10${pii}`
           );
           setBookings(b.items);
         } else if (t === "Users") {
           const u = await api.get<{ items: OrgUser[] }>(
-            `/tenants/orgs/${id}/users`
+            `/tenants/orgs/${id}/users${pii ? "?unmask=true" : ""}`
           );
           setUsers(u.items);
         } else if (t === "Usage") {
@@ -175,12 +217,31 @@ export default function OrgDetailPage({
             `/tenants/orgs/${id}/audit`
           );
           setAudit(a.items);
+        } else if (t === "Support") {
+          setConvLoading(true);
+          setConversations(null);
+          try {
+            const c = await api.get<{ items: Conversation[] }>(
+              `/support/orgs/${id}/conversations${pii ? "?unmask=true" : ""}`
+            );
+            setConversations(c.items);
+            if (canImpersonate) {
+              const a = await api.get<ImpActive | null>(`/impersonation/active`);
+              setActiveImp(a);
+              const u = await api.get<{ items: OrgUser[] }>(
+                `/tenants/orgs/${id}/users?page_size=100&unmask=true`
+              );
+              setImpUsers(u.items.filter((x) => x.is_active));
+            }
+          } finally {
+            setConvLoading(false);
+          }
         }
       } catch (e) {
         setTabError(e instanceof Error ? e.message : "Failed to load tab");
       }
     },
-    [id]
+    [id, unmask, canUnmask, canImpersonate]
   );
 
   const switchTab = (t: Tab) => {
@@ -256,6 +317,71 @@ export default function OrgDetailPage({
     }
   };
 
+  const [conversations, setConversations] = useState<Conversation[] | null>(null);
+  const [convLoading, setConvLoading] = useState(false);
+  const [peekOpen, setPeekOpen] = useState(false);
+  const [peeking, setPeeking] = useState(false);
+  const [peekResult, setPeekResult] = useState<PeekResult | null>(null);
+  const [impUsers, setImpUsers] = useState<OrgUser[] | null>(null);
+  const [impUser, setImpUser] = useState<OrgUser | null>(null);
+  const [stepupOpen, setStepupOpen] = useState(false);
+  const [stepupCode, setStepupCode] = useState("");
+  const [stepupBusy, setStepupBusy] = useState(false);
+  const [issuedToken, setIssuedToken] = useState<string | null>(null);
+  const [activeImp, setActiveImp] = useState<ImpActive | null>(null);
+  const [stoppingImp, setStoppingImp] = useState(false);
+
+  const openPeek = async (sessionId: string) => {
+    setPeekOpen(true);
+    setPeeking(true);
+    setPeekResult(null);
+    const pii = unmask && canUnmask ? "?unmask=true" : "";
+    try {
+      setPeekResult(
+        await api.get<PeekResult>(`/support/sessions/${sessionId}/peek${pii}`)
+      );
+    } catch (e) {
+      toast("error", e instanceof Error ? e.message : "Failed to load transcript");
+    } finally {
+      setPeeking(false);
+    }
+  };
+
+  const startImpersonation = async () => {
+    if (!impUser) return;
+    setStepupBusy(true);
+    try {
+      await api.post("/auth/mfa/stepup", { code: stepupCode });
+      const res = await api.post<{ token: string }>("/impersonation/start", {
+        org_id: org?.id,
+        user_email: impUser.email,
+      });
+      setIssuedToken(res.token);
+      toast("success", `Impersonation started as ${impUser.email}`);
+      setStepupOpen(false);
+      setStepupCode("");
+      await loadTab("Support");
+    } catch (e) {
+      toast("error", e instanceof Error ? e.message : "Failed to start impersonation");
+    } finally {
+      setStepupBusy(false);
+    }
+  };
+
+  const stopImpersonation = async () => {
+    if (!activeImp) return;
+    setStoppingImp(true);
+    try {
+      await api.post(`/impersonation/${activeImp.id}/stop`);
+      toast("success", "Impersonation ended");
+      await loadTab("Support");
+    } catch (e) {
+      toast("error", e instanceof Error ? e.message : "Failed to end impersonation");
+    } finally {
+      setStoppingImp(false);
+    }
+  };
+
   if (error) {
     return (
       <div>
@@ -291,6 +417,18 @@ export default function OrgDetailPage({
           )}
         </div>
         <div className="flex items-center gap-2">
+          {canUnmask && (
+            <button
+              onClick={() => setUnmask((v) => !v)}
+              className={`rounded-md border px-3 py-1.5 text-sm ${
+                unmask
+                  ? "border-amber-700 bg-amber-950/40 text-amber-300"
+                  : "border-slate-700 text-slate-300 hover:bg-slate-800"
+              }`}
+            >
+              {unmask ? "Unmasked" : "Unmask PII"}
+            </button>
+          )}
           <span
             className={`rounded-full px-3 py-1 text-xs font-semibold ${
               org.is_active
@@ -754,9 +892,241 @@ export default function OrgDetailPage({
       )}
 
       {tab === "Support" && (
-        <div className="mt-4">
-          <EmptyState text="Impersonation and conversation peek arrive in Phase 8." />
+        <div className="mt-4 space-y-6">
+          <section>
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
+              Live conversations
+            </h2>
+            {convLoading ? (
+              <EmptyState text="Loading conversations…" />
+            ) : conversations && conversations.length > 0 ? (
+              <div className="mt-3 overflow-x-auto rounded-lg border border-slate-800">
+                <table className="w-full text-left text-sm">
+                  <thead className="border-b border-slate-800 bg-slate-900 text-xs uppercase tracking-wide text-slate-400">
+                    <tr>
+                      <th className="px-4 py-3">Channel</th>
+                      <th className="px-4 py-3">User</th>
+                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3">Intent</th>
+                      <th className="px-4 py-3">Msgs</th>
+                      <th className="px-4 py-3">Updated</th>
+                      <th className="px-4 py-3"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800 bg-slate-900/50">
+                    {conversations.map((c) => (
+                      <tr key={c.id}>
+                        <td className="px-4 py-3">{c.channel}</td>
+                        <td className="px-4 py-3 font-mono text-xs">
+                          {c.channel_user_id ?? "—"}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="rounded bg-slate-800 px-2 py-0.5 text-xs">
+                            {c.session_status}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-xs text-slate-300">
+                          {c.current_intent ?? "—"}
+                        </td>
+                        <td className="px-4 py-3">{c.message_count}</td>
+                        <td className="px-4 py-3 text-xs text-slate-400">
+                          {new Date(c.updated_at).toLocaleString()}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            onClick={() => void openPeek(c.id)}
+                            className="rounded-md border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:bg-slate-800"
+                          >
+                            View transcript
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="mt-3">
+                <EmptyState text="No conversations found for this organization." />
+              </div>
+            )}
+          </section>
+
+          <section className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
+              Impersonate a user
+            </h2>
+            {canImpersonate ? (
+              <div className="mt-3">
+                {activeImp && (
+                  <div className="mb-3 rounded-md border border-amber-800 bg-amber-950/40 p-3 text-sm">
+                    <p className="font-semibold text-amber-300">
+                      Active impersonation: {activeImp.user_email}
+                    </p>
+                    <p className="mt-1 text-xs text-amber-400/80">
+                      Started {new Date(activeImp.started_at).toLocaleString()} · ends{" "}
+                      {new Date(activeImp.expires_at).toLocaleString()}
+                    </p>
+                    <button
+                      onClick={() => void stopImpersonation()}
+                      disabled={stoppingImp}
+                      className="mt-2 rounded-md border border-amber-700 bg-amber-900/60 px-3 py-1 text-xs font-medium text-amber-200 hover:bg-amber-900 disabled:opacity-50"
+                    >
+                      {stoppingImp ? "Ending…" : "End now"}
+                    </button>
+                  </div>
+                )}
+                <div className="flex flex-wrap items-end gap-3">
+                  <label className="flex flex-col gap-1 text-xs text-slate-400">
+                    User
+                    <select
+                      value={impUser?.id ?? ""}
+                      onChange={(e) =>
+                        setImpUser(
+                          impUsers?.find((u) => u.id === e.target.value) ?? null
+                        )
+                      }
+                      className="w-72 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100"
+                    >
+                      <option value="">Select a user…</option>
+                      {impUsers?.map((u) => (
+                        <option key={u.id} value={u.id}>
+                          {u.full_name ? `${u.full_name} · ` : ""}
+                          {u.email}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    onClick={() => {
+                      if (impUser) {
+                        setStepupCode("");
+                        setStepupOpen(true);
+                      }
+                    }}
+                    disabled={!impUser || stepupBusy}
+                    className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
+                  >
+                    Start impersonation
+                  </button>
+                </div>
+                {impUsers?.length === 0 && (
+                  <p className="mt-2 text-xs text-slate-500">
+                    No active users in this organization to impersonate.
+                  </p>
+                )}
+                {issuedToken && (
+                  <div className="mt-3 rounded-md border border-green-800 bg-green-950/40 p-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-green-400">
+                      Impersonation token issued
+                    </p>
+                    <p className="mt-1 break-all font-mono text-xs text-green-300">
+                      {issuedToken}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-400">
+                      This token lets you act as the user (e.g. via{" "}
+                      <span className="font-mono">/api/v1/me</span>). It expires
+                      automatically; use the banner in your session and "End now"
+                      above to revoke early.
+                    </p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="mt-3 text-sm text-slate-500">
+                You need the <span className="font-mono">support.impersonate</span>{" "}
+                permission to impersonate users.
+              </p>
+            )}
+          </section>
         </div>
+      )}
+
+      {peekOpen && (
+        <Modal title="Conversation transcript" onClose={() => setPeekOpen(false)}>
+          {peeking || !peekResult ? (
+            <p className="py-8 text-center text-sm text-slate-400">Loading…</p>
+          ) : (
+            <div className="space-y-3">
+              <div className="rounded-md border border-slate-800 bg-slate-900 p-3 text-xs">
+                <p>
+                  <span className="text-slate-400">Session:</span>{" "}
+                  <span className="font-mono">{peekResult.session_id}</span>
+                </p>
+                <p>
+                  <span className="text-slate-400">Channel:</span>{" "}
+                  {peekResult.channel} ·{" "}
+                  <span className="font-mono">{peekResult.channel_user_id}</span>
+                </p>
+                <p>
+                  <span className="text-slate-400">Status:</span>{" "}
+                  {peekResult.session_status}
+                </p>
+              </div>
+              {peekResult.messages.length === 0 ? (
+                <p className="py-6 text-center text-sm text-slate-500">
+                  No messages in this session.
+                </p>
+              ) : (
+                <div className="max-h-96 space-y-2 overflow-y-auto">
+                  {peekResult.messages.map((m) => (
+                    <div
+                      key={m.id}
+                      className={`rounded-lg border p-3 text-sm ${
+                        m.role === "user"
+                          ? "border-indigo-800 bg-indigo-950/30"
+                          : "border-slate-800 bg-slate-900"
+                      }`}
+                    >
+                      <p className="text-xs text-slate-400">
+                        <span className="font-mono">{m.sender_type}</span> ·{" "}
+                        {new Date(m.created_at).toLocaleString()}
+                      </p>
+                      <p className="mt-1 whitespace-pre-wrap text-slate-100">
+                        {m.content}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </Modal>
+      )}
+
+      {stepupOpen && (
+        <Modal
+          title="Confirm with MFA"
+          onClose={() => !stepupBusy && setStepupOpen(false)}
+        >
+          <p className="text-sm text-slate-400">
+            Impersonation requires a fresh MFA confirmation. Enter your 6-digit
+            TOTP code.
+          </p>
+          <input
+            value={stepupCode}
+            onChange={(e) => setStepupCode(e.target.value)}
+            placeholder="000000"
+            inputMode="numeric"
+            className="mt-3 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-center font-mono text-lg text-slate-100"
+          />
+          <div className="mt-4 flex justify-end gap-2">
+            <button
+              onClick={() => setStepupOpen(false)}
+              disabled={stepupBusy}
+              className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => void startImpersonation()}
+              disabled={stepupBusy || stepupCode.length !== 6}
+              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
+            >
+              {stepupBusy ? "Verifying…" : "Confirm & start"}
+            </button>
+          </div>
+        </Modal>
       )}
     </div>
   );

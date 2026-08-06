@@ -15,10 +15,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-from uuid import UUID
+from uuid import UUID, uuid4
+from datetime import datetime, timedelta, timezone
 
 from app.core.bridge import BridgeAuth, verify_bridge
 from app.core.audit import log_audit_event_async
+from app.core.feature_flags import is_feature_enabled
 from app.core.telemetry import increment_usage
 from app.core.config import settings
 from app.crud.organization import create_organization
@@ -352,5 +354,177 @@ async def bridge_resolve_alert(
         resource_id=str(alert_id),
         actor_email=auth.admin_email,
         new_values={"component": alert["component"]},
+    )
+    return {"ok": True}
+
+
+@router.get("/flags/{code}")
+async def bridge_feature_flag_state(
+    code: str,
+    db: AsyncSession = Depends(get_db),
+    auth: BridgeAuth = Depends(verify_bridge),
+):
+    """Live evaluation of one feature flag for the platform context.
+
+    NOTE: no query parameters here — bridge signatures are computed over
+    request.url.path, so any context must live in the path.
+    """
+    return await _evaluate_flag(code, org_id=None, db=db)
+
+
+@router.get("/flags/{code}/org/{org_id}")
+async def bridge_feature_flag_state_for_org(
+    code: str,
+    org_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    auth: BridgeAuth = Depends(verify_bridge),
+):
+    """Live evaluation of one feature flag for a specific org context
+    (org/plan scopes + canary bucket)."""
+    return await _evaluate_flag(code, org_id=org_id, db=db)
+
+
+async def _evaluate_flag(code: str, org_id, db: AsyncSession):
+    from app.core.feature_flags import get_flag_rows
+
+    target = None
+    for flag in await get_flag_rows(db):
+        if flag["code"] == code:
+            target = flag
+            break
+    if not target:
+        raise HTTPException(status_code=404, detail="Flag not found")
+
+    evaluated = await is_feature_enabled(db, code, org_id=org_id)
+    return {
+        "code": code,
+        "enabled": bool(target["enabled"]),
+        "scope": target["scope"],
+        "rollout_percent": target["rollout_percent"],
+        "evaluated": evaluated,
+        "org_id": str(org_id) if org_id else None,
+    }
+
+
+class ImpersonateStartRequest(BaseModel):
+    org_id: UUID
+    user_email: str
+
+
+class ImpersonateStopRequest(BaseModel):
+    token_jti: str
+
+
+@router.post("/impersonate/start")
+async def bridge_impersonate_start(
+    payload: ImpersonateStartRequest,
+    db: AsyncSession = Depends(get_db),
+    auth: BridgeAuth = Depends(verify_bridge),
+):
+    """Issue a 30-minute impersonation token for an org admin.
+
+    The token's jti is stored in public.impersonation_sessions so it can be
+    revoked (single active session) before natural expiry; get_current_user
+    rejects revoked/expired sessions.
+    """
+    org = await _get_org_or_404(db, payload.org_id)
+    if not org["is_active"]:
+        raise HTTPException(status_code=409, detail="Organization is suspended")
+
+    email = payload.user_email.strip().lower()
+    user = (
+        await db.execute(
+            text(
+                """
+                SELECT id, email, full_name, org_id, is_active
+                FROM users WHERE email = :email
+                """
+            ),
+            {"email": email},
+        )
+    ).mappings().first()
+    if not user or str(user["org_id"]) != str(payload.org_id):
+        raise HTTPException(status_code=404, detail="User not found in this organization")
+    if not user["is_active"]:
+        raise HTTPException(status_code=409, detail="User is disabled")
+
+    from app.core.security import create_impersonation_token
+
+    jti = str(uuid4())
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+    await db.execute(
+        text(
+            """
+            INSERT INTO impersonation_sessions
+                (org_id, user_email, token_jti, expires_at)
+            VALUES (:org_id, :user_email, :jti, :expires_at)
+            """
+        ),
+        {
+            "org_id": payload.org_id,
+            "user_email": user["email"],
+            "jti": jti,
+            "expires_at": expires_at,
+        },
+    )
+    token = create_impersonation_token(user["email"], str(payload.org_id), jti)
+    await db.commit()
+
+    await log_audit_event_async(
+        org_id=payload.org_id,
+        action=AuditAction.IMPERSONATION_START,
+        resource_type="user",
+        resource_id=str(user["id"]),
+        actor_email=auth.admin_email,
+        new_values={"user_email": user["email"], "expires_at": expires_at.isoformat()},
+    )
+    await increment_usage(payload.org_id, "impersonation.start")
+    return {
+        "ok": True,
+        "token": token,
+        "token_jti": jti,
+        "org_id": str(payload.org_id),
+        "user_email": user["email"],
+        "expires_at": expires_at.isoformat(),
+    }
+
+
+@router.post("/impersonate/stop")
+async def bridge_impersonate_stop(
+    payload: ImpersonateStopRequest,
+    db: AsyncSession = Depends(get_db),
+    auth: BridgeAuth = Depends(verify_bridge),
+):
+    """Revoke an impersonation session by jti."""
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT id, org_id, user_email FROM impersonation_sessions
+                WHERE token_jti = :jti
+                """
+            ),
+            {"jti": payload.token_jti},
+        )
+    ).mappings().first()
+    if not row:
+        return {"ok": True, "already": True}
+    await db.execute(
+        text(
+            """
+            UPDATE impersonation_sessions
+            SET revoked_at = now(), revoked_by = :by
+            WHERE token_jti = :jti AND revoked_at IS NULL
+            """
+        ),
+        {"jti": payload.token_jti, "by": auth.admin_email},
+    )
+    await db.commit()
+    await log_audit_event_async(
+        org_id=row["org_id"],
+        action=AuditAction.IMPERSONATION_END,
+        resource_type="user",
+        resource_id=row["user_email"],
+        actor_email=auth.admin_email,
     )
     return {"ok": True}

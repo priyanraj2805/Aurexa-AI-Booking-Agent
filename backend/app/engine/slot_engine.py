@@ -167,8 +167,14 @@ async def compute_slot_inventory(
         )
         if slot.is_booked:
             taken_utc[slot_start_utc] = "booked"
-        elif slot.locked_until and slot.locked_until > now:
-            taken_utc[slot_start_utc] = "locked"
+        elif slot.locked_until:
+            locked_until_utc = (
+                slot.locked_until.replace(tzinfo=timezone.utc)
+                if slot.locked_until.tzinfo is None
+                else slot.locked_until.astimezone(timezone.utc)
+            )
+            if locked_until_utc > now:
+                taken_utc[slot_start_utc] = "locked"
 
     external_busy: List[datetime] = []
     if org_config and org_config.active_calendar_provider != CalendarProviderType.NONE:

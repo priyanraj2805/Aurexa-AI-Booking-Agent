@@ -3,7 +3,7 @@ Booking and slot tests — CRUD, tenant isolation, race conditions.
 """
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import pytest
 from httpx import AsyncClient
@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from app.models.organization import Organization
 from app.models.config import OrgConfig
-from app.models.booking import TimeSlot, Booking, BusinessSchedule
+from app.models.booking import TimeSlot, Booking, BusinessSchedule, ScheduleDay
 from app.models.session import ChatSession
 
 CSRF = {"X-Requested-With": "XMLHttpRequest"}
@@ -271,6 +271,28 @@ class TestTimezonePolicyCommitPath:
             _fake_ainvoke,
         )
 
+    @staticmethod
+    def _freeze_clock(monkeypatch, frozen: datetime) -> None:
+        """Pin the app's wall clock so slot/policy math is run-time independent.
+
+        Module-level patches only — never replace ``datetime.datetime`` itself,
+        which breaks SQLAlchemy's isinstance checks. All app modules that read
+        the clock in the booking flow import datetime at module level, so the
+        patches always apply.
+        """
+        import app.engine.message_processor as mp_mod
+        import app.engine.scheduling_policy as sp_mod
+        import app.engine.slot_engine as se_mod
+
+        class _FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return frozen if tz is None else frozen.astimezone(tz)
+
+        monkeypatch.setattr(mp_mod, "datetime", _FrozenDateTime)
+        monkeypatch.setattr(se_mod, "datetime", _FrozenDateTime)
+        monkeypatch.setattr(sp_mod, "datetime", _FrozenDateTime)
+
     async def _prepare_confirm_session(
         self,
         db_session: AsyncSession,
@@ -297,6 +319,17 @@ class TestTimezonePolicyCommitPath:
                 slot_duration_minutes=60,
                 booking_window_days=60,
                 timezone=org_timezone,
+            )
+        )
+        db_session.add(
+            ScheduleDay(
+                org_id=org.id,
+                day_of_week=date.fromisoformat(booking_date).weekday(),
+                is_active=True,
+                open_time=time.min,
+                close_time=time(23, 59),
+                break_start=None,
+                break_end=None,
             )
         )
         session = ChatSession(
@@ -360,14 +393,19 @@ class TestTimezonePolicyCommitPath:
         self, client: AsyncClient, db_session: AsyncSession, monkeypatch
     ):
         self._stub_graph_confirm_path(monkeypatch)
-        now_utc = datetime.now(timezone.utc)
-        booking_time = (now_utc + timedelta(minutes=2)).strftime("%H:%M")
+        frozen = datetime.combine(
+            datetime.now(timezone.utc).date(),
+            time(12, 0),
+            tzinfo=timezone.utc,
+        )
+        self._freeze_clock(monkeypatch, frozen)
+        booking_time = (frozen + timedelta(minutes=2)).strftime("%H:%M")
         org, session = await self._prepare_confirm_session(
             db_session,
             org_timezone="UTC",
             allow_same_day_booking=True,
             slot_cutoff_minutes=10,
-            booking_date=now_utc.date().isoformat(),
+            booking_date=frozen.date().isoformat(),
             booking_time=booking_time,
             user_timezone="UTC",
         )

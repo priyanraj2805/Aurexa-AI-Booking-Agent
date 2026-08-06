@@ -2,6 +2,7 @@ import logging
 import traceback
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from fastapi import Header, Cookie
@@ -57,6 +58,31 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     user_email = payload["sub"]
+
+    # Phase 8: impersonation tokens must map to a live impersonation session.
+    if payload.get("imp"):
+        jti = payload.get("jti", "")
+        if not jti:
+            raise HTTPException(status_code=401, detail="Invalid impersonation token")
+        session = (
+            await db.execute(
+                text(
+                    """
+                    SELECT 1 FROM impersonation_sessions
+                    WHERE token_jti = :jti
+                      AND revoked_at IS NULL
+                      AND expires_at > now()
+                    """
+                ),
+                {"jti": jti},
+            )
+        ).scalar()
+        if not session:
+            raise HTTPException(
+                status_code=401,
+                detail="Impersonation session revoked or expired",
+            )
+
     result = await db.execute(select(User).where(User.email == user_email))
     user = result.scalars().first()
 

@@ -6,12 +6,13 @@ from the token), so role changes take effect immediately.
 """
 from typing import List, Optional
 
-from fastapi import Cookie, Depends, Header, HTTPException
+from fastapi import Cookie, Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.security import decode_token, PURPOSE_ACCESS
+from app.core.security_policy import check_ip_allowed, get_security_settings
 from app.db.database import get_db
 from app.models.super_admin import SuperAdmin, Role, Permission, role_permissions
 
@@ -42,6 +43,7 @@ async def get_current_admin(
     db: AsyncSession = Depends(get_db),
     authorization: Optional[str] = Header(None),
     super_admin_token: Optional[str] = Cookie(None),
+    request: Request = None,
 ) -> CurrentAdmin:
     """Resolve the current admin from Bearer header or the super_admin_token
     HttpOnly cookie. Loads role + permissions fresh from the DB."""
@@ -57,6 +59,18 @@ async def get_current_admin(
     payload = decode_token(token, expected_purpose=PURPOSE_ACCESS)
     if not payload or "sub" not in payload:
         raise HTTPException(status_code=401, detail="Missing or invalid token")
+
+    # Phase 8: IP allowlist enforcement (settings row, enabled → CIDR match).
+    settings_row = await get_security_settings(db)
+    client_ip = request.client.host if request else "unknown"
+    xff = request.headers.get("x-forwarded-for") if request else None
+    if xff:
+        client_ip = xff.split(",")[0].strip()
+    if not check_ip_allowed(client_ip, settings_row):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: IP not in allowlist",
+        )
 
     try:
         admin_id = payload["sub"]

@@ -8,6 +8,7 @@ import logging
 import uuid
 
 from app.models.booking import TimeSlot, Booking
+from app.core.telemetry import increment_usage
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,7 @@ async def attempt_booking(
 
         await db.commit()
         await db.refresh(booking)
+        await increment_usage(uuid.UUID(org_id), "bookings")
         return booking
 
     except OperationalError as e:

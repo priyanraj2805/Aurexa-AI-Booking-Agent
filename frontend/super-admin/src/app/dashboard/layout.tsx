@@ -5,23 +5,24 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { AuthProvider, useAuth } from "@/lib/auth-context";
 import { ToastProvider } from "@/components/toast";
+import { ImpersonationBanner } from "@/components/impersonation-banner";
 
 const MODULES = [
-  { name: "Dashboard", path: "/dashboard", permission: "dashboard.view" },
-  { name: "Organizations", path: "/dashboard/organizations", permission: "orgs.view" },
-  { name: "Users", path: "/dashboard/users", permission: "users.view" },
-  { name: "Plans", path: "/dashboard/plans", permission: "plans.view" },
-  { name: "Billing", path: "/dashboard/billing", permission: "billing.view" },
-  { name: "Analytics", path: "/dashboard/reports", permission: "reports.view" },
-  { name: "Monitoring", path: "/dashboard/monitoring", permission: "health.view" },
-  { name: "Alerts", path: "/dashboard/alerts", permission: "alerts.view" },
-  { name: "Incidents", path: "/dashboard/incidents", permission: "incidents.view" },
-  { name: "Feature Flags", path: "/dashboard/flags", permission: "ops.manage" },
-  { name: "Audit Logs", path: "/dashboard/audit", permission: "audit.view" },
-  { name: "Approvals", path: "/dashboard/approvals", permission: "orgs.delete" },
-  { name: "Notifications", path: "/dashboard/notifications", permission: "ops.manage" },
-  { name: "Support", path: "/dashboard/support", permission: "support.impersonate" },
-  { name: "Settings", path: "/dashboard/settings", permission: "ops.manage" },
+  { name: "Dashboard", path: "/dashboard", permissions: ["dashboard.view"] },
+  { name: "Organizations", path: "/dashboard/organizations", permissions: ["orgs.view"] },
+  { name: "Users", path: "/dashboard/users", permissions: ["users.view"] },
+  { name: "Plans", path: "/dashboard/plans", permissions: ["plans.view"] },
+  { name: "Billing", path: "/dashboard/billing", permissions: ["billing.view"] },
+  { name: "Analytics", path: "/dashboard/reports", permissions: ["reports.view"] },
+  { name: "Monitoring", path: "/dashboard/monitoring", permissions: ["health.view"] },
+  { name: "Alerts", path: "/dashboard/alerts", permissions: ["alerts.view"] },
+  { name: "Incidents", path: "/dashboard/incidents", permissions: ["incidents.view"] },
+  { name: "Feature Flags", path: "/dashboard/flags", permissions: ["flags.view"] },
+  { name: "Audit Logs", path: "/dashboard/audit", permissions: ["audit.view"] },
+  { name: "Approvals", path: "/dashboard/approvals", permissions: ["orgs.delete"] },
+  { name: "Notifications", path: "/dashboard/notifications", permissions: ["notifications.view"] },
+  { name: "Support", path: "/dashboard/support", permissions: ["support.impersonate", "support.conversations.view"] },
+  { name: "Settings", path: "/dashboard/settings", permissions: ["security.manage"] },
 ];
 
 function Shell({ children }: { children: React.ReactNode }) {
@@ -43,11 +44,14 @@ function Shell({ children }: { children: React.ReactNode }) {
     );
   }
 
-  const visibleModules = MODULES.filter((m) => can(m.permission));
+  const visibleModules = MODULES.filter((m) =>
+    m.permissions.some((p) => can(p))
+  );
 
   return (
     <div className="flex min-h-screen">
-      <aside className="w-60 shrink-0 border-r border-slate-800 bg-slate-900 p-4">
+      <ImpersonationBanner />
+      <aside className="w-60 shrink-0 border-r border-slate-800 bg-slate-900 p-4 pt-16">
         <div className="px-2 pb-4 text-sm font-bold uppercase tracking-wide text-slate-400">
           Super Admin
         </div>
