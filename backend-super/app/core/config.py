@@ -83,6 +83,44 @@ class Settings(BaseSettings):
     # Frontend
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:3003")
 
+    # ── Org-admin consent OTP (Phase 13) ───────────────────────────────────
+    # A short-lived numeric OTP emailed to the org admin (the email the
+    # organization registers with in the admin panel) must be entered by the
+    # super admin before an impersonation session can be confirmed or a
+    # conversation transcript can be peeked. Fail-closed: when SMTP_HOST is
+    # empty the endpoints return 502 and no OTP is ever exposed.
+    OTP_TTL_MINUTES: int = int(os.getenv("OTP_TTL_MINUTES", "10"))
+    OTP_MAX_ATTEMPTS: int = int(os.getenv("OTP_MAX_ATTEMPTS", "5"))
+    OTP_RESEND_COOLDOWN_SECONDS: int = int(
+        os.getenv("OTP_RESEND_COOLDOWN_SECONDS", "60")
+    )
+    # Once an OTP is verified for an org, the grant stays valid this long so
+    # the super admin can open several transcripts without re-OTP'ing.
+    PEEK_GRANT_TTL_MINUTES: int = int(os.getenv("PEEK_GRANT_TTL_MINUTES", "30"))
+    # ── Org-admin consent links (Phase 15, impersonation only) ─────────────
+    # Instead of an OTP the org admin receives a confirmation link by email.
+    # The link is valid 24 hours; clicking it shows a confirmation page and
+    # the admin must click "I confirm" before the impersonation is approved.
+    IMPERSONATION_APPROVAL_LINK_TTL_HOURS: int = int(
+        os.getenv("IMPERSONATION_APPROVAL_LINK_TTL_HOURS", "24")
+    )
+    # Public base URL the emailed consent link points at. The confirmation
+    # page is served by THIS backend (no super-admin login required there).
+    IMPERSONATION_CONSENT_BASE_URL: str = os.getenv(
+        "IMPERSONATION_CONSENT_BASE_URL", "http://localhost:8006"
+    )
+    # Tenant console (admin-panel) base URL. Used to build the "Open console"
+    # handoff link after an impersonation session is confirmed.
+    TENANT_CONSOLE_URL: str = os.getenv(
+        "TENANT_CONSOLE_URL", "http://localhost:3002"
+    )
+    # Handshake ticket that hands the super admin into the tenant app as the
+    # impersonated user. Short-lived and signed with the shared bridge secret
+    # so the tenant backend can validate it without sharing JWTs.
+    IMPERSONATION_HANDSHAKE_TTL_MINUTES: int = int(
+        os.getenv("IMPERSONATION_HANDSHAKE_TTL_MINUTES", "10")
+    )
+
     # ── Incident email notify (Phase 6, task 5) ───────────────────────────
     # When INCIDENT_NOTIFY_TO is empty, incident emails are skipped (no-op).
     SMTP_HOST: str = os.getenv("SMTP_HOST", "")
@@ -92,6 +130,14 @@ class Settings(BaseSettings):
     SMTP_FROM: str = os.getenv("SMTP_FROM", "DotStark Ops <no-reply@dotstark.local>")
     # Comma-separated list of recipients for incident notifications.
     INCIDENT_NOTIFY_TO: str = os.getenv("INCIDENT_NOTIFY_TO", "")
+
+    # ── Support tickets service key (Phase 12) ───────────────────────────
+    # Shared secret the tenant backend presents (X-Support-Service-Key) when it
+    # creates/lists tickets on behalf of an authenticated org admin. Must match
+    # the tenant backend's SUPPORT_SERVICE_KEY.
+    SUPPORT_SERVICE_KEY: str = os.getenv(
+        "SUPPORT_SERVICE_KEY", "dev_support_service_key_2026"
+    )
 
     class Config:
         case_sensitive = True

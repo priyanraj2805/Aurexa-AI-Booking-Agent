@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from typing import Optional
+from app.api.v1.endpoints.auth import deny_impersonation
 from app.db.database import get_db
 from app.crud.otp import OTPGenerateRequest, OTPVerifyRequest, generate_otp, verify_otp
 from app.core.config import settings
@@ -27,6 +28,7 @@ class OTPVerifyResponse(BaseModel):
 async def request_otp(
     request: Request,
     data: OTPGenerateRequest,
+    _: None = Depends(deny_impersonation),
     db: AsyncSession = Depends(get_db)
 ):
     """Generates an OTP for the given session. In production this would SMS the user."""

@@ -15,7 +15,6 @@ const REPORT_TYPES: { name: string; label: string; description: string }[] = [
   { name: "kb", label: "KB", description: "Knowledge base chunks by source type" },
   { name: "growth", label: "Growth", description: "Orgs & users created, last 12 months" },
   { name: "performance", label: "Performance", description: "Booking throughput & conversion" },
-  { name: "health", label: "Health", description: "Open alerts by component/severity" },
   { name: "widget", label: "Widget", description: "Embedded widget bookings, last 30 days" },
 ];
 

@@ -52,23 +52,41 @@ app.add_middleware(
 # cross-origin form submissions, preventing CSRF attacks.
 CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
+# State-changing routes exempt from the cookie-based CSRF check. The consent
+# confirm endpoint authenticates via a single-use bearer token embedded in
+# the emailed link (never via cookies), so an HTML form POST from the org
+# admin's browser must be allowed.
+CSRF_EXEMPT_PATH_PREFIXES = (
+    "/api/v1/impersonation/consent/",
+    # Peek (transcript) consent flows: the org admin confirms via a plain HTML
+    # form POST from the emailed link. The link authenticates with a single-use
+    # bearer token (never cookies), so the cookie-based CSRF check must not
+    # apply — the form cannot carry an X-Requested-With header.
+    "/api/v1/support/peek/consent/",
+)
+
 
 class CSRFMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if request.method not in CSRF_SAFE_METHODS:
-            has_cookie = request.cookies.get(settings.SUPER_ADMIN_COOKIE_NAME)
-            has_bearer = (request.headers.get("authorization") or "").startswith(
-                "Bearer "
+            exempt = any(
+                request.url.path.startswith(prefix)
+                for prefix in CSRF_EXEMPT_PATH_PREFIXES
             )
-            if has_cookie and not has_bearer:
-                csrf_header = request.headers.get("x-requested-with")
-                if csrf_header != "XMLHttpRequest":
-                    return JSONResponse(
-                        status_code=403,
-                        content={
-                            "detail": "CSRF validation failed. Include X-Requested-With: XMLHttpRequest header."
-                        },
-                    )
+            if not exempt:
+                has_cookie = request.cookies.get(settings.SUPER_ADMIN_COOKIE_NAME)
+                has_bearer = (request.headers.get("authorization") or "").startswith(
+                    "Bearer "
+                )
+                if has_cookie and not has_bearer:
+                    csrf_header = request.headers.get("x-requested-with")
+                    if csrf_header != "XMLHttpRequest":
+                        return JSONResponse(
+                            status_code=403,
+                            content={
+                                "detail": "CSRF validation failed. Include X-Requested-With: XMLHttpRequest header."
+                            },
+                        )
         return await call_next(request)
 
 

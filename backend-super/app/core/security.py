@@ -109,3 +109,30 @@ def generate_token_hash(token: str) -> str:
 
 def random_jti() -> str:
     return secrets.token_urlsafe(32)
+
+
+# ── Impersonation enter-handshake ─────────────────
+# A short-lived ticket that lets the super admin hand into the tenant
+# admin-panel as the impersonated user WITHOUT shipping the raw tenant JWT
+# through the UI. Signed with the SHARED bridge secret so the tenant backend
+# can validate it, then the tenant mints its own impersonation JWT.
+IMP_HANDSHAKE_PURPOSE = "imp_enter"
+
+
+def create_impersonation_handshake(
+    user_email: str, org_id: str, jti: str, administrator_email: str
+) -> str:
+    """Mint a short-lived one-time handshake for the tenant /auth/impersonate/enter."""
+    to_encode = {
+        "typ": IMP_HANDSHAKE_PURPOSE,
+        "sub": user_email,
+        "org_id": org_id,
+        "jti": jti,
+        "imp_by": administrator_email,
+        "exp": _exp(
+            timedelta(minutes=settings.IMPERSONATION_HANDSHAKE_TTL_MINUTES)
+        ),
+    }
+    return jwt.encode(
+        to_encode, settings.INTERNAL_BRIDGE_SECRET, algorithm="HS256"
+    )

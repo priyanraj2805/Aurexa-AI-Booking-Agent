@@ -1,8 +1,8 @@
 """Platform health endpoints (Phase 6).
 
 dependency-health proxies the tenant bridge (HMAC-signed) so the platform
-sees the same checks as the tenant dashboard; overview aggregates alert and
-incident counts from this database.
+sees the same checks as the tenant dashboard; overview aggregates incident
+counts from this database.
 """
 from typing import Optional
 
@@ -38,19 +38,6 @@ async def get_health_overview(
     _: CurrentAdmin = Depends(require_permission("health.view")),
     db: AsyncSession = Depends(get_db),
 ):
-    open_alerts = (
-        await db.execute(
-            text("SELECT count(*) FROM public.system_alerts WHERE resolved_at IS NULL")
-        )
-    ).scalar()
-    critical_alerts = (
-        await db.execute(
-            text(
-                "SELECT count(*) FROM public.system_alerts "
-                "WHERE resolved_at IS NULL AND severity = 'critical'"
-            )
-        )
-    ).scalar()
     open_incidents = (
         await db.execute(
             text(
@@ -60,7 +47,5 @@ async def get_health_overview(
         )
     ).scalar()
     return {
-        "open_alerts": int(open_alerts or 0),
-        "critical_alerts": int(critical_alerts or 0),
         "open_incidents": int(open_incidents or 0),
     }

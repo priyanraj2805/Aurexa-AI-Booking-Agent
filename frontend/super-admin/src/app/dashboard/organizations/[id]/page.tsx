@@ -194,7 +194,6 @@ export default function OrgDetailPage({
   const [billingSubs, setBillingSubs] = useState<OrgSubRow[]>([]);
   const [billingInvoices, setBillingInvoices] = useState<OrgInvoiceRow[]>([]);
   const [tabError, setTabError] = useState<string | null>(null);
-  const [unmask, setUnmask] = useState(false);
   const canUnmask = can("pii.unmask");
   const canImpersonate = can("support.impersonate");
 
@@ -230,16 +229,15 @@ export default function OrgDetailPage({
   const loadTab = useCallback(
     async (t: Tab) => {
       setTabError(null);
-      const pii = unmask && canUnmask ? "&unmask=true" : "";
       try {
         if (t === "Overview") {
           const b = await api.get<{ items: Booking[] }>(
-            `/tenants/orgs/${id}/bookings?page_size=10${pii}`
+            `/tenants/orgs/${id}/bookings?page_size=10`
           );
           setBookings(b.items);
         } else if (t === "Users") {
           const u = await api.get<{ items: OrgUser[] }>(
-            `/tenants/orgs/${id}/users${pii ? "?unmask=true" : ""}`
+            `/tenants/orgs/${id}/users`
           );
           setUsers(u.items);
         } else if (t === "Usage") {
@@ -268,7 +266,7 @@ export default function OrgDetailPage({
           setConversations(null);
           try {
             const c = await api.get<{ items: Conversation[] }>(
-              `/support/orgs/${id}/conversations${pii ? "?unmask=true" : ""}`
+              `/support/orgs/${id}/conversations`
             );
             setConversations(c.items);
             if (canImpersonate) {
@@ -287,7 +285,7 @@ export default function OrgDetailPage({
         setTabError(e instanceof Error ? e.message : "Failed to load tab");
       }
     },
-    [id, unmask, canUnmask, canImpersonate]
+    [id, canImpersonate]
   );
 
   const switchTab = (t: Tab) => {
@@ -368,6 +366,17 @@ export default function OrgDetailPage({
   const [peekOpen, setPeekOpen] = useState(false);
   const [peeking, setPeeking] = useState(false);
   const [peekResult, setPeekResult] = useState<PeekResult | null>(null);
+  const [revealed, setRevealed] = useState(false);
+  const [revealOpen, setRevealOpen] = useState(false);
+  const [revealCode, setRevealCode] = useState("");
+  const [revealReason, setRevealReason] = useState("");
+  const [revealBusy, setRevealBusy] = useState(false);
+  const [peekReqOpen, setPeekReqOpen] = useState(false);
+  const [peekReqBusy, setPeekReqBusy] = useState(false);
+  const [peekReqId, setPeekReqId] = useState<string | null>(null);
+  const [peekReqSentTo, setPeekReqSentTo] = useState("");
+  const [peekReqStatus, setPeekReqStatus] = useState<string | null>(null);
+  const [pendingPeekId, setPendingPeekId] = useState<string | null>(null);
   const [impUsers, setImpUsers] = useState<OrgUser[] | null>(null);
   const [impUser, setImpUser] = useState<OrgUser | null>(null);
   const [stepupOpen, setStepupOpen] = useState(false);
@@ -378,18 +387,117 @@ export default function OrgDetailPage({
   const [stoppingImp, setStoppingImp] = useState(false);
 
   const openPeek = async (sessionId: string) => {
+    setPendingPeekId(sessionId);
+    try {
+      const g = await api.get<{ granted: boolean }>(
+        `/support/peek/grant?org_id=${id}`
+      );
+      if (g.granted) {
+        void doLoadTranscript(sessionId);
+      } else {
+        setPeekReqStatus(null);
+        setPeekReqId(null);
+        setPeekReqSentTo("");
+        setPeekReqOpen(true);
+      }
+    } catch {
+      setPeekReqStatus(null);
+      setPeekReqId(null);
+      setPeekReqSentTo("");
+      setPeekReqOpen(true);
+    }
+  };
+
+  const doLoadTranscript = async (sessionId: string) => {
     setPeekOpen(true);
     setPeeking(true);
     setPeekResult(null);
-    const pii = unmask && canUnmask ? "?unmask=true" : "";
+    setRevealed(false);
     try {
       setPeekResult(
-        await api.get<PeekResult>(`/support/sessions/${sessionId}/peek${pii}`)
+        await api.get<PeekResult>(`/support/sessions/${sessionId}/peek`)
       );
     } catch (e) {
       toast("error", e instanceof Error ? e.message : "Failed to load transcript");
+      setPeekOpen(false);
     } finally {
       setPeeking(false);
+    }
+  };
+
+  const doRequestPeekConsent = async () => {
+    setPeekReqBusy(true);
+    try {
+      const r = await api.post<{
+        id: string;
+        link_sent_to: string;
+        link_expires_at: string;
+        link_ttl_hours: number;
+      }>("/support/peek/request", { org_id: id });
+      setPeekReqId(r.id);
+      setPeekReqSentTo(r.link_sent_to);
+      setPeekReqStatus("pending");
+      toast("info", `Consent link sent to ${r.link_sent_to}`);
+    } catch (e) {
+      toast("error", e instanceof Error ? e.message : "Failed to send consent request");
+    } finally {
+      setPeekReqBusy(false);
+    }
+  };
+
+  const doCancelPeekRequest = () => {
+    setPeekReqOpen(false);
+    setPeekReqId(null);
+    setPeekReqSentTo("");
+    setPeekReqStatus(null);
+  };
+
+  useEffect(() => {
+    if (!peekReqOpen || !peekReqId) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const r = await api.get<{ status: string }>(
+          `/support/peek/request/${peekReqId}`
+        );
+        if (cancelled) return;
+        setPeekReqStatus(r.status);
+        if (r.status === "approved") {
+          setPeekReqOpen(false);
+          setPeekReqId(null);
+          toast("success", "Org admin approved — transcript unlocked");
+          if (pendingPeekId) void doLoadTranscript(pendingPeekId);
+        }
+      } catch {
+        // transient — keep polling
+      }
+    };
+    void check();
+    const t = setInterval(check, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [peekReqOpen, peekReqId, pendingPeekId]);
+
+  const revealPeek = async () => {
+    if (!peekResult) return;
+    setRevealBusy(true);
+    try {
+      await api.post("/auth/mfa/stepup", { code: revealCode });
+      const r = await api.get<PeekResult>(
+        `/support/sessions/${peekResult.session_id}/peek?unmask=true&reason=${encodeURIComponent(revealReason.trim())}`
+      );
+      setPeekResult(r);
+      setRevealed(true);
+      setRevealOpen(false);
+      setRevealCode("");
+      setRevealReason("");
+      toast("success", "Transcript revealed and audit-logged");
+    } catch (e) {
+      toast("error", e instanceof Error ? e.message : "Failed to reveal transcript");
+    } finally {
+      setRevealBusy(false);
     }
   };
 
@@ -463,18 +571,6 @@ export default function OrgDetailPage({
           )}
         </div>
         <div className="flex items-center gap-2">
-          {canUnmask && (
-            <button
-              onClick={() => setUnmask((v) => !v)}
-              className={`rounded-md border px-3 py-1.5 text-sm ${
-                unmask
-                  ? "border-amber-700 bg-amber-950/40 text-amber-300"
-                  : "border-slate-700 text-slate-300 hover:bg-slate-800"
-              }`}
-            >
-              {unmask ? "Unmasked" : "Unmask PII"}
-            </button>
-          )}
           <span
             className={`rounded-full px-3 py-1 text-xs font-semibold ${
               org.is_active
@@ -1220,12 +1316,77 @@ export default function OrgDetailPage({
         </div>
       )}
 
+      {peekReqOpen && (
+        <Modal
+          title="Org-admin consent required"
+          onClose={() => !peekReqBusy && doCancelPeekRequest()}
+        >
+          <p className="text-sm text-slate-400">
+            Viewing transcripts in this organization requires approval from the
+            org admin. A confirmation link is emailed to their registered
+            account — once they click "I Confirm", the transcript unlocks
+            automatically.
+          </p>
+          {!peekReqId && (
+            <div className="mt-4 flex items-center gap-2">
+              <button
+                onClick={() => void doRequestPeekConsent()}
+                disabled={peekReqBusy}
+                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-40"
+              >
+                {peekReqBusy ? "Sending…" : "Send consent request to org admin"}
+              </button>
+            </div>
+          )}
+          {peekReqId && (
+            <div className="mt-4 space-y-2">
+              <p className="text-xs text-slate-400">
+                Confirmation link sent to{" "}
+                <span className="font-mono">{peekReqSentTo}</span> — waiting
+                for the org admin to approve…
+              </p>
+              {peekReqStatus === "expired" && (
+                <p className="text-xs text-amber-300">
+                  This request expired — send a new one if access is still
+                  needed.
+                </p>
+              )}
+              <div className="flex gap-2 pt-1">
+                {peekReqStatus === "expired" ? (
+                  <button
+                    onClick={() => void doRequestPeekConsent()}
+                    disabled={peekReqBusy}
+                    className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-40"
+                  >
+                    Send new request
+                  </button>
+                ) : (
+                  <button
+                    onClick={doCancelPeekRequest}
+                    disabled={peekReqBusy}
+                    className="rounded border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </Modal>
+      )}
+
       {peekOpen && (
         <Modal title="Conversation transcript" onClose={() => setPeekOpen(false)}>
           {peeking || !peekResult ? (
             <p className="py-8 text-center text-sm text-slate-400">Loading…</p>
           ) : (
             <div className="space-y-3">
+              {!revealed && (
+                <div className="rounded-md border border-slate-700 bg-slate-900/60 px-3 py-2 text-xs text-slate-400">
+                  PII is masked. Emails, phones and customer names in this
+                  transcript are hidden by default.
+                </div>
+              )}
               <div className="rounded-md border border-slate-800 bg-slate-900 p-3 text-xs">
                 <p>
                   <span className="text-slate-400">Session:</span>{" "}
@@ -1267,8 +1428,66 @@ export default function OrgDetailPage({
                   ))}
                 </div>
               )}
+              {canUnmask && !revealed && (
+                <button
+                  onClick={() => setRevealOpen(true)}
+                  className="rounded-md border border-amber-700 bg-amber-950/40 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-950"
+                >
+                  Reveal full transcript (MFA + reason)
+                </button>
+              )}
+              {revealed && (
+                <p className="text-xs text-amber-400/80">
+                  Unmasked — this reveal was audit-logged with your stated
+                  reason.
+                </p>
+              )}
             </div>
           )}
+        </Modal>
+      )}
+
+      {revealOpen && (
+        <Modal
+          title="Reveal full transcript"
+          onClose={() => !revealBusy && setRevealOpen(false)}
+        >
+          <p className="text-sm text-slate-400">
+            Viewing unmasked customer PII is audit-logged with your identity and
+            reason. Re-enter your 6-digit TOTP code to confirm.
+          </p>
+          <textarea
+            value={revealReason}
+            onChange={(e) => setRevealReason(e.target.value)}
+            placeholder="Reason (min 10 characters) — e.g. investigating a billing dispute for this org"
+            rows={3}
+            className="mt-3 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600"
+          />
+          <input
+            value={revealCode}
+            onChange={(e) => setRevealCode(e.target.value)}
+            placeholder="000000"
+            inputMode="numeric"
+            className="mt-2 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-center font-mono text-lg text-slate-100"
+          />
+          <div className="mt-4 flex justify-end gap-2">
+            <button
+              onClick={() => setRevealOpen(false)}
+              disabled={revealBusy}
+              className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => void revealPeek()}
+              disabled={
+                revealBusy || revealCode.length !== 6 || revealReason.trim().length < 10
+              }
+              className="rounded-md bg-amber-700 px-4 py-2 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-40"
+            >
+              {revealBusy ? "Revealing…" : "Confirm & reveal"}
+            </button>
+          </div>
         </Modal>
       )}
 

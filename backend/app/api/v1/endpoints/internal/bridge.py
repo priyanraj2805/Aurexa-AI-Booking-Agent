@@ -20,7 +20,6 @@ from datetime import datetime, timedelta, timezone
 
 from app.core.bridge import BridgeAuth, verify_bridge
 from app.core.audit import log_audit_event_async
-from app.core.feature_flags import is_feature_enabled
 from app.core.telemetry import increment_usage
 from app.core.config import settings
 from app.crud.organization import create_organization
@@ -291,119 +290,6 @@ async def bridge_dependency_health(
     return await build_dependency_health_payload(
         request_id=request_id, trace_id=trace_id
     )
-
-
-async def _get_alert_or_404(db: AsyncSession, alert_id: UUID):
-    row = (
-        await db.execute(
-            text("SELECT id, org_id, component, severity, resolved_at, acknowledged_at FROM system_alerts WHERE id = :alert_id"),
-            {"alert_id": alert_id},
-        )
-    ).mappings().first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Alert not found")
-    return row
-
-
-@router.post("/alerts/{alert_id}/acknowledge")
-async def bridge_acknowledge_alert(
-    alert_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    auth: BridgeAuth = Depends(verify_bridge),
-):
-    alert = await _get_alert_or_404(db, alert_id)
-    if alert["acknowledged_at"]:
-        return {"ok": True, "already": True}
-    await db.execute(
-        text(
-            "UPDATE system_alerts SET acknowledged_at = now(), acknowledged_by_user_id = NULL "
-            "WHERE id = :alert_id"
-        ),
-        {"alert_id": alert_id},
-    )
-    await db.commit()
-    await log_audit_event_async(
-        org_id=alert["org_id"],
-        action=AuditAction.ALERT_ACKNOWLEDGE,
-        resource_type="system_alert",
-        resource_id=str(alert_id),
-        actor_email=auth.admin_email,
-        new_values={"component": alert["component"]},
-    )
-    return {"ok": True}
-
-
-@router.post("/alerts/{alert_id}/resolve")
-async def bridge_resolve_alert(
-    alert_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    auth: BridgeAuth = Depends(verify_bridge),
-):
-    alert = await _get_alert_or_404(db, alert_id)
-    if alert["resolved_at"]:
-        return {"ok": True, "already": True}
-    await db.execute(
-        text("UPDATE system_alerts SET resolved_at = now() WHERE id = :alert_id"),
-        {"alert_id": alert_id},
-    )
-    await db.commit()
-    await log_audit_event_async(
-        org_id=alert["org_id"],
-        action=AuditAction.ALERT_RESOLVE,
-        resource_type="system_alert",
-        resource_id=str(alert_id),
-        actor_email=auth.admin_email,
-        new_values={"component": alert["component"]},
-    )
-    return {"ok": True}
-
-
-@router.get("/flags/{code}")
-async def bridge_feature_flag_state(
-    code: str,
-    db: AsyncSession = Depends(get_db),
-    auth: BridgeAuth = Depends(verify_bridge),
-):
-    """Live evaluation of one feature flag for the platform context.
-
-    NOTE: no query parameters here — bridge signatures are computed over
-    request.url.path, so any context must live in the path.
-    """
-    return await _evaluate_flag(code, org_id=None, db=db)
-
-
-@router.get("/flags/{code}/org/{org_id}")
-async def bridge_feature_flag_state_for_org(
-    code: str,
-    org_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    auth: BridgeAuth = Depends(verify_bridge),
-):
-    """Live evaluation of one feature flag for a specific org context
-    (org/plan scopes + canary bucket)."""
-    return await _evaluate_flag(code, org_id=org_id, db=db)
-
-
-async def _evaluate_flag(code: str, org_id, db: AsyncSession):
-    from app.core.feature_flags import get_flag_rows
-
-    target = None
-    for flag in await get_flag_rows(db):
-        if flag["code"] == code:
-            target = flag
-            break
-    if not target:
-        raise HTTPException(status_code=404, detail="Flag not found")
-
-    evaluated = await is_feature_enabled(db, code, org_id=org_id)
-    return {
-        "code": code,
-        "enabled": bool(target["enabled"]),
-        "scope": target["scope"],
-        "rollout_percent": target["rollout_percent"],
-        "evaluated": evaluated,
-        "org_id": str(org_id) if org_id else None,
-    }
 
 
 class ImpersonateStartRequest(BaseModel):

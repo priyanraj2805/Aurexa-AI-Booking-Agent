@@ -19,6 +19,33 @@ async def run_migrations():
     import sys
     import os
 
+    # Alembic's default alembic_version.version_num is VARCHAR(32), but this
+    # project's revision IDs are up to 34 chars (e.g. superadmin_phase8_*).
+    # Fresh databases get the default 32-char column from Alembic and then
+    # fail on the first long revision ID. Pre-create/widen the table so the
+    # whole chain can run. Idempotent: harmless on existing 64-char tables.
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    fix_engine = create_async_engine(settings.SQLALCHEMY_DATABASE_URI)
+    async with fix_engine.begin() as conn:
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS alembic_version (
+                    version_num VARCHAR(64) NOT NULL,
+                    CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE alembic_version "
+                "ALTER COLUMN version_num TYPE VARCHAR(64)"
+            )
+        )
+    await fix_engine.dispose()
+
     logger.info("Running database migrations...")
     subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "heads"],

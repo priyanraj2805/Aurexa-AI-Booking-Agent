@@ -7,6 +7,7 @@ import { api } from "@/lib/api";
 import { AppSidebar } from "@/components/app-sidebar";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Toaster } from "sonner";
+import { ImpersonationBanner } from "@/components/impersonation-banner";
 import { LoaderPulseSquare } from "@/components/ui/loaders";
 import {
   SidebarInset,
@@ -30,6 +31,7 @@ function getBreadcrumb(pathname: string) {
   if (pathname.includes("/agent")) return { category: "Settings", page: "Agent Personalisation" };
   if (pathname.includes("/business-hours")) return { category: "Settings", page: "Business Hours" };
   if (pathname.includes("/integrations")) return { category: "Settings", page: "Integration" };
+  if (pathname.includes("/support")) return { category: "Settings", page: "Support" };
   return { category: "App", page: "Dashboard" };
 }
 
@@ -156,6 +158,7 @@ export default function DashboardLayout({
   return (
     <SidebarProvider defaultOpen={sidebarOpen}>
       <AppSidebar />
+      <ImpersonationBanner />
       <Toaster position="bottom-right" theme="system" />
       <SidebarInset className="bg-background">
         {/* Top Bar — matches template: h-64px, border-bottom, breadcrumbs left, status+button right */}

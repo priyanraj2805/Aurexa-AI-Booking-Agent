@@ -1,5 +1,6 @@
 import logging
 import traceback
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -10,7 +11,7 @@ from typing import Optional
 from app.db.database import get_db
 from app.crud.user import get_user_by_email, authenticate_user, create_user_with_org
 from app.schemas.auth import UserRegister, UserLogin, UserResponse, TokenResponse
-from app.core.security import create_access_token, decode_access_token, ACCESS_TOKEN_EXPIRE_MINUTES
+from app.core.security import create_access_token, create_impersonation_token, decode_access_token, ACCESS_TOKEN_EXPIRE_MINUTES, IMPERSONATION_TOKEN_EXPIRE_MINUTES, decode_impersonation_handshake
 from app.models.user import User
 from app.models.organization import Organization
 from app.core.config import settings
@@ -20,6 +21,13 @@ from app.schemas.audit import AuditAction
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _support_service_headers() -> dict[str, str]:
+    return {
+        "Content-Type": "application/json",
+        "X-Support-Service-Key": settings.SUPPORT_SERVICE_KEY,
+    }
 
 
 def _set_auth_cookie(response: JSONResponse, token: str) -> JSONResponse:
@@ -259,5 +267,219 @@ async def logout(
         user_agent=request.headers.get("user-agent"),
     )
     response = JSONResponse(content={"detail": "Logged out"})
+    response.delete_cookie(key="ds_token", path="/")
+    return response
+
+
+# ── Phase 11b: impersonation hand-off (admin console) ──────────────────
+
+
+async def deny_impersonation(
+    authorization: Optional[str] = Header(None),
+    ds_token: Optional[str] = Cookie(None),
+) -> None:
+    """Reject sensitive actions while the session is an impersonation one.
+
+    Used as a dependency on destructive endpoints (password/MFA resets,
+    billing, deletions) so an impersonated session is read-mostly.
+    """
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1]
+    elif ds_token:
+        token = ds_token
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing or invalid token")
+    payload = decode_access_token(token)
+    if payload and payload.get("imp"):
+        raise HTTPException(
+            status_code=403,
+            detail="This action is not allowed while impersonating a user",
+        )
+
+
+@router.post("/impersonate/enter")
+async def impersonate_enter(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Exchange a control-plane handshake ticket for a tenant session cookie.
+
+    The super admin clicks "Open console" in the control plane, landing on
+    /impersonate/enter?hs=<handshake>. This endpoint validates the handshake
+    (signed with the shared bridge secret), checks the live impersonation
+    session, then mints a normal tenant impersonation JWT and sets the same
+    HttpOnly cookie used by a login — so the admin panel just works.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    handshake = (body or {}).get("hs", "")
+    if not handshake:
+        raise HTTPException(status_code=400, detail="Missing handshake")
+    payload = decode_impersonation_handshake(handshake)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired handshake")
+
+    jti = payload["jti"]
+    user_email = payload["sub"]
+    org_id = payload["org_id"]
+    impersonated_by = payload.get("imp_by")
+
+    # The impersonation session must be live AND this handshake ticket must
+    # not have been claimed before. The UPDATE acts as an atomic single-use
+    # claim: only the first enter for a given handshake jti succeeds, so a
+    # copied/replayed handshake link stops working immediately after use.
+    row = (
+        await db.execute(
+            text(
+                """
+                UPDATE impersonation_sessions
+                SET handshake_used_at = now()
+                WHERE token_jti = :jti
+                  AND handshake_used_at IS NULL
+                  AND revoked_at IS NULL
+                  AND expires_at > now()
+                RETURNING org_id, expires_at
+                """
+            ),
+            {"jti": jti},
+        )
+    ).mappings().first()
+    if not row:
+        raise HTTPException(
+            status_code=409,
+            detail="Handshake already used or impersonation session is no longer active",
+        )
+
+    token = create_impersonation_token(user_email, str(org_id), jti)
+    response = JSONResponse(
+        content={
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {
+                "email": user_email,
+                "org_id": str(org_id),
+            },
+            "impersonation": {
+                "active": True,
+                "user_email": user_email,
+                "org_id": str(org_id),
+                "impersonated_by": impersonated_by,
+            },
+        }
+    )
+    return _set_auth_cookie(response, token)
+
+
+@router.get("/impersonate/status")
+async def impersonate_status(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    ds_token: Optional[str] = Cookie(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Report whether the current tenant session is an impersonation one.
+
+    The admin panel shows a banner when active and blocks sensitive actions.
+    """
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1]
+    elif ds_token:
+        token = ds_token
+    if not token:
+        return {"active": False}
+
+    payload = decode_access_token(token)
+    if not payload or not payload.get("imp"):
+        return {"active": False}
+
+    jti = payload.get("jti", "")
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT user_email, org_id, expires_at
+                FROM impersonation_sessions
+                WHERE token_jti = :jti
+                  AND revoked_at IS NULL
+                  AND expires_at > now()
+                """
+            ),
+            {"jti": jti},
+        )
+    ).mappings().first()
+    if not row:
+        return {"active": False}
+
+    return {
+        "active": True,
+        "user_email": row["user_email"],
+        "org_id": str(row["org_id"]),
+        "expires_at": row["expires_at"].isoformat(),
+    }
+
+
+@router.post("/impersonate/exit")
+async def impersonate_exit(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    ds_token: Optional[str] = Cookie(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Revoke the active impersonation session and clear the tenant cookie."""
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1]
+    elif ds_token:
+        token = ds_token
+
+    exited_jti: Optional[str] = None
+    exited_user_email: Optional[str] = None
+    if token:
+        payload = decode_access_token(token)
+        if payload and payload.get("imp"):
+            jti = payload.get("jti", "")
+            if jti:
+                row = (
+                    await db.execute(
+                        text(
+                            """
+                            UPDATE impersonation_sessions
+                            SET revoked_at = now()
+                            WHERE token_jti = :jti AND revoked_at IS NULL
+                            RETURNING user_email
+                            """
+                        ),
+                        {"jti": jti},
+                    )
+                ).mappings().first()
+                if row:
+                    exited_jti = jti
+                    exited_user_email = row["user_email"]
+                await db.commit()
+
+    # Best-effort mirror to the control plane so super_admin.impersonations
+    # does not stay 'active' until the admin clicks "End now" (F5). A control
+    # plane outage must never block the tenant-side exit.
+    if exited_jti:
+        try:
+            async with httpx.AsyncClient(
+                timeout=5, base_url=settings.SUPER_ADMIN_API_URL
+            ) as client:
+                await client.post(
+                    "/api/v1/impersonation/tenant-exit",
+                    headers=_support_service_headers(),
+                    json={
+                        "token_jti": exited_jti,
+                        "user_email": exited_user_email,
+                    },
+                )
+        except httpx.HTTPError as exc:
+            logger.warning("Impersonation exit mirror failed: %s", exc)
+
+    response = JSONResponse(content={"ok": True})
     response.delete_cookie(key="ds_token", path="/")
     return response

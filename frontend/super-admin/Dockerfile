@@ -11,6 +11,10 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
+# Override the dev-time .env.local (localhost) so browser-side API calls go
+# through the same public host (proxied by next.config rewrites to the
+# internal backend-super). Keeps tunnels working from any machine, URL-independent.
+ENV NEXT_PUBLIC_API_BASE=/api/v1
 RUN npm run build
 
 # ── Stage 3: Runner ───────────────────────────────────────────────────────

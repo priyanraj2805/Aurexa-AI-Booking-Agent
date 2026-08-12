@@ -55,8 +55,14 @@ async def takeover_conversation(
     """
     if str(user.org_id) != str(org_id):
         raise HTTPException(status_code=403, detail="Access denied: not your organization")
-    
-    session = await crud_chat.set_human_takeover(db, str(conversation_id), str(user.id), user.full_name)
+
+    # Verify conversation exists and belongs to org
+    result = await db.execute(select(ChatSession).where(ChatSession.id == conversation_id))
+    session = result.scalars().first()
+    if not session or str(session.org_id) != str(org_id):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    session = await crud_chat.set_human_takeover(db, str(conversation_id), user.org_id, str(user.id), user.full_name)
     if not session:
         raise HTTPException(status_code=404, detail="Conversation not found")
     
@@ -125,8 +131,14 @@ async def release_conversation(
     """
     if str(user.org_id) != str(org_id):
         raise HTTPException(status_code=403, detail="Access denied: not your organization")
-    
-    session = await crud_chat.release_human_control(db, str(conversation_id))
+
+    # Verify conversation exists and belongs to org
+    result = await db.execute(select(ChatSession).where(ChatSession.id == conversation_id))
+    session = result.scalars().first()
+    if not session or str(session.org_id) != str(org_id):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    session = await crud_chat.release_human_control(db, str(conversation_id), user.org_id)
     if not session:
         raise HTTPException(status_code=404, detail="Conversation not found")
     

@@ -62,6 +62,28 @@ def create_impersonation_token(user_email: str, org_id: str, jti: str) -> str:
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
+def decode_impersonation_handshake(handshake: str):
+    """Validate a Phase-11b impersonation handshake ticket.
+
+    The handshake is signed with the SHARED bridge secret (never the tenant
+    JWT secret) by the super-admin control plane, so a leaked tenant JWT is
+    never required to enter the impersonated session.
+    """
+    from app.core.config import settings
+
+    try:
+        payload = jwt.decode(
+            handshake,
+            settings.INTERNAL_BRIDGE_SECRET,
+            algorithms=[ALGORITHM],
+        )
+    except JWTError:
+        return None
+    if payload.get("typ") != "imp_enter":
+        return None
+    return payload
+
+
 def decode_access_token(token: str) -> Optional[dict]:
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])

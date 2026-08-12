@@ -384,12 +384,18 @@ async def platform_stats(
     conversations_today = await scalar(
         "SELECT count(*) FROM chat_sessions WHERE created_at::date = now()::date"
     )
-    alerts_open = await scalar(
-        "SELECT count(*) FROM system_alerts WHERE resolved_at IS NULL"
-    )
-    alerts_critical = await scalar(
-        "SELECT count(*) FROM system_alerts WHERE resolved_at IS NULL AND severity = 'critical'"
-    )
+    mrr_cents = (
+        await db.execute(
+            text(
+                """
+                SELECT COALESCE(SUM(p.monthly_price_cents), 0)
+                FROM super_admin.subscriptions s
+                JOIN super_admin.plans p ON p.id = s.plan_id
+                WHERE s.status IN ('active', 'past_due', 'trialing')
+                """
+            )
+        )
+    ).scalar() or 0
 
     trend_rows = (
         await db.execute(
@@ -428,9 +434,7 @@ async def platform_stats(
         conversations_total=conversations_total,
         conversations_active=conversations_active,
         conversations_today=conversations_today,
-        alerts_open=alerts_open,
-        alerts_critical=alerts_critical,
-        mrr=None,
+        mrr=int(mrr_cents),
         ai_tokens_30d=None,
         trend=trend,
     )

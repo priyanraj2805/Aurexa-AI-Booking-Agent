@@ -17,7 +17,7 @@ from app.db.database import get_db
 from app.core.config import settings
 from app.models.config import OrgConfig
 from app.models.user import User
-from app.api.v1.endpoints.auth import get_current_user
+from app.api.v1.endpoints.auth import get_current_user, deny_impersonation
 from app.services.pdf_processor import process_pdf, compute_content_hash
 from app.services.firecrawl_service import get_firecrawl_service
 from app.services.retrieval_service import store_document_chunks, delete_document_chunks, delete_website_chunks
@@ -86,6 +86,7 @@ async def upload_document(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
 ):
     """Upload a PDF document (max 10 PDFs per org). Chunks are stored for BM25 search."""
     org_id = user.org_id
@@ -214,6 +215,7 @@ async def delete_document(
     doc_id: str,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
 ):
     """Delete a document and all its chunks for this org."""
     org_id = user.org_id
@@ -231,6 +233,7 @@ async def delete_document(
 async def delete_website_data(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
 ):
     """Delete all crawled website data for this org."""
     org_id = user.org_id

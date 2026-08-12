@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/toast";
-import { ConfirmDialog } from "@/components/modal";
+import { ConfirmDialog, Modal } from "@/components/modal";
 
 type Approval = {
   id: string;
@@ -52,6 +52,9 @@ export default function ApprovalsPage() {
   const [acting, setActing] = useState<Approval | null>(null);
   const [action, setAction] = useState<"approve" | "reject">("approve");
   const [note, setNote] = useState("");
+  const [stepupOpen, setStepupOpen] = useState(false);
+  const [stepupCode, setStepupCode] = useState("");
+  const [stepupBusy, setStepupBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -85,9 +88,39 @@ export default function ApprovalsPage() {
       setNote("");
       await load();
     } catch (e) {
-      toast("error", e instanceof Error ? e.message : "Action failed");
+      const message = e instanceof Error ? e.message : "Action failed";
+      if (action === "approve" && message.includes("MFA step-up required")) {
+        setStepupOpen(true);
+        setStepupCode("");
+        return;
+      }
+      toast("error", message);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const doStepupAndApprove = async () => {
+    if (!acting) return;
+    setStepupBusy(true);
+    try {
+      await api.post("/auth/mfa/stepup", { code: stepupCode.trim() });
+      await api.post(`/approvals/${acting.id}/${action}`, { note: note || null });
+      toast(
+        "success",
+        action === "approve"
+          ? "Approved — bridge action executed"
+          : "Request rejected"
+      );
+      setStepupOpen(false);
+      setStepupCode("");
+      setActing(null);
+      setNote("");
+      await load();
+    } catch (e) {
+      toast("error", e instanceof Error ? e.message : "Verification failed");
+    } finally {
+      setStepupBusy(false);
     }
   };
 
@@ -270,6 +303,42 @@ export default function ApprovalsPage() {
           onConfirm={submit}
           onCancel={() => setActing(null)}
         />
+      )}
+
+      {stepupOpen && (
+        <Modal title="MFA step-up" onClose={() => !stepupBusy && setStepupOpen(false)}>
+          <p className="text-sm text-slate-400">
+            Approving an org deletion requires re-verifying your identity. Enter
+            your authenticator code to continue.
+          </p>
+          <input
+            autoFocus
+            value={stepupCode}
+            onChange={(e) =>
+              setStepupCode(e.target.value.replace(/\D/g, "").slice(0, 6))
+            }
+            onKeyDown={(e) => e.key === "Enter" && void doStepupAndApprove()}
+            placeholder="000000"
+            inputMode="numeric"
+            className="mt-4 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-lg tracking-widest outline-none focus:border-indigo-500"
+          />
+          <div className="mt-5 flex justify-end gap-2">
+            <button
+              onClick={() => setStepupOpen(false)}
+              disabled={stepupBusy}
+              className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={doStepupAndApprove}
+              disabled={stepupBusy || stepupCode.length < 6}
+              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+            >
+              {stepupBusy ? "Verifying…" : "Verify & approve"}
+            </button>
+          </div>
+        </Modal>
       )}
     </div>
   );

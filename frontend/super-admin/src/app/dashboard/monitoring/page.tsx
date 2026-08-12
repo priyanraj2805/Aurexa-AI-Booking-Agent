@@ -17,8 +17,6 @@ type DepPayload = {
 };
 
 type Overview = {
-  open_alerts: number;
-  critical_alerts: number;
   open_incidents: number;
 };
 
@@ -96,8 +94,8 @@ export default function MonitoringPage() {
       <div>
         <h1 className="text-2xl font-bold">Monitoring</h1>
         <p className="mt-1 text-sm text-slate-400">
-          Dependency health from the tenant backend plus platform alert and
-          incident counts.
+          Dependency health from the tenant backend plus platform incident
+          counts.
         </p>
       </div>
 
@@ -107,21 +105,7 @@ export default function MonitoringPage() {
         </p>
       )}
 
-      <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <KpiCard
-          label="Open alerts"
-          value={overview?.open_alerts ?? "—"}
-          accent={
-            (overview?.open_alerts ?? 0) > 0 ? "text-amber-300" : "text-green-300"
-          }
-        />
-        <KpiCard
-          label="Critical alerts"
-          value={overview?.critical_alerts ?? "—"}
-          accent={
-            (overview?.critical_alerts ?? 0) > 0 ? "text-red-300" : "text-green-300"
-          }
-        />
+      <div className="mt-6 max-w-xs">
         <KpiCard
           label="Open incidents"
           value={overview?.open_incidents ?? "—"}
@@ -174,12 +158,6 @@ export default function MonitoringPage() {
       </div>
 
       <div className="mt-4 flex gap-4 text-sm">
-        <Link
-          href="/dashboard/alerts"
-          className="rounded-md border border-slate-700 px-3 py-1.5 text-slate-300 hover:bg-slate-800"
-        >
-          Open the alert inbox →
-        </Link>
         <Link
           href="/dashboard/incidents"
           className="rounded-md border border-slate-700 px-3 py-1.5 text-slate-300 hover:bg-slate-800"

@@ -89,15 +89,14 @@ class Settings(BaseSettings):
         os.getenv("TELEMETRY_ENABLED", "false").lower() in ("true", "1", "yes")
     )
 
-    # ── Feature flags (Phase 7) ───────────────────────────────────────────
-    # Main backend reads super_admin.feature_flags on every request via the
-    # cached evaluator (app.core.feature_flags). While the gate is OFF every
-    # evaluation short-circuits to the caller's default — no behavior change.
-    FEATURE_FLAGS_ENABLED: bool = (
-        os.getenv("FEATURE_FLAGS_ENABLED", "false").lower() in ("true", "1", "yes")
+    # ── Support tickets forwarding (Phase 12) ─────────────────────────────
+    # URL of the backend-super control plane. The tenant backend forwards org
+    # admin support requests there (service-key-auth'd), so tickets live in the
+    # control plane and the super admin team owns a single queue.
+    SUPER_ADMIN_API_URL: str = os.getenv("SUPER_ADMIN_API_URL", "http://localhost:8006")
+    SUPPORT_SERVICE_KEY: str = os.getenv(
+        "SUPPORT_SERVICE_KEY", "dev_support_service_key_2026"
     )
-    # Cache TTL for the flag registry snapshot (seconds).
-    FLAGS_CACHE_TTL_SECONDS: int = int(os.getenv("FLAGS_CACHE_TTL_SECONDS", "15"))
 
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> str:

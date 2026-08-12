@@ -30,14 +30,14 @@ from app.models.config import (
 )
 from app.models.message import ChatMessage
 from app.models.system_alert import SystemAlert
-from app.api.v1.endpoints.auth import get_current_user
+from app.api.v1.endpoints.auth import get_current_user, deny_impersonation
 from app.core.audit import log_audit_event
 from app.schemas.audit import AuditAction
 from app.core.mail import send_cancellation_email
 from app.core.health_status import build_dependency_health_payload
 from app.core.config import settings
 from asgi_correlation_id.context import correlation_id
-from app.schemas.agent import FieldDefinition, get_required_field_names, order_field_definitions
+from app.schemas.agent import FieldDefinition, get_required_field_names, order_field_definitions, _sanitize_icon as sanitize_icon
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -108,6 +108,7 @@ def _normalize_field_definitions(field_definitions: Any) -> tuple[List[Dict[str,
                 detail=f"Duplicate field name: {definition.name}",
             )
         seen_names.add(definition.name)
+        definition.icon = sanitize_icon(definition.icon, definition.name)
 
         if definition.type == "select":
             options = [str(option).strip() for option in definition.options if str(option).strip()]
@@ -2165,6 +2166,7 @@ async def get_widget_token(
 @router.post("/widget-token/regenerate", response_model=WidgetTokenResponse)
 async def regenerate_widget_token(
     user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -2192,6 +2194,7 @@ async def regenerate_widget_token(
 @router.delete("/widget-token")
 async def revoke_widget_token(
     user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
     db: AsyncSession = Depends(get_db),
 ):
     """Revoke the widget token. Widget will stop working until a new token is generated."""

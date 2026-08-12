@@ -1,0 +1,33 @@
+# Python virtual environments (never include — the Dockerfile re-installs)
+.venv/
+venv/
+env/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+
+# Environment secrets — supplied via compose env_file, never baked into image
+.env
+.env.docker
+.env.*.local
+
+# Tests
+tests/
+pytest.ini
+coverage/
+
+# Docs, git & IDE metadata
+*.md
+docs/
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Logs
+*.log
+server.log

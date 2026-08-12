@@ -10,6 +10,30 @@ FIELD_TYPES = Literal[
 ]
 DATE_TIME_FIELD_ORDER = {"date": 0, "time": 1}
 
+# Canonical emoji per core field name. Used to heal rows whose icon got
+# corrupted to a single ASCII byte (e.g. "d") by a Windows-mojibake write
+# path (H2).
+_CANONICAL_ICONS = {
+    "name": "👤",
+    "email": "📧",
+    "phone": "📞",
+    "date": "📅",
+    "time": "⏰",
+}
+
+
+def _sanitize_icon(value: Any, field_name: str = "") -> str:
+    """Return a usable emoji icon, healing mojibake/corrupt single-character icons."""
+    raw = str(value or "").strip()
+    # A single ASCII character (e.g. "d") is almost certainly a corrupted
+    # multi-byte emoji. Fall back to the canonical icon for known fields, else
+    # the schema default.
+    if raw and len(raw) == 1 and raw.isascii():
+        return _CANONICAL_ICONS.get((field_name or "").strip().lower(), "📋")
+    if raw:
+        return raw
+    return _CANONICAL_ICONS.get((field_name or "").strip().lower(), "📋")
+
 
 class FieldDefinition(BaseModel):
     """
@@ -127,6 +151,7 @@ def parse_field_definitions(raw: Any) -> List[FieldDefinition]:
         normalized.setdefault("placeholder", "")
         normalized.setdefault("description", "")
         normalized.setdefault("icon", "📋")
+        normalized["icon"] = _sanitize_icon(normalized.get("icon"), name)
         if not isinstance(normalized.get("options"), list):
             normalized["options"] = []
         if normalized.get("order") is None:

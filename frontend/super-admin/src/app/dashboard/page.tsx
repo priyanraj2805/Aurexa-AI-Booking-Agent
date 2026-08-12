@@ -16,8 +16,6 @@ type Stats = {
   conversations_total: number;
   conversations_active: number;
   conversations_today: number;
-  alerts_open: number;
-  alerts_critical: number;
   mrr: number | null;
   ai_tokens_30d: number | null;
   trend: { date: string; bookings: number; conversations: number }[];
@@ -144,18 +142,15 @@ export default function DashboardPage() {
           value={stats ? stats.conversations_total : "…"}
         />
         <KpiCard
-          label="Open alerts"
-          value={stats ? stats.alerts_open : "…"}
-          accent={
-            stats && stats.alerts_critical > 0 ? "text-red-400" : undefined
-          }
-          sub={
-            stats && stats.alerts_critical > 0
-              ? `${stats.alerts_critical} critical`
-              : "all clear"
+          label="MRR"
+          value={
+            stats?.mrr != null
+              ? `$${(stats.mrr / 100).toLocaleString("en-US", {
+                  maximumFractionDigits: 0,
+                })}`
+              : "—"
           }
         />
-        <KpiCard label="MRR" value={stats ? (stats.mrr ?? "—") : "…"} sub="Plans & billing land in Phase 5" />
       </div>
 
       <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">

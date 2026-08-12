@@ -164,6 +164,15 @@ services:
     networks:
       - app-network
 
+  cloudflared-super:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --url http://super-admin:3003 --no-autoupdate --protocol http2
+    depends_on:
+      - super-admin
+    networks:
+      - app-network
+
 # ── Shared Network ────────────────────────────────────────────────────────────
 # All containers join "app-network" so they can talk to each other by name.
 # Without this, containers are isolated and can't communicate.

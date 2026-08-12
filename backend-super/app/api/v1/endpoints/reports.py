@@ -1,8 +1,8 @@
 """Reports engine (Phase 6). Live analytics over usage_events + tenant
 tables, exposed as JSON and CSV.
 
-Report types (12): usage, revenue, bookings, conversations, ai, api,
-storage, kb, growth, performance, health, widget.
+Report types (11): usage, revenue, bookings, conversations, ai, api,
+storage, kb, growth, performance, widget.
 """
 import csv
 import io
@@ -30,7 +30,6 @@ REPORTS = (
     "kb",
     "growth",
     "performance",
-    "health",
     "widget",
 )
 
@@ -303,39 +302,6 @@ async def _performance_report(db: AsyncSession, month: Optional[str] = None) -> 
     return dict(row)
 
 
-async def _health_report(db: AsyncSession, month: Optional[str] = None) -> dict:
-    open_rows = (
-        await db.execute(
-            text(
-                """
-                SELECT component, severity, count(*) AS open
-                FROM public.system_alerts
-                WHERE resolved_at IS NULL
-                GROUP BY component, severity
-                ORDER BY component, severity
-                """
-            )
-        )
-    ).mappings()
-    resolved = (
-        await db.execute(
-            text(
-                """
-                SELECT count(*) AS resolved_30d
-                FROM public.system_alerts
-                WHERE resolved_at >= now() - interval '30 days'
-                """
-            )
-        )
-    ).scalar()
-    open_list = [dict(r) for r in open_rows]
-    return {
-        "open": open_list,
-        "open_total": sum(r["open"] for r in open_list),
-        "resolved_30d": int(resolved or 0),
-    }
-
-
 async def _widget_report(db: AsyncSession, month: Optional[str] = None) -> dict:
     """Embeddable widget snippet counts: bookings made via embedded widgets."""
     since = datetime.now(timezone.utc) - timedelta(days=DAYS)
@@ -367,7 +333,6 @@ REPORT_BUILDERS = {
     "kb": _kb_report,
     "growth": _growth_report,
     "performance": _performance_report,
-    "health": _health_report,
     "widget": _widget_report,
 }
 

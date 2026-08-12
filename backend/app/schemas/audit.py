@@ -40,10 +40,6 @@ class AuditAction(str, Enum):
     USER_DISABLE = "user.disable"
     USER_ENABLE = "user.enable"
 
-    # System alert operations (Phase 6, via bridge)
-    ALERT_ACKNOWLEDGE = "alert.acknowledge"
-    ALERT_RESOLVE = "alert.resolve"
-
     # Impersonation operations (Phase 8, via bridge)
     IMPERSONATION_START = "impersonation.start"
     IMPERSONATION_END = "impersonation.end"

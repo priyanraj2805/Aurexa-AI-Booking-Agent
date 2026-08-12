@@ -10,6 +10,7 @@ import {
   CalendarClock,
   Plug,
   LogOut,
+  LifeBuoy,
 } from "lucide-react";
 
 import {
@@ -35,6 +36,7 @@ const navSettings = [
   { title: "Agent Personalisation", url: "/dashboard/agent", icon: Bot },
   { title: "Business Hours", url: "/dashboard/business-hours", icon: CalendarClock },
   { title: "Integration", url: "/dashboard/integrations", icon: Plug },
+  { title: "Support", url: "/dashboard/support", icon: LifeBuoy },
 ];
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {

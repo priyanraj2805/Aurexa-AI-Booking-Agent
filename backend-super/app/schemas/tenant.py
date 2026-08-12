@@ -120,8 +120,6 @@ class StatsResponse(BaseModel):
     conversations_total: int
     conversations_active: int
     conversations_today: int
-    alerts_open: int
-    alerts_critical: int
     mrr: Optional[int] = None
     ai_tokens_30d: Optional[int] = None
     trend: list[TrendPoint]

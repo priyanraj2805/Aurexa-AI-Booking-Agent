@@ -332,13 +332,14 @@ async def get_session_messages(
 async def set_human_takeover(
     db: AsyncSession,
     session_id: str,
+    org_id: str,
     admin_id: str,
     admin_name: str,
 ) -> Optional[ChatSession]:
     """Atomically set human takeover for a conversation."""
     result = await db.execute(
         select(ChatSession)
-        .where(ChatSession.id == session_id)
+        .where(ChatSession.id == session_id, ChatSession.org_id == org_id)
         .with_for_update(nowait=True)
     )
     session = result.scalars().first()
@@ -367,11 +368,12 @@ async def set_human_takeover(
 async def release_human_control(
     db: AsyncSession,
     session_id: str,
+    org_id: str,
 ) -> Optional[ChatSession]:
     """Atomically release human control back to AI."""
     result = await db.execute(
         select(ChatSession)
-        .where(ChatSession.id == session_id)
+        .where(ChatSession.id == session_id, ChatSession.org_id == org_id)
         .with_for_update(nowait=True)
     )
     session = result.scalars().first()
