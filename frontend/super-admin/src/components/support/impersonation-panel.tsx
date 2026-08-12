@@ -104,6 +104,11 @@ export default function ImpersonationPanel({
   const [peekReqId, setPeekReqId] = useState<string | null>(null);
   const [peekReqSentTo, setPeekReqSentTo] = useState("");
   const [peekReqStatus, setPeekReqStatus] = useState<string | null>(null);
+  const [unmaskReqOpen, setUnmaskReqOpen] = useState(false);
+  const [unmaskReqBusy, setUnmaskReqBusy] = useState(false);
+  const [unmaskReqId, setUnmaskReqId] = useState<string | null>(null);
+  const [unmaskReqSentTo, setUnmaskReqSentTo] = useState("");
+  const [unmaskReqStatus, setUnmaskReqStatus] = useState<string | null>(null);
   const [pendingPeek, setPendingPeek] = useState<Conversation | null>(null);
 
   // History
@@ -555,6 +560,73 @@ export default function ImpersonationPanel({
       setRevealBusy(false);
     }
   };
+
+  const openReveal = async () => {
+    if (!peekOrg) return;
+    try {
+      const g = await api.get<{ unmask_granted: boolean }>(
+        `/support/peek/grant?org_id=${peekOrg.id}`
+      );
+      if (!g.unmask_granted) {
+        setUnmaskReqStatus(null);
+        setUnmaskReqId(null);
+        setUnmaskReqSentTo("");
+        setUnmaskReqOpen(true);
+        return;
+      }
+    } catch {
+      // grant check failed — fall through to the reveal modal; the server
+      // still enforces org-admin approval.
+    }
+    setRevealOpen(true);
+  };
+
+  const doRequestUnmaskConsent = async () => {
+    if (!peekOrg) return;
+    setUnmaskReqBusy(true);
+    try {
+      const r = await api.post<{
+        id: string;
+        link_sent_to: string;
+      }>("/support/peek/request", { org_id: peekOrg.id, purpose: "unmask" });
+      setUnmaskReqId(r.id);
+      setUnmaskReqSentTo(r.link_sent_to);
+      setUnmaskReqStatus("pending");
+      toast("info", `Approval link sent to ${r.link_sent_to}`);
+    } catch (e) {
+      toast("error", e instanceof Error ? e.message : "Failed to send approval request");
+    } finally {
+      setUnmaskReqBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!unmaskReqOpen || !unmaskReqId) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const r = await api.get<{ status: string }>(
+          `/support/peek/request/${unmaskReqId}`
+        );
+        if (cancelled) return;
+        setUnmaskReqStatus(r.status);
+        if (r.status === "approved") {
+          setUnmaskReqOpen(false);
+          setUnmaskReqId(null);
+          toast("success", "Org admin approved — PII reveal unlocked");
+          setRevealOpen(true);
+        }
+      } catch {
+        // transient — keep polling
+      }
+    };
+    void check();
+    const t = setInterval(check, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [unmaskReqOpen, unmaskReqId]);
 
   useEffect(() => {
     if (!issuedToken) return;
@@ -1152,7 +1224,7 @@ export default function ImpersonationPanel({
               ))}
               {canUnmask && !peekRevealed && (
                 <button
-                  onClick={() => setRevealOpen(true)}
+                  onClick={() => void openReveal()}
                   className="rounded-md border border-amber-700 bg-amber-950/40 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-950"
                 >
                   Reveal full transcript (MFA + reason)
@@ -1164,6 +1236,65 @@ export default function ImpersonationPanel({
                   reason.
                 </p>
               )}
+            </div>
+          )}
+        </Modal>
+      )}
+
+      {unmaskReqOpen && (
+        <Modal
+          title="Org-admin approval required for PII reveal"
+          onClose={() => !unmaskReqBusy && setUnmaskReqOpen(false)}
+        >
+          <p className="text-sm text-slate-400">
+            Releasing full customer details (emails, phones, names) requires a
+            separate approval from the org admin — the approval to view the
+            transcript is not enough. A confirmation link is emailed to their
+            registered account.
+          </p>
+          {!unmaskReqId && (
+            <div className="mt-4 flex items-center gap-2">
+              <button
+                onClick={() => void doRequestUnmaskConsent()}
+                disabled={unmaskReqBusy}
+                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-40"
+              >
+                {unmaskReqBusy ? "Sending…" : "Send approval request to org admin"}
+              </button>
+            </div>
+          )}
+          {unmaskReqId && (
+            <div className="mt-4 space-y-2">
+              <p className="text-xs text-slate-400">
+                Approval link sent to{" "}
+                <span className="font-mono">{unmaskReqSentTo}</span> — waiting
+                for the org admin to approve…
+              </p>
+              {unmaskReqStatus === "expired" && (
+                <p className="text-xs text-amber-300">
+                  This request expired — send a new one if access is still
+                  needed.
+                </p>
+              )}
+              <div className="flex gap-2 pt-1">
+                {unmaskReqStatus === "expired" ? (
+                  <button
+                    onClick={() => void doRequestUnmaskConsent()}
+                    disabled={unmaskReqBusy}
+                    className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-40"
+                  >
+                    Send new request
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setUnmaskReqOpen(false)}
+                    disabled={unmaskReqBusy}
+                    className="rounded border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
             </div>
           )}
         </Modal>

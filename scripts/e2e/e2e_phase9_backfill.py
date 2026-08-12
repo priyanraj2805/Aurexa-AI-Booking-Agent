@@ -53,6 +53,14 @@ SOURCE_QUERIES = {
                          'user.disable', 'user.enable', 'impersonation.start')
         GROUP BY 1, 2, 3
     """,
+    "conversations": """
+        SELECT date_trunc('month', created_at)::date AS event_month,
+               org_id,
+               'conversations' AS metric,
+               count(*) AS cnt
+        FROM public.chat_sessions
+        GROUP BY 1, 2
+    """,
 }
 
 UPSERT_SQL = """

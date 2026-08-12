@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { AuditAction, AuditChanges } from "@/components/audit/audit-change";
 
 type AuditRow = {
   id: string;
@@ -79,6 +80,7 @@ export default function AuditPage() {
               <th className="px-4 py-3">Time</th>
               <th className="px-4 py-3">Actor</th>
               <th className="px-4 py-3">Action</th>
+              <th className="px-4 py-3">Changes</th>
               <th className="px-4 py-3">Resource</th>
               <th className="px-4 py-3">IP</th>
             </tr>
@@ -91,9 +93,14 @@ export default function AuditPage() {
                 </td>
                 <td className="px-4 py-3">{r.actor_email ?? "—"}</td>
                 <td className="px-4 py-3">
-                  <span className="rounded bg-slate-800 px-2 py-0.5 font-mono text-xs">
-                    {r.action}
-                  </span>
+                  <AuditAction action={r.action} />
+                </td>
+                <td className="px-4 py-3">
+                  <AuditChanges
+                    action={r.action}
+                    oldValues={r.old_values}
+                    newValues={r.new_values}
+                  />
                 </td>
                 <td className="px-4 py-3 text-slate-300">
                   {r.resource_type}
@@ -104,7 +111,7 @@ export default function AuditPage() {
             ))}
             {rows.length === 0 && !error && (
               <tr>
-                <td colSpan={5} className="px-4 py-8 text-center text-slate-400">
+                <td colSpan={6} className="px-4 py-8 text-center text-slate-400">
                   No audit records yet
                 </td>
               </tr>

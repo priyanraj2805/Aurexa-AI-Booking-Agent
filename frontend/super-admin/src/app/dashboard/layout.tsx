@@ -25,6 +25,7 @@ import { AuthProvider, useAuth } from "@/lib/auth-context";
 import { ToastProvider } from "@/components/toast";
 import { ImpersonationBanner } from "@/components/impersonation-banner";
 import { NotificationBell } from "@/components/notification-bell";
+import { api } from "@/lib/api";
 
 type NavModule = {
   name: string;
@@ -44,7 +45,7 @@ const MODULES: NavModule[] = [
   { name: "Incidents", path: "/dashboard/incidents", permissions: ["incidents.view"], icon: AlertTriangle },
   { name: "Audit Logs", path: "/dashboard/audit", permissions: ["audit.view"], icon: ScrollText },
   { name: "Approvals", path: "/dashboard/approvals", permissions: ["orgs.delete"], icon: CheckCheck },
-  { name: "Notifications", path: "/dashboard/notifications", permissions: ["notifications.view"], icon: Megaphone },
+  { name: "Broadcasts", path: "/dashboard/notifications", permissions: ["notifications.view"], icon: Megaphone },
   { name: "Support", path: "/dashboard/support", permissions: ["support.tickets.view", "support.impersonate", "support.conversations.view"], icon: LifeBuoy },
   { name: "Settings", path: "/dashboard/settings", permissions: ["security.manage"], icon: Settings },
 ];
@@ -56,12 +57,80 @@ function Shell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
+  const [counts, setCounts] = useState<Record<string, number>>({});
+
+  const POLL_MS = 30000;
 
   useEffect(() => {
     if (!isLoading && !admin) {
       router.replace("/login");
     }
   }, [isLoading, admin, router]);
+
+  // Pending-work badges for nav items: approvals awaiting review, open
+  // incidents, open support tickets. Polled like the notification bell.
+  useEffect(() => {
+    if (isLoading || !admin) return;
+    let alive = true;
+    const load = async () => {
+      const next: Record<string, number> = {};
+      const jobs: { key: string; run: () => Promise<number> }[] = [];
+      if (can("orgs.delete")) {
+        jobs.push({
+          key: "/dashboard/approvals",
+          run: async () => {
+            const r = await api.get<{ items: unknown[] }>(
+              "/approvals?status=PENDING&limit=200"
+            );
+            return r.items.length;
+          },
+        });
+      }
+      if (can("health.view")) {
+        jobs.push({
+          key: "/dashboard/incidents",
+          run: async () => {
+            const r = await api.get<{ total: number }>(
+              "/incidents?status=open&page_size=1"
+            );
+            return r.total;
+          },
+        });
+      }
+      if (can("support.tickets.view")) {
+        jobs.push({
+          key: "/dashboard/support",
+          run: async () => {
+            const r = await api.get<{ items: unknown[] }>(
+              "/support/queue?status=open&limit=100"
+            );
+            return r.items.length;
+          },
+        });
+      }
+      await Promise.all(
+        jobs.map(async (j) => {
+          try {
+            next[j.key] = await j.run();
+          } catch (err) {
+            // Never swallow badge-poll failures silently — surface them so
+            // wiring bugs (missing import, wrong endpoint) are visible.
+            console.error(`[nav-badge] failed to load count for ${j.key}`, err);
+          }
+        })
+      );
+      if (alive) setCounts(next);
+    };
+    void load();
+    const t = setInterval(load, POLL_MS);
+    const onFocus = () => void load();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      alive = false;
+      clearInterval(t);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [isLoading, admin, can]);
 
   useEffect(() => {
     try {
@@ -133,12 +202,13 @@ function Shell({ children }: { children: React.ReactNode }) {
                 ? pathname === "/dashboard"
                 : pathname === m.path || pathname.startsWith(m.path + "/");
             const Icon = m.icon;
+            const badge = counts[m.path] ?? 0;
             return (
               <Link
                 key={m.path}
                 href={m.path}
                 title={collapsed ? m.name : undefined}
-                className={`flex items-center rounded-md text-sm ${
+                className={`relative flex items-center rounded-md text-sm ${
                   collapsed ? "justify-center px-0 py-2" : "gap-3 px-3 py-2"
                 } ${
                   active
@@ -150,6 +220,18 @@ function Shell({ children }: { children: React.ReactNode }) {
                   className={`shrink-0 ${collapsed ? "h-5 w-5" : "h-4 w-4"}`}
                 />
                 {!collapsed && <span className="truncate">{m.name}</span>}
+                {badge > 0 && (
+                  <>
+                    {!collapsed && (
+                      <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-red-600 px-1.5 text-xs font-bold text-white">
+                        {badge > 99 ? "99+" : badge}
+                      </span>
+                    )}
+                    {collapsed && (
+                      <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500" />
+                    )}
+                  </>
+                )}
               </Link>
             );
           })}

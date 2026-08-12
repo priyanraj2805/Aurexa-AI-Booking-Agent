@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import write_audit_log
+from app.core.inapp_notify import create_inapp_notification
 from app.core.rbac import CurrentAdmin, require_permission
 from app.db.database import get_db
 
@@ -320,6 +321,51 @@ async def send_broadcast(
         db, broadcast_id, "reviewed", "sent", request, admin,
         "notifications.send", {"recipient_count": int(recipient_count or 0)},
     )
+
+    # Deliver to tenant orgs: one inbox row per (broadcast, org). Selected
+    # orgs fall back to a per-org insert; "all orgs" is one set-based insert.
+    audience = existing["audience"]
+    if audience == "all_orgs":
+        await db.execute(
+            text(
+                "INSERT INTO public.broadcast_deliveries (broadcast_id, org_id) "
+                "SELECT :broadcast_id, id FROM public.organizations "
+                "ON CONFLICT (broadcast_id, org_id) DO NOTHING"
+            ),
+            {"broadcast_id": broadcast_id},
+        )
+    elif audience == "selected_orgs" and existing["org_ids"]:
+        for org_id in existing["org_ids"]:
+            await db.execute(
+                text(
+                    "INSERT INTO public.broadcast_deliveries "
+                    "(broadcast_id, org_id) "
+                    "VALUES (:broadcast_id, :org_id) "
+                    "ON CONFLICT (broadcast_id, org_id) DO NOTHING"
+                ),
+                {"broadcast_id": broadcast_id, "org_id": org_id},
+            )
+    elif audience == "staff":
+        staff_rows = (
+            await db.execute(
+                text(
+                    "SELECT id FROM super_admin.super_admins "
+                    "WHERE status = 'active'"
+                )
+            )
+        ).fetchall()
+        for row in staff_rows:
+            await create_inapp_notification(
+                db,
+                admin_id=row[0],
+                kind="broadcast.staff",
+                title=existing["title"][:255],
+                body=(existing["body"] or "")[:4000],
+                resource_type="broadcast_notification",
+                resource_id=str(broadcast_id),
+            )
+    await db.commit()
+
     return {"ok": True, "recipient_count": int(recipient_count or 0)}
 
 

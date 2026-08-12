@@ -97,25 +97,71 @@ async def _org_admin_email(rdb: AsyncSession, org_id: UUID) -> str:
     return email
 
 
-async def _has_peek_consent(
-    db: AsyncSession, admin: CurrentAdmin, org_id: UUID
+async def _has_consent(
+    db: AsyncSession, admin: CurrentAdmin, org_id: UUID, purpose: str
 ) -> bool:
-    """True when the org admin has approved a transcript-peek request for this
-    super admin + org (permanent grant — the admin explicitly approved)."""
+    """True when the org admin approved a consent request of the given purpose
+    ('peek' = masked transcript access, 'unmask' = customer PII release) for
+    this super admin + org, and that approval has not yet expired. Approvals
+    are time-limited (PEEK_CONSENT_TTL_MINUTES) so the org admin must
+    reconfirm periodically instead of granting permanent access."""
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        minutes=settings.PEEK_CONSENT_TTL_MINUTES
+    )
     row = (
         await db.execute(
             text(
                 """
                 SELECT 1 FROM super_admin.peek_requests
                 WHERE admin_id = :admin_id AND org_id = :org_id
+                  AND purpose = :purpose
                   AND status = 'approved'
+                  AND approved_at IS NOT NULL
+                  AND approved_at > :cutoff
                 LIMIT 1
                 """
             ),
-            {"admin_id": admin.id, "org_id": org_id},
+            {
+                "admin_id": admin.id,
+                "org_id": org_id,
+                "purpose": purpose,
+                "cutoff": cutoff,
+            },
         )
     ).first()
     return row is not None
+
+
+async def _has_peek_consent(
+    db: AsyncSession, admin: CurrentAdmin, org_id: UUID
+) -> bool:
+    """True when the org admin approved masked transcript access for this
+    super admin + org (purpose 'peek')."""
+    return await _has_consent(db, admin, org_id, purpose="peek")
+
+
+async def _has_unmask_consent(
+    db: AsyncSession, admin: CurrentAdmin, org_id: UUID
+) -> bool:
+    """True when the org admin approved releasing customer PII for this
+    super admin + org (purpose 'unmask'). This is a SEPARATE approval from
+    masked transcript access — the org admin must consent to each."""
+    return await _has_consent(db, admin, org_id, purpose="unmask")
+
+
+async def _enforce_unmask_consent(
+    db: AsyncSession, admin: CurrentAdmin, org_id: UUID
+) -> None:
+    """Unmasking customer PII requires the org admin's explicit approval,
+    independent of the masked-transcript consent."""
+    if not await _has_unmask_consent(db, admin, org_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Org-admin approval required to unmask PII: request one via "
+                "/support/peek/request with purpose=unmask"
+            ),
+        )
 
 
 async def _enforce_peek_grant(
@@ -124,8 +170,9 @@ async def _enforce_peek_grant(
     """Conversation transcripts require approval from the org admin.
 
     Grant sources (either is sufficient): an org-admin consent link that was
-    clicked ("approved" peek request, Phase 17), or a legacy verified OTP
-    grant (Phase 14) for a short peek window.
+    clicked ("approved" peek request, Phase 17, time-limited by
+    PEEK_CONSENT_TTL_MINUTES), or a legacy verified OTP grant (Phase 14) for
+    a short peek window.
     """
     if await _has_peek_consent(db, admin, org_id):
         return
@@ -145,6 +192,10 @@ async def _enforce_peek_grant(
 class PeekConsentRequest(BaseModel):
     org_id: UUID
     session_id: Optional[UUID] = None
+    purpose: str = "peek"
+
+
+PEEK_PURPOSES = ("peek", "unmask")
 
 
 async def _peek_consent_row(db: AsyncSession, token: str):
@@ -155,7 +206,7 @@ async def _peek_consent_row(db: AsyncSession, token: str):
             text(
                 """
                 SELECT id, admin_id, org_id, org_name, session_id,
-                       channel_user_id, status, recipient_email,
+                       channel_user_id, status, recipient_email, purpose,
                        approval_expires_at, approver_email, approved_at
                 FROM super_admin.peek_requests
                 WHERE approval_token_hash = :token_hash
@@ -175,13 +226,22 @@ async def peek_request_consent(
     rdb: AsyncSession = Depends(get_readonly_db),
     admin: CurrentAdmin = Depends(require_permission("support.conversations.view")),
 ):
-    """Issue a transcript-peek consent request and email the org admin a
-    confirmation link — the same consent flow as impersonation.
+    """Issue a consent request (peek = masked transcript access, unmask =
+    customer PII release) and email the org admin a confirmation link — the
+    same consent flow as impersonation.
 
     The link is single-use, TTL'd, never returned to the caller, and SMTP
     absence fails the request (fail-closed). Superceding a pending request
-    invalidates the previous link so only the newest one can approve.
+    invalidates the previous link so only the newest one can approve. The
+    'unmask' purpose is a SEPARATE consent from 'peek': approving transcript
+    access never releases customer PII.
     """
+    if payload.purpose not in PEEK_PURPOSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"purpose must be one of: {', '.join(PEEK_PURPOSES)}",
+        )
+
     org_name = (
         await rdb.execute(
             text("SELECT name FROM organizations WHERE id = :org_id"),
@@ -211,18 +271,21 @@ async def peek_request_consent(
             )
         ).scalar()
 
-    # Any still-open request for the same admin+org is superseded: its old
-    # link stops working so only the newest confirmation can approve.
+    # Any still-open request of the SAME purpose for the same admin+org is
+    # superseded: its old link stops working so only the newest confirmation
+    # can approve. (A 'peek' approval never satisfies 'unmask', so existing
+    # approved peek rows are left untouched.)
     await db.execute(
         text(
             """
             UPDATE super_admin.peek_requests
             SET status = 'expired', approval_token_hash = NULL
             WHERE admin_id = :admin_id AND org_id = :org_id
+              AND purpose = :purpose
               AND status = 'pending'
             """
         ),
-        {"admin_id": admin.id, "org_id": payload.org_id},
+        {"admin_id": admin.id, "org_id": payload.org_id, "purpose": payload.purpose},
     )
 
     token = secrets.token_urlsafe(32)
@@ -237,10 +300,10 @@ async def peek_request_consent(
                 INSERT INTO super_admin.peek_requests
                     (admin_id, org_id, org_name, session_id, channel_user_id,
                      status, recipient_email, approval_token_hash,
-                     approval_expires_at)
+                     approval_expires_at, purpose)
                 VALUES (:admin_id, :org_id, :org_name, :session_id,
                         :channel_user_id, 'pending', :recipient_email,
-                        :token_hash, :expires_at)
+                        :token_hash, :expires_at, :purpose)
                 RETURNING id
                 """
             ),
@@ -253,6 +316,7 @@ async def peek_request_consent(
                 "recipient_email": recipient,
                 "token_hash": token_hash,
                 "expires_at": expires_at,
+                "purpose": payload.purpose,
             },
         )
     ).scalar()
@@ -294,6 +358,7 @@ async def peek_request_consent(
         new_values={
             "org_id": str(payload.org_id),
             "org_name": org_name,
+            "purpose": payload.purpose,
             "session_id": str(payload.session_id) if payload.session_id else None,
             "channel_user_id": channel_user_id,
             "link_sent_to": recipient,
@@ -305,6 +370,7 @@ async def peek_request_consent(
         "id": str(row_id),
         "org_id": str(payload.org_id),
         "org_name": org_name,
+        "purpose": payload.purpose,
         "session_id": str(payload.session_id) if payload.session_id else None,
         "status": "pending",
         "link_sent_to": recipient,
@@ -406,6 +472,24 @@ async def peek_consent_page(
         f"about a conversation with <strong>{row['channel_user_id']}</strong>"
         f" in " if row["channel_user_id"] else " in "
     )
+    if row["purpose"] == "unmask":
+        return consent_page(
+            "Customer data release request",
+            "ACTION REQUIRED",
+            "info",
+            f"<p>A super admin has requested to view the full conversation "
+            f"{detail}<strong>{row['org_name']}</strong> with customer "
+            f"contact details UNMASKED (emails, phone numbers, names).</p>"
+            f"<p>You are receiving this because you are the registered account "
+            f"for this organization. Approving releases real customer contact "
+            f"details in read-only transcripts. Every view is audit-logged."
+            f"</p>"
+            f'<form method="post" action="/api/v1/support/peek/consent/{token}/confirm">'
+            f'<button type="submit">I Confirm</button></form>'
+            f'<p style="font-size:12px">If you did not expect this request, simply '
+            f"ignore this email. It expires automatically and no customer data "
+            f"is released without your confirmation.</p>",
+        )
     return consent_page(
         "Transcript access request",
         "ACTION REQUIRED",
@@ -472,18 +556,28 @@ async def peek_confirm_consent(
         {"id": row["id"], "approver": row["recipient_email"]},
     )
     # Alert the requesting super admin in-app so they know the org admin
-    # accepted and the transcript is now unlocked.
+    # accepted and the transcript / PII reveal is now unlocked.
     if row.get("admin_id"):
+        if row["purpose"] == "unmask":
+            notif_title = f"PII reveal approved by {row['recipient_email']}"
+            notif_body = (
+                f"{row['recipient_email']} approved releasing unmasked "
+                f"customer details for conversations in {row['org_name']}. "
+                f"You can now reveal full transcripts."
+            )
+        else:
+            notif_title = f"Transcript access approved by {row['recipient_email']}"
+            notif_body = (
+                f"{row['recipient_email']} confirmed the request to review "
+                f"conversations in {row['org_name']}. You can now open the "
+                f"transcript."
+            )
         await create_inapp_notification(
             db,
             admin_id=row["admin_id"],
             kind="peek.approved",
-            title=f"Transcript access approved by {row['recipient_email']}",
-            body=(
-                f"{row['recipient_email']} confirmed the request to review "
-                f"conversations in {row['org_name']}. You can now open the "
-                f"transcript."
-            ),
+            title=notif_title,
+            body=notif_body,
             resource_type="peek",
             resource_id=str(row["id"]),
         )
@@ -496,10 +590,21 @@ async def peek_confirm_consent(
         new_values={
             "org_id": str(row["org_id"]),
             "org_name": row["org_name"],
+            "purpose": row["purpose"],
             "session_id": str(row["session_id"]) if row["session_id"] else None,
             "recipient_email": row["recipient_email"],
         },
     )
+    if row["purpose"] == "unmask":
+        return consent_page(
+            "Confirmation recorded",
+            "CONFIRMED",
+            "ok",
+            "<p>Thank you. Releasing unmasked customer details for your "
+            "organization has been approved — the super admin can now view "
+            "full conversation transcripts with customer contact details. "
+            "Every view is audit-logged.</p>",
+        )
     return consent_page(
         "Confirmation recorded",
         "CONFIRMED",
@@ -593,14 +698,20 @@ async def peek_grant_status(
 ):
     """Whether the current admin may peek transcripts for an org: the org
     admin approved a consent request, or a legacy verified OTP grant is still
-    inside its peek window."""
+    inside its peek window. `unmask_granted` is a SEPARATE approval required
+    before customer PII can be released."""
     granted = await _has_peek_consent(db, admin, org_id) or await has_valid_grant(
         db,
         purpose=PURPOSE_PEEK,
         admin_id=admin.id,
         org_id=org_id,
     )
-    return {"org_id": str(org_id), "granted": granted}
+    unmask_granted = await _has_unmask_consent(db, admin, org_id)
+    return {
+        "org_id": str(org_id),
+        "granted": granted,
+        "unmask_granted": unmask_granted,
+    }
 
 
 class SupportTicketCreate(BaseModel):
@@ -704,6 +815,9 @@ async def peek_conversation(
     can_unmask = unmask and admin.has_permission("pii.unmask")
     if can_unmask:
         _enforce_unmask_guard(request, admin, reason)
+        # Separate org-admin approval is required before customer PII can be
+        # released — masked transcript consent is NOT sufficient.
+        await _enforce_unmask_consent(db, admin, org_id)
     await _enforce_peek_grant(db, admin, org_id)
 
     session = (
@@ -801,6 +915,22 @@ async def peek_session(
     if can_unmask:
         _enforce_unmask_guard(request, admin, reason)
 
+    org_row = (
+        await rdb.execute(
+            text("SELECT org_id FROM chat_sessions WHERE id = :session_id"),
+            {"session_id": session_id},
+        )
+    ).mappings().first()
+    if not org_row:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    org_id = org_row["org_id"]
+    if can_unmask:
+        # Separate org-admin approval is required before customer PII can be
+        # released — masked transcript consent is NOT sufficient.
+        await _enforce_unmask_consent(db, admin, org_id)
+    await _enforce_peek_grant(db, admin, org_id)
+
     session = (
         await rdb.execute(
             text(
@@ -815,7 +945,6 @@ async def peek_session(
     ).mappings().first()
     if not session:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    await _enforce_peek_grant(db, admin, session["org_id"])
 
     messages = (
         await rdb.execute(

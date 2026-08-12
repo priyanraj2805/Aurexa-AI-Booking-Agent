@@ -97,6 +97,10 @@ class Settings(BaseSettings):
     # Once an OTP is verified for an org, the grant stays valid this long so
     # the super admin can open several transcripts without re-OTP'ing.
     PEEK_GRANT_TTL_MINUTES: int = int(os.getenv("PEEK_GRANT_TTL_MINUTES", "30"))
+    # An APPROVED transcript-peek consent (org admin clicked "I Confirm") stays
+    # valid this long before the super admin must obtain a fresh confirmation.
+    # Time-limited on purpose: no permanent, silently-forever org-admin grants.
+    PEEK_CONSENT_TTL_MINUTES: int = int(os.getenv("PEEK_CONSENT_TTL_MINUTES", "1440"))
     # ── Org-admin consent links (Phase 15, impersonation only) ─────────────
     # Instead of an OTP the org admin receives a confirmation link by email.
     # The link is valid 24 hours; clicking it shows a confirmation page and

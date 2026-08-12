@@ -10,6 +10,7 @@ from app.models.session import ChatSession
 from app.models.config import OrgConfig
 from app.models.message import ChatMessage
 from app.schemas.chat import ChatSessionCreate
+from app.core.telemetry import increment_usage
 from app.schemas.agent import (
     ChatSessionState,
     FieldDefinition,
@@ -51,6 +52,7 @@ async def create_chat_session(
     db.add(db_session)
     await db.commit()
     await db.refresh(db_session)
+    await increment_usage(uuid.UUID(org_id), "conversations")
     return db_session
 
 

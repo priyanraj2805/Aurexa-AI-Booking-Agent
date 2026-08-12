@@ -17,6 +17,7 @@ from app.api.v1.endpoints import (
     documents,
     firecrawl_webhook,
     support_requests,
+    broadcasts,
 )
 from app.core.config import settings
 from app.api.v1.endpoints.internal import bridge as internal_bridge
@@ -45,6 +46,7 @@ api_router.include_router(firecrawl_webhook.router, prefix="/firecrawl", tags=["
 api_router.include_router(
     support_requests.router, prefix="/support", tags=["support"]
 )
+api_router.include_router(broadcasts.router, prefix="/broadcasts", tags=["broadcasts"])
 
 # Super Admin internal bridge — registered ONLY when the env gate is on.
 # (verify_bridge additionally 404s while disabled, so this is doubly inert.)

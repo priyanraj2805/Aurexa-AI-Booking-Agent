@@ -358,6 +358,7 @@ async def search_users(
 
 @router.get("/stats", response_model=StatsResponse)
 async def platform_stats(
+    days: int = Query(7, ge=1, le=30),
     db: AsyncSession = Depends(get_readonly_db),
     _: dict = Depends(require_permission("dashboard.view")),
 ):
@@ -404,13 +405,14 @@ async def platform_stats(
                 SELECT d::date AS day,
                        count(DISTINCT b.id) AS bookings,
                        count(DISTINCT s.id) AS conversations
-                FROM generate_series(now()::date - interval '13 days', now()::date, '1 day') AS d
+                FROM generate_series(now()::date - (:days - 1) * interval '1 day', now()::date, '1 day') AS d
                 LEFT JOIN bookings b ON b.created_at::date = d
                 LEFT JOIN chat_sessions s ON s.created_at::date = d
                 GROUP BY d
                 ORDER BY d
                 """
-            )
+            ),
+            {"days": days},
         )
     ).mappings()
     trend = [
@@ -536,6 +538,7 @@ async def org_usage(
                 SELECT metric, sum(count) AS count, max(updated_at) AS last_updated
                 FROM super_admin.usage_events
                 WHERE org_id = :org_id
+                  AND metric IN ('bookings', 'ai_tokens', 'conversations')
                 GROUP BY metric
                 ORDER BY metric
                 """

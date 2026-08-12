@@ -74,7 +74,7 @@ export default function NotificationsPage() {
         ).items
       );
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load notifications");
+      setError(e instanceof Error ? e.message : "Failed to load broadcasts");
     } finally {
       setLoading(false);
     }
@@ -208,9 +208,9 @@ export default function NotificationsPage() {
     <div>
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Notifications</h1>
+          <h1 className="text-2xl font-bold">Broadcasts</h1>
           <p className="mt-1 text-sm text-slate-400">
-            Broadcast notifications with a draft → review → send workflow. Every
+            Broadcast announcements with a draft → review → send workflow. Every
             transition is audit-logged.
           </p>
         </div>

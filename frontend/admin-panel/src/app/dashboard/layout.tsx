@@ -8,6 +8,7 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Toaster } from "sonner";
 import { ImpersonationBanner } from "@/components/impersonation-banner";
+import { AnnouncementBell } from "@/components/announcement-bell";
 import { LoaderPulseSquare } from "@/components/ui/loaders";
 import {
   SidebarInset,
@@ -175,6 +176,7 @@ export default function DashboardLayout({
             <span className="hidden sm:inline text-[11px] font-semibold uppercase px-2 py-1 rounded bg-primary/10 text-primary">
               Agent Online
             </span>
+            <AnnouncementBell />
             <ThemeToggle />
           </div>
         </header>
