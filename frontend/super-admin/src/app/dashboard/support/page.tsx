@@ -47,7 +47,7 @@ export default function SupportPage() {
             onClick={() => setTab(t.key)}
             className={`-mb-px rounded-t-md border border-b-0 px-4 py-2 ${
               activeTab === t.key
-                ? "border-slate-700 bg-slate-900 text-white"
+                ? "border-slate-700 bg-slate-900 text-slate-100"
                 : "border-transparent text-slate-400 hover:text-slate-200"
             }`}
           >

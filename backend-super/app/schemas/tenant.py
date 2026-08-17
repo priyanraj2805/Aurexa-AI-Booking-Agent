@@ -131,6 +131,7 @@ class TopOrgRow(BaseModel):
     is_active: bool
     booking_count: int
     conversation_count: int
+    trend: list[int] = []
 
 
 class TopOrgsResponse(BaseModel):

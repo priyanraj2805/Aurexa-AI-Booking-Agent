@@ -1,7 +1,6 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import Link from "next/link";
 import { Loader2, Eye, EyeOff } from "lucide-react";
@@ -12,8 +11,15 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [registered, setRegistered] = useState(false);
   const { login } = useAuth();
-  const router = useRouter();
+
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("registered") === "1") {
+      setRegistered(true);
+      window.history.replaceState({}, "", "/login");
+    }
+  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -22,7 +28,6 @@ export default function LoginPage() {
 
     try {
       await login(email, password);
-      // HttpOnly cookie is set by the backend — no client-side cookie needed
     } catch (err: unknown) {
       let message: string;
       if (err instanceof TypeError && (err.message === "Failed to fetch" || err.message === "NetworkError when attempting to fetch resource.")) {
@@ -54,6 +59,12 @@ export default function LoginPage() {
           </p>
         </div>
 
+        {registered && (
+          <div className="mb-4 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-sm">
+            Organization created! Sign in with your new credentials to continue.
+          </div>
+        )}
+
         {error && (
           <div className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
             {error}
@@ -84,9 +95,9 @@ export default function LoginPage() {
               <label htmlFor="password" className="block text-xs font-medium text-[var(--text-secondary,#a1a1aa)] uppercase tracking-wider">
                 Password
               </label>
-              <button type="button" className="text-xs text-[var(--text-muted,#71717a)] hover:text-[#3b82f6] transition-colors">
+              <Link href="/forgot-password" className="text-xs text-[var(--text-muted,#71717a)] hover:text-[#3b82f6] transition-colors">
                 Forgot password?
-              </button>
+              </Link>
             </div>
             <div className="relative">
               <input

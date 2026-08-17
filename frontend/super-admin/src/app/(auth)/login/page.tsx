@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
+import PasswordInput from "@/components/password-input";
 
 type LoginResponse = {
   mfa: { required: boolean; enrolled: boolean };
@@ -58,10 +60,8 @@ export default function LoginPage() {
             <label htmlFor="password" className="block text-sm font-medium text-slate-300">
               Password
             </label>
-            <input
+            <PasswordInput
               id="password"
-              type="password"
-              required
               autoComplete="current-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -83,6 +83,13 @@ export default function LoginPage() {
             {loading ? "Signing in…" : "Sign in"}
           </button>
         </form>
+
+        <p className="mt-4 text-center text-sm text-slate-400">
+          Forgot your password?{" "}
+          <Link href="/forgot-password" className="text-indigo-400 hover:underline">
+            Reset it
+          </Link>
+        </p>
       </div>
     </main>
   );

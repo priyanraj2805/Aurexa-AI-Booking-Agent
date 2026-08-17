@@ -408,6 +408,7 @@ class AgentConfigUpdate(BaseModel):
     timezone: Optional[str] = None
     ui_brand_color: Optional[str] = None
     org_name: Optional[str] = None
+    business_name: Optional[str] = None
     require_otp: Optional[bool] = None
     max_booking_days_ahead: Optional[int] = None
     session_retention_days: Optional[int] = Field(default=None, ge=7, le=365)
@@ -837,6 +838,8 @@ async def update_agent_config(
         config.meeting_policy_updated_by = user.email
     if update.org_name is not None:
         config.org_name = update.org_name
+    if update.business_name is not None:
+        config.business_name = update.business_name
 
     from sqlalchemy.orm.attributes import flag_modified
 
@@ -2208,6 +2211,77 @@ async def revoke_widget_token(
     await db.commit()
 
     return {"status": "revoked"}
+
+
+class OrgApiKeyResponse(BaseModel):
+    api_key: str
+    masked_key: str
+    old_key_valid_until: Optional[str] = None
+
+
+def _mask_org_api_key(key: str) -> str:
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "***"
+    return key[:6] + "..." + key[-4:]
+
+
+@router.get("/api-key", response_model=OrgApiKeyResponse)
+async def get_org_api_key(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get the organization's full API key.
+    The full key is only returned here (authenticated dashboard request) — the
+    agent-config response only carries a masked preview.
+    """
+    result = await db.execute(
+        select(Organization).where(Organization.id == user.org_id)
+    )
+    org = result.scalars().first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    valid_until = None
+    if getattr(org, "old_key_expires_at", None):
+        valid_until = org.old_key_expires_at.isoformat()
+
+    return OrgApiKeyResponse(
+        api_key=org.api_key,
+        masked_key=_mask_org_api_key(org.api_key),
+        old_key_valid_until=valid_until,
+    )
+
+
+@router.post("/api-key/regenerate", response_model=OrgApiKeyResponse)
+async def regenerate_org_api_key(
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Rotate the org API key. The current key moves to a 7-day grace window
+    (old_api_key), then a new key is issued.
+    WARNING: Existing integrations using the old key keep working for 7 days.
+    """
+    from app.crud.organization import rotate_api_key
+
+    try:
+        org = await rotate_api_key(db, str(user.org_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    valid_until = None
+    if getattr(org, "old_key_expires_at", None):
+        valid_until = org.old_key_expires_at.isoformat()
+
+    return OrgApiKeyResponse(
+        api_key=org.api_key,
+        masked_key=_mask_org_api_key(org.api_key),
+        old_key_valid_until=valid_until,
+    )
 
 
 @router.get("/google-calendar/callback")

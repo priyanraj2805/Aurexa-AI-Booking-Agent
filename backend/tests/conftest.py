@@ -168,19 +168,69 @@ def make_token(email: str = "test@example.com", org_id: str = None) -> str:
 
 
 @pytest_asyncio.fixture
-async def registered_user(client: AsyncClient):
-    """Register a user and return (user_data, auth_headers, cookies)."""
+async def auth_helpers(client: AsyncClient, monkeypatch):
+    """Patches OTP email sending and provides helpers for the OTP-gated flows.
+
+    Registration requires a 6-digit email OTP; login is a plain email +
+    password flow. The real mail sender is replaced with an in-memory
+    catcher so tests can complete the flows with the codes the backend
+    "emailed".
+    """
+    sent: list[dict] = []
+
+    async def _fake_send(to_email: str, code: str, purpose: str):
+        sent.append({"to_email": to_email, "code": code, "purpose": purpose})
+
+    monkeypatch.setattr("app.api.v1.endpoints.auth.send_auth_otp_email", _fake_send)
+
+    def latest_code(email: str, purpose: str) -> str:
+        for item in reversed(sent):
+            if item["to_email"] == email and item["purpose"] == purpose:
+                return item["code"]
+        raise AssertionError(f"No OTP captured for {email}/{purpose}")
+
+    async def register(payload: dict):
+        resp = await client.post(
+            "/api/v1/auth/otp/send",
+            json={"email": payload["email"], "purpose": "register"},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert resp.status_code == 200, f"OTP send failed: {resp.text}"
+        code = latest_code(payload["email"], "register")
+        return await client.post(
+            "/api/v1/auth/register",
+            json={**payload, "otp_code": code},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+
+    async def login(email: str, password: str, headers: dict | None = None):
+        resp = await client.post(
+            "/api/v1/auth/login",
+            json={"email": email, "password": password},
+            headers=headers or {"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert resp.status_code == 200, f"Login failed: {resp.text}"
+        assert "access_token" in resp.json(), "Login must issue a session directly"
+        return resp
+
+    return {
+        "sent": sent,
+        "latest_code": latest_code,
+        "register": register,
+        "login": login,
+    }
+
+
+@pytest_asyncio.fixture
+async def registered_user(client: AsyncClient, auth_helpers):
+    """Register a user (OTP-gated) and return (user_data, auth_headers, cookies)."""
     payload = {
         "full_name": "Test User",
         "org_name": "Test Org",
         "email": f"user_{uuid.uuid4().hex[:8]}@test.com",
         "password": "securepass123",
     }
-    resp = await client.post(
-        "/api/v1/auth/register",
-        json=payload,
-        headers={"X-Requested-With": "XMLHttpRequest"},
-    )
+    resp = await auth_helpers["register"](payload)
     assert resp.status_code == 200, f"Registration failed: {resp.text}"
     data = resp.json()
 

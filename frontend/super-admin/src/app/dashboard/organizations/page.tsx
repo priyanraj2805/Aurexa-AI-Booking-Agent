@@ -110,7 +110,7 @@ export default function OrganizationsPage() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search name or business name…"
-          className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+          className="w-64 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-indigo-500"
         />
         <select
           value={isActive}

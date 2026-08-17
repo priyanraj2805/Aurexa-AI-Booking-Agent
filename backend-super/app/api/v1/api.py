@@ -10,6 +10,7 @@ from app.api.v1.endpoints import (
     incidents,
     lifecycle,
     notifications,
+    org_billing,
     plans,
     reports,
     security_settings,
@@ -26,6 +27,9 @@ api_router.include_router(lifecycle.router, prefix="/lifecycle", tags=["lifecycl
 api_router.include_router(approvals.router, prefix="/approvals", tags=["approvals"])
 api_router.include_router(plans.router, prefix="/plans", tags=["plans"])
 api_router.include_router(billing.router, prefix="/billing", tags=["billing"])
+api_router.include_router(
+    org_billing.router, prefix="/org-billing", tags=["org-billing"]
+)
 api_router.include_router(reports.router, prefix="/reports", tags=["reports"])
 api_router.include_router(incidents.router, prefix="/incidents", tags=["incidents"])
 api_router.include_router(notifications.router, prefix="/notifications", tags=["notifications"])

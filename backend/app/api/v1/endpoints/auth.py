@@ -7,17 +7,32 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from fastapi import Header, Cookie
-from typing import Optional
+from typing import Optional, Literal
 from app.db.database import get_db
-from app.crud.user import get_user_by_email, authenticate_user, create_user_with_org
-from app.schemas.auth import UserRegister, UserLogin, UserResponse, TokenResponse
-from app.core.security import create_access_token, create_impersonation_token, decode_access_token, ACCESS_TOKEN_EXPIRE_MINUTES, IMPERSONATION_TOKEN_EXPIRE_MINUTES, decode_impersonation_handshake
+from app.crud.user import get_user_by_email, create_user_with_org, update_user_password
+from app.crud.auth_otp import (
+    generate_auth_otp,
+    verify_auth_otp,
+    OTPError,
+    OTP_PURPOSES,
+)
+from app.schemas.auth import (
+    UserRegister,
+    UserLogin,
+    UserResponse,
+    TokenResponse,
+    OTPSendRequest,
+    PasswordForgotRequest,
+    PasswordResetRequest,
+)
+from app.core.security import create_access_token, create_impersonation_token, decode_access_token, ACCESS_TOKEN_EXPIRE_MINUTES, IMPERSONATION_TOKEN_EXPIRE_MINUTES, decode_impersonation_handshake, verify_password
 from app.models.user import User
 from app.models.organization import Organization
 from app.core.config import settings
 from app.core.limiter import limiter
 from app.core.audit import log_audit_event
 from app.schemas.audit import AuditAction
+from app.core.mail import send_auth_otp_email
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -102,6 +117,60 @@ async def get_current_user(
 
 # ── Endpoints ─────────────────────────────────────
 
+@router.post("/otp/send")
+@limiter.limit("5/minute")
+async def send_verification_otp(
+    request: Request,
+    data: OTPSendRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Email a 6-digit OTP for account registration (purpose="register").
+
+    The email must NOT already have an account — login itself is a plain
+    email + password flow without any OTP.
+    """
+    email = data.email.lower().strip()
+    if not email:
+        raise HTTPException(status_code=422, detail="Email is required")
+
+    existing = await get_user_by_email(db, email)
+    if existing:
+        raise HTTPException(
+            status_code=409, detail="An account with this email already exists"
+        )
+
+    try:
+        code = await generate_auth_otp(db, email, "register", resend=False)
+    except OTPError as e:
+        raise HTTPException(status_code=429, detail=str(e))
+
+    background_tasks.add_task(send_auth_otp_email, email, code, "register")
+    return {"detail": "Verification code sent", "email": email, "purpose": "register"}
+
+
+@router.post("/otp/resend")
+@limiter.limit("5/minute")
+async def resend_verification_otp(
+    request: Request,
+    data: OTPSendRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Resend a registration OTP for the same email (cooldown + cap enforced)."""
+    email = data.email.lower().strip()
+    if not email:
+        raise HTTPException(status_code=422, detail="Email is required")
+
+    try:
+        code = await generate_auth_otp(db, email, "register", resend=True)
+    except OTPError as e:
+        raise HTTPException(status_code=429, detail=str(e))
+
+    background_tasks.add_task(send_auth_otp_email, email, code, "register")
+    return {"detail": "Verification code resent", "email": email, "purpose": "register"}
+
+
 @router.post("/register", response_model=TokenResponse)
 @limiter.limit("5/minute")
 async def register(
@@ -110,11 +179,22 @@ async def register(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new user account + organization."""
+    """Create a new user account + organization (email-OTP verified)."""
     try:
-        existing = await get_user_by_email(db, data.email.lower().strip())
+        email = data.email.lower().strip()
+        existing = await get_user_by_email(db, email)
         if existing:
             raise HTTPException(status_code=409, detail="An account with this email already exists")
+
+        try:
+            otp_ok = await verify_auth_otp(db, email, "register", data.otp_code)
+        except OTPError as e:
+            raise HTTPException(status_code=429, detail=str(e))
+        if not otp_ok:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid or expired verification code. Request a new code and try again.",
+            )
 
         user, org = await create_user_with_org(db, data)
         log_audit_event(
@@ -145,8 +225,9 @@ async def register(
                 created_at=user.created_at,
             ),
         )
-        response = JSONResponse(content=body.model_dump(mode="json"))
-        return _set_auth_cookie(response, token)
+                # Deliberately NO auth cookie here: a fresh registration must not
+        # create a session — the user signs in explicitly afterwards.
+        return JSONResponse(content=body.model_dump(mode="json"))
     except HTTPException:
         raise
     except Exception as e:
@@ -163,29 +244,36 @@ async def login(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    """Authenticate and return JWT."""
+    """Sign in with email + password and issue the session token directly.
+
+    No email OTP step on login — the verification code is only required
+    when creating a new account.
+    """
     try:
-        user = await authenticate_user(db, data.email.lower().strip(), data.password)
+        email = data.email.lower().strip()
+        user = await get_user_by_email(db, email)
         if not user:
-            result = await db.execute(select(User).where(User.email == data.email.lower().strip()))
-            existing_user = result.scalars().first()
-            if existing_user:
-                log_audit_event(
-                    background_tasks,
-                    org_id=existing_user.org_id,
-                    actor_id=existing_user.id,
-                    actor_email=existing_user.email,
-                    action=AuditAction.AUTH_LOGIN_FAILED,
-                    resource_type="user",
-                    resource_id=str(existing_user.id),
-                    old_values={"event": "login_attempt"},
-                    new_values={"result": "failed_invalid_credentials"},
-                    ip_address=request.client.host if request.client else None,
-                    user_agent=request.headers.get("user-agent"),
-                )
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
-        # Fetch org name
+        if not verify_password(data.password, user.hashed_password):
+            log_audit_event(
+                background_tasks,
+                org_id=user.org_id,
+                actor_id=user.id,
+                actor_email=user.email,
+                action=AuditAction.AUTH_LOGIN_FAILED,
+                resource_type="user",
+                resource_id=str(user.id),
+                old_values={"event": "login_attempt"},
+                new_values={"result": "failed_invalid_credentials"},
+                ip_address=request.client.host if request.client else None,
+                user_agent=request.headers.get("user-agent"),
+            )
+            raise HTTPException(status_code=401, detail="Wrong password. Please try again.")
+
+        if not user.is_active:
+            raise HTTPException(status_code=403, detail="Your account is disabled.")
+
         result = await db.execute(select(Organization).where(Organization.id == user.org_id))
         org = result.scalars().first()
 
@@ -224,6 +312,81 @@ async def login(
         logger.error(f"Login error: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
+
+
+@router.post("/password/forgot")
+@limiter.limit("5/hour")
+async def forgot_password(
+    request: Request,
+    data: PasswordForgotRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Email a password-reset OTP if the account exists.
+
+    Always returns the same generic response (whether or not the email is
+    registered) so the endpoint cannot be used to enumerate accounts.
+    """
+    email = data.email.lower().strip()
+    if not email:
+        raise HTTPException(status_code=422, detail="Email is required")
+
+    user = await get_user_by_email(db, email)
+    if user:
+        try:
+            code = await generate_auth_otp(db, email, "password_reset", resend=False)
+        except OTPError as e:
+            raise HTTPException(status_code=429, detail=str(e))
+        background_tasks.add_task(send_auth_otp_email, email, code, "password_reset")
+
+    return {"detail": "If an account exists for this email, a reset code has been sent."}
+
+
+@router.post("/password/reset")
+@limiter.limit("10/hour")
+async def reset_password(
+    request: Request,
+    data: PasswordResetRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Verify the emailed reset OTP, then set a new password for the account."""
+    email = data.email.lower().strip()
+    user = await get_user_by_email(db, email)
+    if not user:
+        raise HTTPException(status_code=404, detail="No account found for this email.")
+
+    try:
+        otp_ok = await verify_auth_otp(db, email, "password_reset", data.otp_code)
+    except OTPError as e:
+        raise HTTPException(status_code=429, detail=str(e))
+    if not otp_ok:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired reset code. Request a new code and try again.",
+        )
+
+    if verify_password(data.new_password, user.hashed_password):
+        raise HTTPException(
+            status_code=400,
+            detail="New password must be different from your current password.",
+        )
+
+    await update_user_password(db, user, data.new_password)
+    log_audit_event(
+        background_tasks,
+        org_id=user.org_id,
+        actor_id=user.id,
+        actor_email=user.email,
+        action=AuditAction.AUTH_PASSWORD_RESET,
+        resource_type="user",
+        resource_id=str(user.id),
+        old_values=None,
+        new_values={"event": "password_reset"},
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return {"detail": "Password updated. You can now sign in with your new password."}
 
 
 @router.get("/me", response_model=UserResponse)

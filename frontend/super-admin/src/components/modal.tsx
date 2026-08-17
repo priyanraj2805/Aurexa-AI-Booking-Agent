@@ -24,7 +24,7 @@ export function Modal({
           <h2 className="text-lg font-semibold">{title}</h2>
           <button
             onClick={onClose}
-            className="text-slate-400 hover:text-white"
+            className="text-slate-400 hover:text-slate-100"
             aria-label="Close"
           >
             ✕

@@ -66,6 +66,9 @@ export default function PlansPage() {
   const [archiving, setArchiving] = useState<PlanRow | null>(null);
   const [archivingBusy, setArchivingBusy] = useState(false);
 
+  const [deleting, setDeleting] = useState<PlanRow | null>(null);
+  const [deletingBusy, setDeletingBusy] = useState(false);
+
   const [assigning, setAssigning] = useState<PlanRow | null>(null);
   const [assignForm, setAssignForm] = useState({ org_id: "", note: "" });
   const [orgOptions, setOrgOptions] = useState<OrgRow[]>([]);
@@ -176,6 +179,35 @@ export default function PlansPage() {
       toast("error", e instanceof Error ? e.message : "Archive failed");
     } finally {
       setArchivingBusy(false);
+    }
+  };
+
+  const deletePlan = async () => {
+    if (!deleting) return;
+    setDeletingBusy(true);
+    try {
+      const res = await api.del<{
+        ok: boolean;
+        deleted: boolean;
+        sunset?: boolean;
+        orgs_affected?: number;
+      }>(`/plans/${deleting.id}`);
+      if (res.deleted) {
+        toast("success", `${deleting.name} permanently deleted`);
+      } else if (res.sunset) {
+        toast(
+          "success",
+          `Plan sunset: ${res.orgs_affected ?? 0} org(s) keep it until their billing period ends, then it expires`
+        );
+      } else {
+        toast("success", `${deleting.name} archived (still referenced)`);
+      }
+      setDeleting(null);
+      void load();
+    } catch (e) {
+      toast("error", e instanceof Error ? e.message : "Delete failed");
+    } finally {
+      setDeletingBusy(false);
     }
   };
 
@@ -330,6 +362,14 @@ export default function PlansPage() {
                               className="rounded border border-slate-700 px-2 py-1 text-xs text-red-400 hover:bg-red-950"
                             >
                               Archive
+                            </button>
+                          )}
+                          {!p.is_active && (
+                            <button
+                              onClick={() => setDeleting(p)}
+                              className="rounded border border-slate-700 px-2 py-1 text-xs text-red-400 hover:bg-red-950"
+                            >
+                              Delete
                             </button>
                           )}
                         </>
@@ -505,6 +545,25 @@ export default function PlansPage() {
           busy={archivingBusy}
           onConfirm={archivePlan}
           onCancel={() => setArchiving(null)}
+        />
+      )}
+
+      {deleting && (
+        <ConfirmDialog
+          title="Delete plan permanently"
+          message={
+            <span>
+              Delete <strong>{deleting.name}</strong>? Organizations currently on
+              this plan keep it until their billing period ends — after that the
+              plan expires for them and renewals stop at this price. Plans with
+              only billing history stay archived.
+            </span>
+          }
+          confirmLabel="Delete permanently"
+          danger
+          busy={deletingBusy}
+          onConfirm={deletePlan}
+          onCancel={() => setDeleting(null)}
         />
       )}
 

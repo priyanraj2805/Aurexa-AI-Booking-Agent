@@ -101,6 +101,17 @@ export default function NotificationsPage() {
     setCreateOpen(true);
   };
 
+  const openDuplicate = (b: BroadcastRow) => {
+    setEditing(null);
+    setForm({
+      title: `${b.title} (copy)`,
+      body: b.body,
+      audience: b.audience,
+      org_ids: b.org_ids ?? [],
+    });
+    setCreateOpen(true);
+  };
+
   const searchOrgs = async () => {
     try {
       const res = await api.get<{ items: OrgRow[] }>(
@@ -327,6 +338,15 @@ export default function NotificationsPage() {
                             className="rounded border border-slate-700 px-2 py-1 text-xs text-red-400 hover:bg-red-950"
                           >
                             Cancel
+                          </button>
+                        )}
+                        {(b.status === "sent" || b.status === "cancelled") && (
+                          <button
+                            onClick={() => openDuplicate(b)}
+                            title="Copy as a new draft"
+                            className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
+                          >
+                            Duplicate
                           </button>
                         )}
                       </div>

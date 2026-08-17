@@ -1,4 +1,5 @@
-"""Endpoints for PDF upload and website crawling (vectorless RAG data sources).
+"""Endpoints for document upload (PDF, DOCX, XLSX, CSV, TXT, MD) and website
+crawling (vectorless RAG data sources).
 
 All org isolation is enforced by deriving ``org_id`` from the authenticated user
 same as every other dashboard endpoint.
@@ -12,13 +13,18 @@ from pydantic import BaseModel, HttpUrl
 import logging
 import os
 import uuid as _uuid
+from pathlib import Path
 
 from app.db.database import get_db
 from app.core.config import settings
 from app.models.config import OrgConfig
 from app.models.user import User
 from app.api.v1.endpoints.auth import get_current_user, deny_impersonation
-from app.services.pdf_processor import process_pdf, compute_content_hash
+from app.services.document_processor import (
+    SUPPORTED_EXTENSIONS,
+    process_document,
+    compute_content_hash,
+)
 from app.services.firecrawl_service import get_firecrawl_service
 from app.services.retrieval_service import store_document_chunks, delete_document_chunks, delete_website_chunks
 
@@ -67,11 +73,11 @@ class CrawlStatusResponse(BaseModel):
 # ─── Helpers ───────────────────────────────────────────────────────────────
 
 
-async def _count_uploaded_pdfs(db: AsyncSession, org_id) -> int:
+async def _count_uploaded_documents(db: AsyncSession, org_id) -> int:
     result = await db.execute(
         text(
             "SELECT COUNT(DISTINCT doc_id) FROM document_chunks "
-            "WHERE org_id = :org_id AND source_type = 'pdf'"
+            "WHERE org_id = :org_id AND source_type <> 'website'"
         ),
         {"org_id": str(org_id)},
     )
@@ -88,17 +94,28 @@ async def upload_document(
     user: User = Depends(get_current_user),
     _: None = Depends(deny_impersonation),
 ):
-    """Upload a PDF document (max 10 PDFs per org). Chunks are stored for BM25 search."""
+    """Upload a document (PDF, DOCX, XLSX, CSV, TXT, MD; max 10 per org).
+    Chunks are stored for BM25 search."""
     org_id = user.org_id
 
-    if not file or not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+    if not file or not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
 
-    existing_count = await _count_uploaded_pdfs(db, org_id)
+    ext = Path(file.filename).suffix.lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unsupported file type. Supported formats: "
+                "PDF, DOCX, XLSX, CSV, TXT, MD"
+            ),
+        )
+
+    existing_count = await _count_uploaded_documents(db, org_id)
     if existing_count >= MAX_DOCS_PER_ORG:
         raise HTTPException(
             status_code=400,
-            detail=f"Maximum of {MAX_DOCS_PER_ORG} PDFs per organization reached",
+            detail=f"Maximum of {MAX_DOCS_PER_ORG} documents per organization reached",
         )
 
     raw = await file.read()
@@ -116,30 +133,31 @@ async def upload_document(
     dup = await db.execute(
         text(
             "SELECT 1 FROM document_chunks WHERE org_id = :org_id "
-            "AND source_type = 'pdf' AND metadata->>'content_hash' = :h LIMIT 1"
+            "AND source_type <> 'website' AND metadata->>'content_hash' = :h LIMIT 1"
         ),
         {"org_id": str(org_id), "h": content_hash},
     )
     if dup.first() is not None:
-        raise HTTPException(status_code=409, detail="This PDF has already been uploaded")
+        raise HTTPException(status_code=409, detail="This document has already been uploaded")
 
-    filename = file.filename or "document.pdf"
+    filename = file.filename or "document"
     try:
-        chunks = await process_pdf(raw, filename)
+        chunks = await process_document(raw, filename)
     except Exception as exc:
-        logger.error(f"PDF processing failed for {filename}: {exc}", exc_info=True)
-        raise HTTPException(status_code=422, detail=f"PDF processing failed: {exc}")
+        logger.error(f"Document processing failed for {filename}: {exc}", exc_info=True)
+        raise HTTPException(status_code=422, detail=f"Document processing failed: {exc}")
 
     if not chunks:
-        raise HTTPException(status_code=422, detail="No extractable text found in PDF")
+        raise HTTPException(status_code=422, detail="No extractable text found in document")
 
+    source_type = str(chunks[0].get("source_type") or "pdf")
     page_count = len({c.get("page_number") for c in chunks if c.get("page_number")})
 
     doc_id = await store_document_chunks(
         db=db,
         org_id=str(org_id),
         chunks=chunks,
-        source_type="pdf",
+        source_type=source_type,
         source_url=None,
         doc_id=None,
     )
@@ -179,7 +197,7 @@ async def list_documents(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """List all PDF documents uploaded for the authenticated org."""
+    """List all documents uploaded for the authenticated org."""
     org_id = user.org_id
     result = await db.execute(
         text(
@@ -190,7 +208,7 @@ async def list_documents(
                 COUNT(DISTINCT page_number) AS pages,
                 MIN(created_at) AS uploaded_at
             FROM document_chunks
-            WHERE org_id = :org_id AND source_type = 'pdf'
+            WHERE org_id = :org_id AND source_type <> 'website'
             GROUP BY doc_id, metadata->>'filename'
             ORDER BY uploaded_at DESC
             """
@@ -352,7 +370,7 @@ async def get_crawl_status(
 
         # If the crawl completed and we have data, ingest it
         if status_str == "completed" and pages_data and db:
-            from app.services.pdf_processor import chunk_text
+            from app.services.document_processor import chunk_text
             all_chunks = []
             for page in pages_data:
                 if not isinstance(page, dict):

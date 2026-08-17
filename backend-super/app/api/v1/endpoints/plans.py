@@ -246,7 +246,16 @@ async def archive_plan(
     db: AsyncSession = Depends(get_db),
     admin: CurrentAdmin = Depends(require_permission("plans.manage")),
 ):
+    """Delete or sunset a plan.
+
+    - plan with NO references            → permanent delete
+    - plan still assigned / subscribed   → sunset: orgs keep it until their
+      billing validity ends (expires_at), then it falls away; no renewals at
+      the old price (cancel_at_period_end on active subscriptions).
+    - archived with only revoked history → purge (history + plan).
+    """
     row = await _get_plan_or_404(db, plan_id)
+
     active_assignments = (
         await db.execute(
             text(
@@ -255,33 +264,198 @@ async def archive_plan(
             ),
             {"plan_id": plan_id},
         )
-    ).scalar()
+    ).scalar() or 0
+    historical_assignments = (
+        await db.execute(
+            text(
+                "SELECT count(*) AS n FROM super_admin.plan_assignments "
+                "WHERE plan_id = :plan_id AND status != 'active'"
+            ),
+            {"plan_id": plan_id},
+        )
+    ).scalar() or 0
+    active_subscriptions = (
+        await db.execute(
+            text(
+                "SELECT count(*) AS n FROM super_admin.subscriptions "
+                "WHERE plan_id = :plan_id AND status IN ('active', 'past_due', 'trialing')"
+            ),
+            {"plan_id": plan_id},
+        )
+    ).scalar() or 0
+    subscriptions = (
+        await db.execute(
+            text(
+                "SELECT count(*) AS n FROM super_admin.subscriptions "
+                "WHERE plan_id = :plan_id"
+            ),
+            {"plan_id": plan_id},
+        )
+    ).scalar() or 0
 
-    if active_assignments:
+    if not (active_assignments or historical_assignments or subscriptions):
+        # No references at all → permanent delete
+        try:
+            await db.execute(
+                text("DELETE FROM super_admin.plans WHERE id = :plan_id"),
+                {"plan_id": plan_id},
+            )
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            await db.execute(
+                text("UPDATE super_admin.plans SET is_active = FALSE, updated_at = now() WHERE id = :plan_id"),
+                {"plan_id": plan_id},
+            )
+            await db.commit()
+            action = "plan.archive"
+            archived = True
+            return {
+                "ok": True,
+                "archived": True,
+                "deleted": False,
+                "detail": "Plan archived instead of deleted (still referenced)",
+            }
+        action = "plan.delete"
+        archived = False
+        await write_audit_log(
+            actor_id=admin.id,
+            actor_email=admin.email,
+            action=action,
+            resource_type="plan",
+            resource_id=str(plan_id),
+            new_values={"code": row["code"], "archived": archived},
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+        return {"ok": True, "archived": False, "deleted": True}
+
+    if active_assignments or active_subscriptions:
+        # SUNSET: orgs keep the plan until their validity ends.
+        # 1. Soft-archive the plan so it leaves the active catalog.
         await db.execute(
             text("UPDATE super_admin.plans SET is_active = FALSE, updated_at = now() WHERE id = :plan_id"),
             {"plan_id": plan_id},
         )
-        action = "plan.archive"
-    else:
+        # 2. Stop renewals at the old price: mark active subscriptions canceled
+        #    at period end.
         await db.execute(
-            text("DELETE FROM super_admin.plans WHERE id = :plan_id"),
+            text(
+                "UPDATE super_admin.subscriptions SET cancel_at_period_end = TRUE "
+                "WHERE plan_id = :plan_id AND status IN ('active', 'past_due', 'trialing')"
+            ),
             {"plan_id": plan_id},
         )
-        action = "plan.delete"
-    await db.commit()
+        # 3. Store the validity end on each active assignment: billing period
+        #    end when the org has a live subscription, else end of this month.
+        expiry_rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT a.id,
+                           COALESCE(
+                               (SELECT s.current_period_end
+                                FROM super_admin.subscriptions s
+                                WHERE s.org_id = a.org_id
+                                  AND s.plan_id = a.plan_id
+                                  AND s.status IN ('active', 'past_due', 'trialing')
+                                ORDER BY s.created_at DESC
+                                LIMIT 1),
+                               date_trunc('month', now() + interval '1 month')
+                           ) AS expires
+                    FROM super_admin.plan_assignments a
+                    WHERE a.plan_id = :plan_id AND a.status = 'active'
+                    """
+                ),
+                {"plan_id": plan_id},
+            )
+        ).mappings().all()
+        for er in expiry_rows:
+            await db.execute(
+                text(
+                    "UPDATE super_admin.plan_assignments SET expires_at = :expires "
+                    "WHERE id = :id"
+                ),
+                {"id": er["id"], "expires": er["expires"]},
+            )
+        await db.commit()
 
+        org_rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT o.name
+                    FROM super_admin.plan_assignments a
+                    JOIN public.organizations o ON o.id = a.org_id
+                    WHERE a.plan_id = :plan_id AND a.status = 'active'
+                    ORDER BY o.name
+                    """
+                ),
+                {"plan_id": plan_id},
+            )
+        ).scalars().all()
+        await write_audit_log(
+            actor_id=admin.id,
+            actor_email=admin.email,
+            action="plan.sunset",
+            resource_type="plan",
+            resource_id=str(plan_id),
+            new_values={
+                "code": row["code"],
+                "orgs_keeping_plan": [str(n) for n in org_rows],
+                "cancel_at_period_end": active_subscriptions,
+            },
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+        return {
+            "ok": True,
+            "archived": True,
+            "deleted": False,
+            "sunset": True,
+            "orgs_affected": len(org_rows),
+            "detail": (
+                f"Plan sunset: {len(org_rows)} organization(s) keep it until "
+                "their current billing period ends, then it expires and no "
+                "renewals happen at this price."
+            ),
+        }
+
+    if subscriptions:
+        # Only (canceled) billing records remain → those are history.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot delete: plan is used by {subscriptions} subscription record(s). "
+                "Billing history depends on it, so it must stay archived."
+            ),
+        )
+
+    # Only revoked assignment history remains → purge history + plan.
+    await db.execute(
+        text("DELETE FROM super_admin.plan_assignments WHERE plan_id = :plan_id"),
+        {"plan_id": plan_id},
+    )
+    await db.execute(
+        text("DELETE FROM super_admin.plans WHERE id = :plan_id"),
+        {"plan_id": plan_id},
+    )
+    await db.commit()
     await write_audit_log(
         actor_id=admin.id,
         actor_email=admin.email,
-        action=action,
+        action="plan.delete",
         resource_type="plan",
         resource_id=str(plan_id),
-        new_values={"code": row["code"], "archived": active_assignments > 0},
+        new_values={
+            "code": row["code"],
+            "archived": False,
+            "removed_assignment_history": historical_assignments,
+        },
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    return {"ok": True, "archived": bool(active_assignments)}
+    return {"ok": True, "archived": False, "deleted": True}
 
 
 @router.post("/{plan_id}/assign")
@@ -397,7 +571,8 @@ async def get_org_plan(
         await db.execute(
             text(
                 """
-                SELECT a.assigned_at, a.note, p.id AS plan_id, p.code, p.name,
+                SELECT a.id, a.assigned_at, a.note, a.expires_at,
+                       p.id AS plan_id, p.code, p.name,
                        p.description, p.is_active, p.monthly_price_cents, p.period, p.limits
                 FROM super_admin.plan_assignments a
                 JOIN super_admin.plans p ON p.id = a.plan_id
@@ -407,6 +582,18 @@ async def get_org_plan(
             {"org_id": org_id},
         )
     ).mappings().first()
+    if row and row["expires_at"] is not None and row["expires_at"] < datetime.now(timezone.utc):
+        # Sunset validity ended → the plan falls away.
+        await db.execute(
+            text(
+                "UPDATE super_admin.plan_assignments "
+                "SET status = 'revoked', revoked_at = now() "
+                "WHERE id = :id AND status = 'active'"
+            ),
+            {"id": row["id"]},
+        )
+        await db.commit()
+        row = None
 
     month = datetime.now(timezone.utc).strftime("%Y-%m-01")
     usage = await _org_usage(db, org_id, month)

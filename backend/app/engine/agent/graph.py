@@ -128,6 +128,21 @@ llm = ChatOpenAI(
     temperature=0
 )
 
+# Fallback LLM — used when the primary provider fails (rate limit, timeout,
+# 5xx). Disabled entirely when the fallback env vars are empty.
+fallback_llm = None
+if settings.LLM_FALLBACK_BASE_URL and settings.LLM_FALLBACK_API_KEY:
+    fallback_llm = ChatOpenAI(
+        base_url=_normalize_llm_base_url(settings.LLM_FALLBACK_BASE_URL),
+        api_key=settings.LLM_FALLBACK_API_KEY,
+        model=settings.LLM_FALLBACK_MODEL or settings.LLM_MODEL,
+        temperature=0,
+    )
+    logger.info(
+        "llm_fallback_configured",
+        extra={"fallback_model": fallback_llm.model_name},
+    )
+
 
 def _message_role(message: BaseMessage) -> str:
     if isinstance(message, HumanMessage):
@@ -348,20 +363,55 @@ async def call_model(
             )
         else:
             logger.warning("main_llm_call_failed", exc_info=True)
-        fallback_message = (
-            f"Could I get your {'next detail' if missing else 'confirmation'}? "
-            "Please reply and I'll continue."
-        )
-        return {
-            "messages": [AIMessage(content=fallback_message)],
-            "summary": active_summary,
-            "context_window": [_serialize_message(message) for message in active_messages],
-            "context_window_size": len(active_messages),
-            "context_compacted": context_compacted,
-            "collected_fields": dict(state.get("collected_fields", {})),
-            "follow_up_fields": list(state.get("follow_up_fields", [])),
-            "current_intent": str(state.get("current_intent") or "START_BOOKING"),
-        }
+
+        # Fallback mode: try the backup LLM before giving up to the canned
+        # message. Both providers failing is the only path that yields the
+        # canned reply.
+        if fallback_llm is not None:
+            try:
+                response = await asyncio.wait_for(
+                    fallback_llm.ainvoke(messages),
+                    timeout=MAIN_LLM_HARD_TIMEOUT_SECONDS,
+                )
+                logger.warning(
+                    "main_llm_fallback_used",
+                    extra={
+                        "session_id": state.get("session_id"),
+                        "fallback_model": fallback_llm.model_name,
+                        "primary_error": str(llm_error)[:500],
+                    },
+                )
+            except Exception:
+                logger.warning("main_llm_fallback_failed", exc_info=True)
+                fallback_message = (
+                    f"Could I get your {'next detail' if missing else 'confirmation'}? "
+                    "Please reply and I'll continue."
+                )
+                return {
+                    "messages": [AIMessage(content=fallback_message)],
+                    "summary": active_summary,
+                    "context_window": [_serialize_message(message) for message in active_messages],
+                    "context_window_size": len(active_messages),
+                    "context_compacted": context_compacted,
+                    "collected_fields": dict(state.get("collected_fields", {})),
+                    "follow_up_fields": list(state.get("follow_up_fields", [])),
+                    "current_intent": str(state.get("current_intent") or "START_BOOKING"),
+                }
+        else:
+            fallback_message = (
+                f"Could I get your {'next detail' if missing else 'confirmation'}? "
+                "Please reply and I'll continue."
+            )
+            return {
+                "messages": [AIMessage(content=fallback_message)],
+                "summary": active_summary,
+                "context_window": [_serialize_message(message) for message in active_messages],
+                "context_window_size": len(active_messages),
+                "context_compacted": context_compacted,
+                "collected_fields": dict(state.get("collected_fields", {})),
+                "follow_up_fields": list(state.get("follow_up_fields", [])),
+                "current_intent": str(state.get("current_intent") or "START_BOOKING"),
+            }
     
     # Emit AI token telemetry (gated no-op while TELEMETRY_ENABLED is false)
     usage_metadata = getattr(response, "usage_metadata", None)

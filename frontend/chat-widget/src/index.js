@@ -84,6 +84,9 @@
       this._wsConnected = false;
       // Phase 6/9: track rendered message ids to avoid duplicates when WS + poll overlap
       this._renderedMessageIds = new Set();
+      // Bubbles just rendered locally during a send; the post-send history
+      // refresh must skip re-rendering these (they have no DB ids yet).
+      this._pendingRefreshSkips = [];
     }
 
     _sessionStorageKey() {
@@ -153,8 +156,15 @@
               : String(m.content || "");
           // Skip appending human_joined/human_left system messages (we show them in header instead)
           if (!isHumanJoined && !isHumanLeft && content) {
-            const meta = m.sender_type === "human" ? { admin_name: m.human_agent_name } : {};
-            this._appendBubble(m.role, content, meta);
+            const alreadyRendered = !!(m.id && this._renderedMessageIds.has(m.id));
+            const justRendered = this._pendingRefreshSkips.some(
+              (j) => j.role === m.role && j.content === content,
+            );
+            if (!alreadyRendered && !justRendered) {
+              const meta = m.sender_type === "human" ? { admin_name: m.human_agent_name } : {};
+              if (m.id) this._renderedMessageIds.add(m.id);
+              this._appendBubble(m.role, content, meta);
+            }
           }
           // Track the latest message timestamp for incremental polling
           if (m.created_at) {
@@ -175,6 +185,7 @@
             this._startFastPolling();
           }
         }
+        this._pendingRefreshSkips = [];
         return true;
       } catch (e) {
         return false;
@@ -427,7 +438,7 @@
       // Apply brand color if configured
       const brandColor = this._agentConfig?.brand_color || CONFIG.primaryColor;
       if (brandColor) {
-        this._chatBox.style.setProperty("--brand-color", brandColor);
+        this.style.setProperty("--brand-color", brandColor);
       }
     }
 
@@ -538,19 +549,40 @@
     }
 
     _getTimezoneOptions() {
-      const defaults = [
-        "UTC",
-        "America/New_York",
-        "America/Los_Angeles",
-        "Europe/London",
-        "Asia/Kolkata",
-        "Asia/Dubai",
-        "Asia/Singapore",
-        "Australia/Sydney",
-      ];
+      // Full IANA timezone list at runtime (every zone the browser supports),
+      // with a curated fallback for engines without Intl.supportedValuesOf.
+      let all = [];
+      try {
+        const supported = Intl.supportedValuesOf("timeZone");
+        if (Array.isArray(supported) && supported.length > 0) {
+          all = [...supported].sort();
+        }
+      } catch (e) {
+        // fall back to the curated list below
+      }
+      if (all.length === 0) {
+        all = [
+          "UTC", "Africa/Abidjan", "Africa/Cairo", "Africa/Casablanca", "Africa/Johannesburg",
+          "Africa/Lagos", "Africa/Nairobi", "America/Argentina/Buenos_Aires", "America/Bogota",
+          "America/Caracas", "America/Chicago", "America/Denver", "America/Halifax", "America/Lima",
+          "America/Los_Angeles", "America/Mexico_City", "America/New_York", "America/Phoenix",
+          "America/Santiago", "America/Sao_Paulo", "America/Toronto", "America/Vancouver",
+          "Asia/Almaty", "Asia/Baghdad", "Asia/Bangkok", "Asia/Beirut", "Asia/Dhaka", "Asia/Dubai",
+          "Asia/Hong_Kong", "Asia/Istanbul", "Asia/Jakarta", "Asia/Jerusalem", "Asia/Karachi",
+          "Asia/Kathmandu", "Asia/Kolkata", "Asia/Kuala_Lumpur", "Asia/Manila", "Asia/Riyadh",
+          "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Taipei", "Asia/Tashkent",
+          "Asia/Tehran", "Asia/Tokyo", "Asia/Yangon", "Australia/Adelaide", "Australia/Brisbane",
+          "Australia/Melbourne", "Australia/Perth", "Australia/Sydney", "Europe/Amsterdam",
+          "Europe/Athens", "Europe/Berlin", "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest",
+          "Europe/Copenhagen", "Europe/Dublin", "Europe/Helsinki", "Europe/Lisbon", "Europe/London",
+          "Europe/Madrid", "Europe/Moscow", "Europe/Oslo", "Europe/Paris", "Europe/Prague",
+          "Europe/Rome", "Europe/Stockholm", "Europe/Vienna", "Europe/Warsaw", "Europe/Zurich",
+          "Pacific/Auckland", "Pacific/Fiji", "Pacific/Honolulu",
+        ];
+      }
       return Array.from(
         new Set(
-          [this.userTimezone, this.orgTimezone, this._detectBrowserTimezone(), ...defaults].filter(Boolean),
+          [this.userTimezone, this.orgTimezone, this._detectBrowserTimezone(), ...all].filter(Boolean),
         ),
       );
     }
@@ -714,6 +746,7 @@
       this._input.disabled = true;
       this._sendBtn.disabled = true;
       this.isLoading = true;
+      this._pendingRefreshSkips = [{ role: "user", content: text }];
 
       const thinkingEl = this._appendTyping();
 
@@ -761,6 +794,11 @@
             // Cleanup legacy global key to prevent stale cross-widget reuse.
             sessionStorage.removeItem("dotstark_session_id");
           } catch (e) {}
+          // Fresh sessions (created on the first message) never had a channel:
+          // open the WebSocket and start polling now so messages sent by a
+          // human agent after takeover arrive in real time.
+          this._connectWebSocket();
+          this._startPolling();
         }
 
         const agentMessage = this._resolveAssistantText(
@@ -777,6 +815,7 @@
         if (!rendersCardOnly) {
           if (agentMessage) {
             this._appendBubble("agent", agentMessage);
+            this._pendingRefreshSkips.push({ role: "agent", content: agentMessage });
           } else {
             this._appendBubble(
               "agent",
@@ -870,8 +909,10 @@
         this._input.disabled = false;
         this._sendBtn.disabled = false;
         this._input.focus();
-        // Only fetch new messages if human agent is active (polling for human messages)
-        if (this.sessionId && this._humanActive) {
+        // Refresh incrementally after every send so messages written by a
+        // human agent (takeover) show up even if WS/poll hadn't started yet.
+        // Dedupe by message id prevents re-rendering our own just-sent bubble.
+        if (this.sessionId) {
           this._loadHistory(this._lastMessageTimestamp);
         }
       }
@@ -1823,10 +1864,10 @@
                 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
                 :host {
-                    --accent: #3b82f6;
-                    --accent-hover: #2563eb;
-                    --accent-glow: rgba(59, 130, 246, 0.3);
-                    --accent-soft: rgba(59, 130, 246, 0.08);
+                    --accent: var(--brand-color, #3b82f6);
+                    --accent-hover: color-mix(in srgb, var(--accent) 80%, #000);
+                    --accent-glow: color-mix(in srgb, var(--accent) 30%, transparent);
+                    --accent-soft: color-mix(in srgb, var(--accent) 8%, transparent);
                     --bg-primary: #0a0a0a;
                     --bg-card: #121212;
                     --bg-input: #0e0e0e;
@@ -1838,7 +1879,7 @@
                     --success: #22c55e;
                     --success-glow: rgba(34, 197, 94, 0.2);
                     --msg-agent-bg: #18181b;
-                    --msg-user-bg: #3b82f6;
+                    --msg-user-bg: var(--accent);
                     position: fixed;
                     bottom: 24px;
                     right: 24px;
@@ -2183,11 +2224,11 @@
                     color: white;
                     border-bottom-right-radius: 4px;
                     border: none;
-                    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.2);
+                    box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 20%, transparent);
                 }
 
                 .message.user:hover {
-                    box-shadow: 0 4px 16px rgba(59, 130, 246, 0.3);
+                    box-shadow: 0 4px 16px color-mix(in srgb, var(--accent) 30%, transparent);
                 }
 
                 .message.system {
@@ -2198,7 +2239,7 @@
                     text-align: center;
                     padding: 8px 16px;
                     max-width: 90%;
-                    border: 1px solid rgba(59, 130, 246, 0.12);
+                    border: 1px solid color-mix(in srgb, var(--accent) 12%, transparent);
                     border-radius: 20px;
                 }
 
@@ -2376,7 +2417,7 @@
 
                 @keyframes typingPulse {
                     0%, 100% { border-color: var(--border); }
-                    50% { border-color: rgba(59, 130, 246, 0.3); }
+                    50% { border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
                 }
 
                 /* ════════ POWERED-BY FOOTER ════════ */
@@ -2505,9 +2546,9 @@
                 .timezone-context-banner {
                     margin: 8px 0 10px;
                     padding: 8px;
-                    border: 1px solid rgba(59, 130, 246, 0.45);
+                    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
                     border-radius: 10px;
-                    background: rgba(59, 130, 246, 0.08);
+                    background: color-mix(in srgb, var(--accent) 8%, transparent);
                     display: flex;
                     flex-direction: column;
                     gap: 8px;

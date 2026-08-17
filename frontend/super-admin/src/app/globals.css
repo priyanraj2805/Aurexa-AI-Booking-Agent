@@ -1,1 +1,186 @@
 @import "tailwindcss";
+
+/* ─── UI skins ────────────────────────────────────────────────────────────
+   super-admin uses hardcoded slate/indigo classes. We remap those palette
+   entries through CSS vars so a single `data-ui` attribute on <html> swaps
+   the whole control plane between skins:
+     - "classic": original dark slate 950 + indigo 600 control-plane look
+     - "admin"  : DotStark admin-panel look (light bg, orange primary,
+                  light-mode status chips)
+   Switched from the header toggle; persisted in localStorage.            */
+
+@theme inline {
+  --color-slate-50: var(--s50);
+  --color-slate-100: var(--s100);
+  --color-slate-200: var(--s200);
+  --color-slate-300: var(--s300);
+  --color-slate-400: var(--s400);
+  --color-slate-500: var(--s500);
+  --color-slate-600: var(--s600);
+  --color-slate-700: var(--s700);
+  --color-slate-800: var(--s800);
+  --color-slate-900: var(--s900);
+  --color-slate-950: var(--s950);
+  --color-indigo-300: var(--i300);
+  --color-indigo-400: var(--i400);
+  --color-indigo-500: var(--i500);
+  --color-indigo-600: var(--i600);
+  --color-indigo-700: var(--i700);
+  --color-indigo-800: var(--i800);
+  --color-indigo-900: var(--i900);
+  --color-indigo-950: var(--i950);
+  --color-red-100: var(--r100);
+  --color-red-200: var(--r200);
+  --color-red-300: var(--r300);
+  --color-red-400: var(--r400);
+  --color-red-900: var(--r900);
+  --color-red-950: var(--r950);
+  --color-green-200: var(--g200);
+  --color-green-300: var(--g300);
+  --color-green-400: var(--g400);
+  --color-green-900: var(--g900);
+  --color-green-950: var(--g950);
+  --color-emerald-300: var(--e300);
+  --color-emerald-400: var(--e400);
+  --color-emerald-900: var(--e900);
+  --color-amber-200: var(--a200);
+  --color-amber-300: var(--a300);
+  --color-amber-400: var(--a400);
+  --color-amber-900: var(--a900);
+  --color-amber-950: var(--a950);
+  --color-sky-200: var(--sk200);
+  --color-sky-300: var(--sk300);
+  --color-sky-900: var(--sk900);
+  --color-sky-950: var(--sk950);
+  --color-blue-300: var(--b300);
+  --color-blue-900: var(--b900);
+  --color-cyan-300: var(--c300);
+  --color-cyan-900: var(--c900);
+  --color-cyan-950: var(--c950);
+  --color-purple-300: var(--p300);
+  --color-purple-900: var(--p900);
+  --color-orange-300: var(--o300);
+}
+
+/* ─── Classic skin — original super-admin control-plane look (tailwind defaults) ─── */
+:root,
+:root[data-ui="classic"] {
+  --s50: #f8fafc;
+  --s100: #f1f5f9;
+  --s200: #e2e8f0;
+  --s300: #cbd5e1;
+  --s400: #94a3b8;
+  --s500: #64748b;
+  --s600: #475569;
+  --s700: #334155;
+  --s800: #1e293b;
+  --s900: #0f172a;
+  --s950: #020617;
+  --i300: #a5b4fc;
+  --i400: #818cf8;
+  --i500: #6366f1;
+  --i600: #4f46e5;
+  --i700: #4338ca;
+  --i800: #3730a3;
+  --i900: #312e81;
+  --i950: #1e1b4b;
+  --r100: #fee2e2;
+  --r200: #fecaca;
+  --r300: #fca5a5;
+  --r400: #f87171;
+  --r900: #7f1d1d;
+  --r950: #450a0a;
+  --g200: #bbf7d0;
+  --g300: #86efac;
+  --g400: #4ade80;
+  --g900: #14532d;
+  --g950: #052e16;
+  --e300: #6ee7b7;
+  --e400: #34d399;
+  --e900: #064e3b;
+  --a200: #fde68a;
+  --a300: #fcd34d;
+  --a400: #fbbf24;
+  --a900: #78350f;
+  --a950: #451a03;
+  --sk200: #bae6fd;
+  --sk300: #7dd3fc;
+  --sk900: #0c4a6e;
+  --sk950: #082f49;
+  --b300: #93c5fd;
+  --b900: #1e3a8a;
+  --c300: #67e8f9;
+  --c900: #164e63;
+  --c950: #083344;
+  --p300: #d8b4fe;
+  --p900: #581c87;
+  --o300: #fdba74;
+}
+
+/* ─── Admin skin — DotStark admin-panel palette (light) ─── */
+:root[data-ui="admin"] {
+  --s50: #fafafa;
+  --s100: #111111;
+  --s200: #18181b;
+  --s300: #3f3f46;
+  --s400: #71717a;
+  --s500: #a1a1aa;
+  --s600: #d4d4d8;
+  --s700: #e5e5e5;
+  --s800: #e5e5e5;
+  --s900: #ffffff;
+  --s950: #fafafa;
+  --i300: #c2410c;
+  --i400: #e0551c;
+  --i500: #ef5d25;
+  --i600: #ef5d25;
+  --i700: #d9531f;
+  --i800: #c2410c;
+  --i900: #ffe8dc;
+  --i950: #ffd9c4;
+  --r100: #b91c1c;
+  --r200: #b91c1c;
+  --r300: #b91c1c;
+  --r400: #dc2626;
+  --r900: #fee2e2;
+  --r950: #fee2e2;
+  --g200: #15803d;
+  --g300: #15803d;
+  --g400: #15803d;
+  --g900: #dcfce7;
+  --g950: #dcfce7;
+  --e300: #047857;
+  --e400: #047857;
+  --e900: #d1fae5;
+  --a200: #92400e;
+  --a300: #92400e;
+  --a400: #92400e;
+  --a900: #fef3c7;
+  --a950: #fef3c7;
+  --sk200: #0369a1;
+  --sk300: #0369a1;
+  --sk900: #e0f2fe;
+  --sk950: #e0f2fe;
+  --b300: #1d4ed8;
+  --b900: #dbeafe;
+  --c300: #0e7490;
+  --c900: #cffafe;
+  --c950: #cffafe;
+  --p300: #7e22ce;
+  --p900: #ede9fe;
+  --o300: #c2410c;
+}
+
+/* ─── UI-switch visibility ────────────────────────────────────────────────
+   Classic skin keeps the original ghost icon button. In the light admin
+   skin the header is near-white, so give the switch a light chip look so it
+   does not blend in.                                                */
+:root[data-ui="admin"] .ui-switch {
+  background: #f4f4f5;
+  border-color: #e4e4e7;
+  color: #3f3f46;
+}
+:root[data-ui="admin"] .ui-switch:hover {
+  background: #e4e4e7;
+  color: #18181b;
+}

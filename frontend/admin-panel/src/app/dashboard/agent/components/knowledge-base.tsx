@@ -86,13 +86,17 @@ function DocumentsSection({ push }: { push: (m: string, k?: Toast["kind"]) => vo
   const docList = docs ?? [];
   const atLimit = docList.length >= MAX_DOCS_PER_ORG;
 
+const SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md"];
+const ACCEPT_TYPES = SUPPORTED_EXTENSIONS.join(",");
+
   const onPickFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = "";
 
-    if (!file.name.toLowerCase().endsWith(".pdf")) {
-      push("Please upload a PDF file.", "error");
+    const ext = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
+    if (!SUPPORTED_EXTENSIONS.includes(ext)) {
+      push("Unsupported file type. Supported: PDF, DOCX, XLSX, CSV, TXT, MD", "error");
       return;
     }
     if (file.size > 25 * 1024 * 1024) {
@@ -100,7 +104,7 @@ function DocumentsSection({ push }: { push: (m: string, k?: Toast["kind"]) => vo
       return;
     }
     if (atLimit) {
-      push(`Maximum of ${MAX_DOCS_PER_ORG} PDFs reached.`, "error");
+      push(`Maximum of ${MAX_DOCS_PER_ORG} documents reached.`, "error");
       return;
     }
 
@@ -140,9 +144,9 @@ function DocumentsSection({ push }: { push: (m: string, k?: Toast["kind"]) => vo
             <FileUp className="size-5" />
           </div>
           <div>
-            <h3 className="text-base font-semibold">PDF Knowledge Base</h3>
+            <h3 className="text-base font-semibold">Document Knowledge Base</h3>
             <p className="text-[13px] text-muted-foreground">
-              Upload up to {MAX_DOCS_PER_ORG} PDFs. The agent answers questions from this content.
+              Upload up to {MAX_DOCS_PER_ORG} documents (PDF, DOCX, XLSX, CSV, TXT, MD). The agent answers questions from this content.
             </p>
           </div>
         </div>
@@ -156,12 +160,12 @@ function DocumentsSection({ push }: { push: (m: string, k?: Toast["kind"]) => vo
           ) : (
             <Upload className="size-4" />
           )}
-          Upload PDF
+          Upload Document
         </button>
         <input
           ref={inputRef}
           type="file"
-          accept="application/pdf,.pdf"
+          accept={ACCEPT_TYPES}
           className="hidden"
           onChange={onPickFile}
         />
@@ -173,7 +177,7 @@ function DocumentsSection({ push }: { push: (m: string, k?: Toast["kind"]) => vo
         </span>
         {atLimit && (
           <span className="text-amber-500 font-medium">
-            ⚠ Max reached — delete a PDF to upload another.
+            ⚠ Max reached — delete a document to upload another.
           </span>
         )}
       </div>
@@ -188,9 +192,9 @@ function DocumentsSection({ push }: { push: (m: string, k?: Toast["kind"]) => vo
         </div>
       ) : docList.length === 0 ? (
         <div className="text-center py-8 border border-dashed border-border rounded-lg">
-          <p className="text-muted-foreground text-sm">No PDFs uploaded yet.</p>
+          <p className="text-muted-foreground text-sm">No documents uploaded yet.</p>
           <p className="text-muted-foreground/60 text-xs mt-1">
-            Click &ldquo;Upload PDF&rdquo; to feed the agent new knowledge.
+            Click &ldquo;Upload Document&rdquo; to feed the agent new knowledge.
           </p>
         </div>
       ) : (

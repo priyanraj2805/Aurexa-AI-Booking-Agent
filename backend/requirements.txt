@@ -21,6 +21,8 @@ langchain-groq>=0.1.0
 
 # ── RAG Dependencies ──────────────────────
 PyMuPDF>=1.23.0          # fitz for PDF processing
+python-docx>=1.1.0       # DOCX text extraction
+openpyxl>=3.1.0          # XLSX text extraction
 firecrawl-py>=1.0.0      # Firecrawl API
 python-multipart>=0.0.9  # required for FastAPI UploadFile endpoints
 

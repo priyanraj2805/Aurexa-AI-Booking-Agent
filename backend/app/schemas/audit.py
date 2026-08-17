@@ -18,6 +18,10 @@ class AuditAction(str, Enum):
     AUTH_LOGOUT = "auth.logout"
     AUTH_REGISTER = "auth.register"
     AUTH_LOGIN_FAILED = "auth.login_failed"
+    AUTH_PASSWORD_RESET = "auth.password_reset"
+    AUTH_PASSWORD_CHANGE = "auth.password_change"
+    PROFILE_UPDATE = "account.profile_update"
+    PLAN_CHANGE = "account.plan_change"
     
     # Config changes
     CONFIG_UPDATE = "config.update"

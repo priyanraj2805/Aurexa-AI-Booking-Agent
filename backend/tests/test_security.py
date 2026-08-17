@@ -11,16 +11,11 @@ class TestCSRF:
     """CSRF middleware should block POST/PUT/DELETE without X-Requested-With when using cookies."""
 
     async def test_post_without_csrf_header_and_with_cookie_is_blocked(
-        self, registered_user, client: AsyncClient
+        self, registered_user, client: AsyncClient, auth_helpers
     ):
-        # Login to get a cookie
-        login_resp = await client.post(
-            "/api/v1/auth/login",
-            json={
-                "email": registered_user["email"],
-                "password": registered_user["password"],
-            },
-            headers=CSRF,
+        # Complete login to get a cookie
+        login_resp = await auth_helpers["login"](
+            registered_user["email"], registered_user["password"]
         )
         cookies = login_resp.cookies
 

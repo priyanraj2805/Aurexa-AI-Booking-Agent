@@ -24,15 +24,18 @@ from app.core.security import (
     random_jti,
     verify_password,
 )
+from app.core.password_reset import ResetError, issue_reset_token, verify_reset_token
 from app.core.security_policy import get_security_settings, validate_password_policy
 from app.db.database import get_db
 from app.models.super_admin import AdminMFA, AdminSession, LoginAttempt, SuperAdmin
 from app.schemas.auth import (
     AdminProfile,
+    ForgotPasswordRequest,
     LoginRequest,
     LoginResponse,
     MFAEnrollResponse,
     MFAVerifyRequest,
+    ResetPasswordRequest,
 )
 
 router = APIRouter()
@@ -124,7 +127,7 @@ async def login(
     if not verify_password(payload.password, admin.password_hash):
         db.add(LoginAttempt(email=email, admin_id=admin.id, ip_address=ip, success=False))
         await db.commit()
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+        raise HTTPException(status_code=401, detail="Wrong password. Please try again.")
 
     if admin.status != "active":
         raise HTTPException(status_code=403, detail="Admin account is disabled")
@@ -460,3 +463,85 @@ async def change_password(
         ip_address=_client_ip(request),
     )
     return {"ok": True}
+
+
+@router.post("/password/forgot")
+@limiter.limit("5/hour")
+async def forgot_password(
+    payload: ForgotPasswordRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Email a password-reset OTP if the admin account exists.
+
+    Always returns the same generic response so the endpoint cannot be used
+    to enumerate registered admins.
+    """
+    email = payload.email.lower().strip()
+    admin = (
+        await db.execute(select(SuperAdmin).where(SuperAdmin.email == email))
+    ).scalar_one_or_none()
+    if admin:
+        try:
+            await issue_reset_token(db, email)
+        except ResetError as e:
+            raise HTTPException(status_code=429, detail=str(e))
+
+    return {"detail": "If an account exists for this email, a reset code has been sent."}
+
+
+@router.post("/password/reset")
+@limiter.limit("10/hour")
+async def reset_password(
+    payload: ResetPasswordRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Verify the emailed reset code, then set a new password.
+
+    Enforces the platform password policy and revokes every existing
+    session for the admin (the reset is treated like a compromise).
+    """
+    email = payload.email.lower().strip()
+    admin = (
+        await db.execute(select(SuperAdmin).where(SuperAdmin.email == email))
+    ).scalar_one_or_none()
+    if not admin or admin.status != "active":
+        raise HTTPException(status_code=404, detail="No account found for this email.")
+
+    # Validate the password BEFORE consuming the code: a policy-violating
+    # password must not burn a valid, single-use OTP.
+    settings_row = await get_security_settings(db)
+    validate_password_policy(payload.new_password, settings_row["password_policy"])
+
+    if not await verify_reset_token(db, email, payload.code):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired reset code. Request a new code and try again.",
+        )
+
+    if verify_password(payload.new_password, admin.password_hash):
+        raise HTTPException(
+            status_code=400,
+            detail="New password must be different from your current password.",
+        )
+
+    admin.password_hash = hash_password(payload.new_password)
+    await db.execute(
+        delete(AdminSession).where(
+            AdminSession.admin_id == admin.id,
+            AdminSession.revoked_at.is_(None),
+        )
+    )
+    await db.commit()
+
+    await write_audit_log(
+        actor_id=admin.id,
+        actor_email=admin.email,
+        action="admin.password_reset",
+        resource_type="super_admin",
+        resource_id=str(admin.id),
+        ip_address=_client_ip(request),
+        user_agent=request.headers.get("user-agent", "")[:500],
+    )
+    return {"detail": "Password updated. You can now sign in with your new password."}

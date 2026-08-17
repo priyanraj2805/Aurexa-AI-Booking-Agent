@@ -1,4 +1,5 @@
 from typing import Optional
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
@@ -20,6 +21,7 @@ from app.schemas.tenant import (
     SessionSummary,
     StatsResponse,
     TopOrgsResponse,
+    TopOrgRow,
     TrendPoint,
     UsageResponse,
     UserActivityResponse,
@@ -445,6 +447,7 @@ async def platform_stats(
 @router.get("/stats/top-orgs", response_model=TopOrgsResponse)
 async def top_orgs(
     limit: int = Query(10, ge=1, le=50),
+    days: int = Query(30, ge=7, le=365),
     db: AsyncSession = Depends(get_readonly_db),
     _: dict = Depends(require_permission("dashboard.view")),
 ):
@@ -463,7 +466,47 @@ async def top_orgs(
             {"limit": limit},
         )
     ).mappings()
-    return TopOrgsResponse(items=list(rows))
+
+    # Per-org daily booking counts over the trend window (zero-filled).
+    daily_rows = (
+        await db.execute(
+            text(
+                """
+                SELECT b.org_id, d::date AS day, count(DISTINCT b.id) AS n
+                FROM generate_series(
+                         now()::date - (:days - 1) * interval '1 day',
+                         now()::date,
+                         '1 day'
+                     ) AS d
+                LEFT JOIN bookings b ON b.created_at::date = d
+                WHERE d IN (SELECT DISTINCT b2.created_at::date FROM bookings b2)
+                   OR d = now()::date
+                GROUP BY b.org_id, d
+                ORDER BY d
+                """
+            ),
+            {"days": days},
+        )
+    ).mappings()
+
+    by_org: dict[UUID, dict[str, int]] = {}
+    for r in daily_rows:
+        by_org.setdefault(
+            r["org_id"], {}
+        ).setdefault(str(r["day"]), 0)
+        by_org[r["org_id"]][str(r["day"])] = int(r["n"] or 0)
+
+    today = datetime.utcnow().date()
+    items = []
+    for r in rows:
+        day_map = by_org.get(r["id"], {})
+        trend = [
+            day_map.get(str(today - timedelta(days=days - 1 - i)), 0)
+            for i in range(days)
+        ]
+        items.append(TopOrgRow(**{**dict(r), "trend": trend}))
+
+    return TopOrgsResponse(items=items)
 
 
 # ── Org detail tabs (Phase 3) ───────────────────────────────────────────────

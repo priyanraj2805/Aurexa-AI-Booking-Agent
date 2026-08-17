@@ -35,3 +35,13 @@ class AdminProfile(BaseModel):
     role_code: str
     role_name: str
     permissions: List[str]
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    code: str = Field(min_length=6, max_length=6)
+    new_password: str = Field(min_length=6, max_length=128)

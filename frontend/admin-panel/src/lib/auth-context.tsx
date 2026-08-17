@@ -21,7 +21,11 @@ interface AuthContextType {
   isLoading: boolean;
   isAuthenticated: boolean;
   login: (email: string, password: string) => Promise<void>;
+  sendOtp: (email: string) => Promise<void>;
   register: (data: RegisterData) => Promise<void>;
+  requestPasswordReset: (email: string) => Promise<void>;
+  resetPassword: (email: string, code: string, newPassword: string) => Promise<void>;
+  updateProfile: (fullName: string) => Promise<void>;
   logout: () => void;
 }
 
@@ -30,6 +34,7 @@ interface RegisterData {
   org_name: string;
   email: string;
   password: string;
+  otp_code: string;
 }
 
 interface TokenResponse {
@@ -83,20 +88,54 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
 
     // HttpOnly cookie is set by the backend response.
-    // We only keep user info in memory (not localStorage).
     setUser(data.user);
     router.push("/dashboard");
   };
 
+  const sendOtp = async (email: string) => {
+    // Register-only: login is a plain email + password flow with no OTP.
+    await apiFetch<{ detail: string }>("/auth/otp/send", {
+      method: "POST",
+      body: JSON.stringify({ email, purpose: "register" }),
+      skipAuth: true,
+    });
+  };
+
   const register = async (regData: RegisterData) => {
-    const data = await apiFetch<TokenResponse>("/auth/register", {
+    await apiFetch<TokenResponse>("/auth/register", {
       method: "POST",
       body: JSON.stringify(regData),
       skipAuth: true,
     });
 
-    setUser(data.user);
-    router.push("/dashboard");
+    // No auto-login: the calling page decides where the user goes next
+    // (landing page slides to the Sign In tab, standalone /register redirects).
+  };
+
+  const requestPasswordReset = async (email: string) => {
+    // Generic response either way — the backend never reveals whether the
+    // email is registered.
+    await apiFetch<{ detail: string }>("/auth/password/forgot", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+      skipAuth: true,
+    });
+  };
+
+  const resetPassword = async (email: string, code: string, newPassword: string) => {
+    await apiFetch<{ detail: string }>("/auth/password/reset", {
+      method: "POST",
+      body: JSON.stringify({ email, otp_code: code, new_password: newPassword }),
+      skipAuth: true,
+    });
+  };
+
+  const updateProfile = async (fullName: string) => {
+    const data = await apiFetch<{ ok: boolean; full_name: string }>("/account/profile", {
+      method: "PATCH",
+      body: JSON.stringify({ full_name: fullName }),
+    });
+    setUser((prev) => (prev ? { ...prev, full_name: data.full_name } : prev));
   };
 
   const logout = async () => {
@@ -116,7 +155,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isLoading,
         isAuthenticated: !!user,
         login,
+        sendOtp,
         register,
+        requestPasswordReset,
+        resetPassword,
+        updateProfile,
         logout,
       }}
     >

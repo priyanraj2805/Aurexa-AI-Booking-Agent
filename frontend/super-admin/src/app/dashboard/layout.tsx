@@ -23,8 +23,10 @@ import {
 } from "lucide-react";
 import { AuthProvider, useAuth } from "@/lib/auth-context";
 import { ToastProvider } from "@/components/toast";
+import { ConfirmDialog } from "@/components/modal";
 import { ImpersonationBanner } from "@/components/impersonation-banner";
 import { NotificationBell } from "@/components/notification-bell";
+import { UiSwitcher } from "@/components/ui-switcher";
 import { api } from "@/lib/api";
 
 type NavModule = {
@@ -45,7 +47,7 @@ const MODULES: NavModule[] = [
   { name: "Incidents", path: "/dashboard/incidents", permissions: ["incidents.view"], icon: AlertTriangle },
   { name: "Audit Logs", path: "/dashboard/audit", permissions: ["audit.view"], icon: ScrollText },
   { name: "Approvals", path: "/dashboard/approvals", permissions: ["orgs.delete"], icon: CheckCheck },
-  { name: "Broadcasts", path: "/dashboard/notifications", permissions: ["notifications.view"], icon: Megaphone },
+  { name: "Broadcasts", path: "/dashboard/broadcasts", permissions: ["notifications.view"], icon: Megaphone },
   { name: "Support", path: "/dashboard/support", permissions: ["support.tickets.view", "support.impersonate", "support.conversations.view"], icon: LifeBuoy },
   { name: "Settings", path: "/dashboard/settings", permissions: ["security.manage"], icon: Settings },
 ];
@@ -58,6 +60,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const [confirmLogout, setConfirmLogout] = useState(false);
 
   const POLL_MS = 30000;
 
@@ -240,7 +243,7 @@ function Shell({ children }: { children: React.ReactNode }) {
           {collapsed ? (
             <div className="flex justify-center">
               <button
-                onClick={logout}
+                onClick={() => setConfirmLogout(true)}
                 title="Sign out"
                 aria-label="Sign out"
                 className="rounded-md p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
@@ -255,7 +258,7 @@ function Shell({ children }: { children: React.ReactNode }) {
               </p>
               <p className="px-2 text-xs text-slate-400">{admin.role_name}</p>
               <button
-                onClick={logout}
+                onClick={() => setConfirmLogout(true)}
                 className="mt-3 w-full rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-800"
               >
                 Sign out
@@ -264,8 +267,22 @@ function Shell({ children }: { children: React.ReactNode }) {
           )}
         </div>
       </aside>
+      {confirmLogout && (
+        <ConfirmDialog
+          title="Sign out"
+          message="Are you sure you want to sign out?"
+          confirmLabel="Sign out"
+          danger
+          onConfirm={() => {
+            setConfirmLogout(false);
+            logout();
+          }}
+          onCancel={() => setConfirmLogout(false)}
+        />
+      )}
       <main className="flex-1 overflow-y-auto">
-        <div className="sticky top-0 z-30 flex items-center justify-end border-b border-slate-800 bg-slate-950/80 px-6 py-2 backdrop-blur">
+        <div className="sticky top-0 z-30 flex items-center justify-end gap-3 border-b border-slate-800 bg-slate-950/80 px-6 py-2 backdrop-blur">
+          <UiSwitcher />
           <NotificationBell />
         </div>
         <div className="p-8">{children}</div>

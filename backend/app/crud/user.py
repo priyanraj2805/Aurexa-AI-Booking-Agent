@@ -62,3 +62,12 @@ async def create_user_with_org(db: AsyncSession, data: UserRegister) -> tuple:
     await db.refresh(org)
 
     return user, org
+
+
+async def update_user_password(
+    db: AsyncSession, user: User, new_password: str
+) -> None:
+    """Set a new password hash for the user (forgot-password flow)."""
+    user.hashed_password = hash_password(new_password)
+    await db.commit()
+    await db.refresh(user)

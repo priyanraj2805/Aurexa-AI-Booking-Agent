@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import Link from "next/link";
+import { OtpStep } from "@/components/auth/otp-step";
 import { 
   Loader2, 
   Eye, 
@@ -68,9 +69,12 @@ export default function LandingPage() {
   const [regEmail, setRegEmail] = useState("");
   const [regPassword, setRegPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [showRegPassword, setShowRegPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [regError, setRegError] = useState("");
+  const [registerStep, setRegisterStep] = useState<"form" | "otp">("form");
 
-  const { login, register, isAuthenticated } = useAuth();
+  const { login, register, sendOtp, isAuthenticated } = useAuth();
   const router = useRouter();
 
   useEffect(() => {
@@ -113,7 +117,9 @@ export default function LandingPage() {
 
     setIsLoading(true);
     try {
-      await register({ full_name: fullName, org_name: orgName, email: regEmail, password: regPassword });
+      // Validates the email is free + emails a one-time code.
+      await sendOtp(regEmail);
+      setRegisterStep("otp");
     } catch (err: unknown) {
       let message = "Registration failed";
       if (err instanceof TypeError && err.message.includes("fetch")) {
@@ -125,6 +131,14 @@ export default function LandingPage() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleVerifyRegister = async (code: string) => {
+    await register({ full_name: fullName, org_name: orgName, email: regEmail, password: regPassword, otp_code: code });
+    setEmail(regEmail);
+    setLoginError("");
+    setRegisterStep("form");
+    setActiveTab("login");
   };
 
   return (
@@ -291,7 +305,27 @@ export default function LandingPage() {
                       {isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
                       {isLoading ? "Signing in..." : "Sign In"}
                     </button>
+                    <div className="text-center pt-1">
+                      <Link
+                        href="/forgot-password"
+                        className="text-xs text-zinc-400 hover:text-[#FF6B00] transition-colors"
+                      >
+                        Forgot password?
+                      </Link>
+                    </div>
                   </form>
+                ) : registerStep === "otp" ? (
+                    <OtpStep
+                      email={regEmail}
+                      title="Verify Your Email"
+                      subtitle="We emailed a 6-digit code to"
+                      submitLabel="Verify & Create Account"
+                      onVerify={handleVerifyRegister}
+                      onResend={async () => {
+                        await sendOtp(regEmail);
+                      }}
+                      onBack={() => setRegisterStep("form")}
+                    />
                 ) : (
                   <form onSubmit={handleRegister} className="space-y-4">
                     {regError && (
@@ -345,27 +379,47 @@ export default function LandingPage() {
                         <label className="block text-xs font-medium text-zinc-400 mb-1.5 uppercase tracking-wider">
                           Password
                         </label>
-                        <input
-                          type="password"
-                          value={regPassword}
-                          onChange={(e) => setRegPassword(e.target.value)}
-                          placeholder="Min. 6 chars"
-                          required
-                          className="w-full px-4 py-3 bg-zinc-800/50 border border-zinc-700 rounded-lg text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#FF6B00] focus:ring-1 focus:ring-[#FF6B00]/20 transition-all"
-                        />
+                        <div className="relative">
+                          <input
+                            type={showRegPassword ? "text" : "password"}
+                            value={regPassword}
+                            onChange={(e) => setRegPassword(e.target.value)}
+                            placeholder="Min. 6 chars"
+                            required
+                            className="w-full px-4 py-3 pr-10 bg-zinc-800/50 border border-zinc-700 rounded-lg text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#FF6B00] focus:ring-1 focus:ring-[#FF6B00]/20 transition-all"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowRegPassword(!showRegPassword)}
+                            aria-label={showRegPassword ? "Hide password" : "Show password"}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
+                          >
+                            {showRegPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                          </button>
+                        </div>
                       </div>
                       <div>
                         <label className="block text-xs font-medium text-zinc-400 mb-1.5 uppercase tracking-wider">
                           Confirm
                         </label>
-                        <input
-                          type="password"
-                          value={confirmPassword}
-                          onChange={(e) => setConfirmPassword(e.target.value)}
-                          placeholder="Repeat"
-                          required
-                          className="w-full px-4 py-3 bg-zinc-800/50 border border-zinc-700 rounded-lg text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#FF6B00] focus:ring-1 focus:ring-[#FF6B00]/20 transition-all"
-                        />
+                        <div className="relative">
+                          <input
+                            type={showConfirmPassword ? "text" : "password"}
+                            value={confirmPassword}
+                            onChange={(e) => setConfirmPassword(e.target.value)}
+                            placeholder="Repeat"
+                            required
+                            className="w-full px-4 py-3 pr-10 bg-zinc-800/50 border border-zinc-700 rounded-lg text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#FF6B00] focus:ring-1 focus:ring-[#FF6B00]/20 transition-all"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                            aria-label={showConfirmPassword ? "Hide password" : "Show password"}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
+                          >
+                            {showConfirmPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                          </button>
+                        </div>
                       </div>
                     </div>
                     <button
@@ -374,7 +428,7 @@ export default function LandingPage() {
                       className="w-full py-3 bg-[#FF6B00] hover:bg-[#e55f00] text-white font-semibold rounded-lg transition-all disabled:opacity-50 flex items-center justify-center gap-2"
                     >
                       {isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                      {isLoading ? "Creating account..." : "Create Free Account"}
+                      {isLoading ? "Sending code..." : "Create Free Account"}
                     </button>
                     <p className="text-xs text-zinc-500 text-center">
                       No credit card required. 14-day free trial.

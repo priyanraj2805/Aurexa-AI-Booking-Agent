@@ -12,7 +12,6 @@ import {
   ExternalLink,
   Eye,
   Rocket,
-  Wrench,
   Shield,
   Link2,
   Loader2,
@@ -56,7 +55,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import { toast } from "sonner";
 
-const WIDGET_DEV_URL = process.env.NEXT_PUBLIC_WIDGET_DEV_URL || "http://localhost:5174";
 const API_BASE_FALLBACK = "/api/v1";
 const PUBLIC_API_BASE_STORAGE_KEY = "dotstark_public_api_base";
 
@@ -146,8 +144,7 @@ export default function IntegrationsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [activeTab, setActiveTab] = useState<"overview" | "widget" | "whatsapp" | "calendar">("overview");
-  const [copied, setCopied] = useState<"prod" | "dev" | null>(null);
-  const [snippetMode, setSnippetMode] = useState<"production" | "dev">("production");
+  const [copied, setCopied] = useState(false);
   const [publicApiBaseInput, setPublicApiBaseInput] = useState("");
   const [runtimeUrls, setRuntimeUrls] = useState<RuntimeUrls | null>(null);
   const { data: config } = useAgentConfig();
@@ -596,11 +593,17 @@ export default function IntegrationsPage() {
   const oauthRedirectUris = runtimeUrls?.oauth_redirect_uris ?? {};
 
   const persistPublicApiBase = (value: string) => {
-    const normalized = normalizeApiBase(value) || runtimeApiBase;
+    const trimmed = (value || "").trim();
+    if (!trimmed) {
+      toast.error("Enter a public API base URL first (e.g. https://your-domain/api/v1).");
+      return;
+    }
+    const normalized = normalizeApiBase(trimmed);
     setPublicApiBaseInput(normalized);
     if (typeof window !== "undefined") {
       window.localStorage.setItem(PUBLIC_API_BASE_STORAGE_KEY, normalized);
     }
+    toast.success("Public API base saved.");
   };
 
   const prodSnippet = `<!-- DotStark Booking Widget -->
@@ -611,16 +614,6 @@ export default function IntegrationsPage() {
   data-color="${brandColor}"
   defer>
 </script>`;
-
-  const devSnippet = `<!-- DotStark Widget (DEV MODE) -->
-<script>
-  window.DotStarkBookingConfig = {
-    widgetToken: "${rawToken}",
-    apiBase: "${selectedPublicApiBase}",
-    primaryColor: "${brandColor}"
-  };
-</script>
-<script type="module" src="${WIDGET_DEV_URL}/src/index.js"></script>`;
 
   const handlePreview = () => {
     const absoluteApiBase = getAbsoluteApiBase();
@@ -663,9 +656,7 @@ export default function IntegrationsPage() {
       }
     }, 1000);
   </script>
-  ${snippetMode === "production" 
-    ? `<script src="${absoluteApiRoot}/static/widget/widget.js" defer></script>`
-    : `<script type="module" src="${WIDGET_DEV_URL}/src/index.js"></script>`}
+  <script src="${absoluteApiRoot}/static/widget/widget.js" defer></script>
 </body>
 </html>`;
 
@@ -675,12 +666,10 @@ export default function IntegrationsPage() {
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   };
 
-  const currentSnippet = snippetMode === "production" ? prodSnippet : devSnippet;
-
   const handleCopy = () => {
-    navigator.clipboard.writeText(currentSnippet);
-    setCopied(snippetMode === "production" ? "prod" : "dev");
-    setTimeout(() => setCopied(null), 2000);
+    navigator.clipboard.writeText(prodSnippet);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   const activeIntegrations = [
@@ -1145,7 +1134,8 @@ export default function IntegrationsPage() {
                   />
                   <button
                     onClick={() => persistPublicApiBase(publicApiBaseInput)}
-                    className="text-sm font-medium px-4 py-2.5 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90"
+                    disabled={!publicApiBaseInput.trim()}
+                    className="text-sm font-medium px-4 py-2.5 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Save URL
                   </button>
@@ -1186,30 +1176,6 @@ export default function IntegrationsPage() {
                       <h3 className="font-semibold text-base leading-none">Embed Code</h3>
                     </div>
                   </div>
-                  <div className="flex items-center bg-background border border-border rounded-lg p-1">
-                    <button
-                      onClick={() => setSnippetMode("production")}
-                      className={`flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-md transition-all ${
-                        snippetMode === "production"
-                          ? "bg-primary text-primary-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      <Rocket className="size-3.5" />
-                      Production
-                    </button>
-                    <button
-                      onClick={() => setSnippetMode("dev")}
-                      className={`flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-md transition-all ${
-                        snippetMode === "dev"
-                          ? "bg-primary text-primary-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      <Wrench className="size-3.5" />
-                      Dev
-                    </button>
-                  </div>
                 </div>
                 <div className="p-1">
                   <div className="bg-zinc-950 rounded-xl p-5 overflow-x-auto mx-4 my-3 ring-1 ring-white/10">
@@ -1219,7 +1185,7 @@ export default function IntegrationsPage() {
                       </div>
                     ) : (
                       <pre className="text-[13px] font-mono leading-relaxed text-zinc-300">
-                        {currentSnippet}
+                        {prodSnippet}
                       </pre>
                     )}
                   </div>
@@ -1227,7 +1193,7 @@ export default function IntegrationsPage() {
                 <div className="px-6 py-4 bg-secondary/20 border-t border-border/50 flex flex-col sm:flex-row items-center justify-between gap-4">
                   <div className="flex items-center gap-2 text-xs text-muted-foreground w-full sm:w-auto">
                     <ExternalLink className="size-3.5" />
-                    {snippetMode === "production" ? "Lightweight (~8 KB gzip)": "Vite dev server"}
+                    Lightweight (~8 KB gzip)
                   </div>
                   <div className="flex items-center gap-2 w-full sm:w-auto">
                     <button

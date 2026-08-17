@@ -19,7 +19,7 @@ class DocumentChunk(Base):
     chunk_index = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
     page_number = Column(Integer, nullable=True)
-    source_type = Column(String(20), nullable=False)  # "pdf" or "website"
+    source_type = Column(String(20), nullable=False)  # pdf | docx | xlsx | csv | txt | md | website
     source_url = Column(Text, nullable=True)
     metadata = Column(JSONB, default={})
     tsvector_col = Column(TSVECTOR, nullable=True)

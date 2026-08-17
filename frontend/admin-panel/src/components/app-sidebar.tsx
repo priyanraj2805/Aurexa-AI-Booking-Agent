@@ -11,6 +11,8 @@ import {
   Plug,
   LogOut,
   LifeBuoy,
+  CreditCard,
+  Settings,
 } from "lucide-react";
 
 import {
@@ -24,6 +26,25 @@ import {
   SidebarRail,
   useSidebar,
 } from "@/components/ui/sidebar";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/lib/auth-context";
 
 const navApp = [
@@ -36,7 +57,6 @@ const navSettings = [
   { title: "Agent Personalisation", url: "/dashboard/agent", icon: Bot },
   { title: "Business Hours", url: "/dashboard/business-hours", icon: CalendarClock },
   { title: "Integration", url: "/dashboard/integrations", icon: Plug },
-  { title: "Support", url: "/dashboard/support", icon: LifeBuoy },
 ];
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
@@ -44,6 +64,11 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const pathname = usePathname();
   const router = useRouter();
   const { isMobile, setOpenMobile, openMobile } = useSidebar();
+  const [confirmLogout, setConfirmLogout] = React.useState(false);
+
+  const openLogoutDialog = () => {
+    setConfirmLogout(true);
+  };
 
   const isActive = (url: string) => {
     if (url === "/dashboard") return pathname === "/dashboard";
@@ -201,50 +226,103 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         </div>
       </SidebarContent>
 
-      {/* ── Footer — user info + logout ── */}
+      {/* ── Footer — user dropdown (settings + sign out) ── */}
       <SidebarFooter className="border-t border-border p-3 transition-[padding] duration-250 ease-in-out group-data-[collapsible=icon]:p-0 group-data-[collapsible=icon]:py-3 group-data-[collapsible=icon]:items-center">
-        {/* Fix: added w-full here to span the entire footer bar width */}
-        <div className="flex w-full items-center gap-3 overflow-hidden transition-[gap] duration-250 ease-in-out group-data-[collapsible=icon]:gap-0">
-          {/* Avatar */}
-          <div className="flex items-center justify-center size-8 rounded-full bg-primary text-primary-foreground text-xs font-semibold shrink-0">
-            {initials}
-          </div>
-
-          {/* User info */}
-          <div
+        <DropdownMenu>
+          <DropdownMenuTrigger
             className={[
-              "flex flex-col leading-none text-left min-w-0 flex-1 overflow-hidden",
-              "transition-[opacity,max-width] duration-200 ease-in-out",
-              "group-data-[collapsible=icon]:opacity-0 group-data-[collapsible=icon]:max-w-0",
-              // Max width increased to allow text to fill the parent width instead of clipping early
-              "max-w-[180px] opacity-100",
+              "flex w-full cursor-pointer items-center gap-3 overflow-hidden rounded-md p-1.5 text-left transition-colors hover:bg-accent",
+              "transition-[gap] duration-250 ease-in-out group-data-[collapsible=icon]:gap-0 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:hover:bg-transparent",
             ].join(" ")}
+            title="Account menu"
           >
-            <span className="font-semibold text-[13px] truncate">
-              {user?.full_name || "User"}
-            </span>
-            <span className="text-xs text-muted-foreground truncate">
-              {user?.org_name || "Organization"}
-            </span>
-          </div>
+            {/* Avatar */}
+            <div className="flex items-center justify-center size-8 rounded-full bg-primary text-primary-foreground text-xs font-semibold shrink-0">
+              {initials}
+            </div>
 
-          {/* Logout */}
-          <button
-            onClick={logout}
-            className={[
-              // Added ml-auto to push the logout to the hard right edge
-              "ml-auto text-muted-foreground hover:text-red-400 transition-colors shrink-0 p-1.5 rounded-md hover:bg-accent",
-              "transition-[opacity,max-width,padding] duration-200 ease-in-out overflow-hidden",
-              "group-data-[collapsible=icon]:opacity-0 group-data-[collapsible=icon]:max-w-0 group-data-[collapsible=icon]:p-0",
-            ].join(" ")}
-            title="Sign out"
-          >
-            <LogOut className="size-4" />
-          </button>
-        </div>
+            {/* User info */}
+            <div
+              className={[
+                "flex flex-col leading-none text-left min-w-0 flex-1 overflow-hidden",
+                "transition-[opacity,max-width] duration-200 ease-in-out",
+                "group-data-[collapsible=icon]:opacity-0 group-data-[collapsible=icon]:max-w-0",
+                "max-w-[180px] opacity-100",
+              ].join(" ")}
+            >
+              <span className="font-semibold text-[13px] truncate">
+                {user?.full_name || "User"}
+              </span>
+              <span className="text-xs text-muted-foreground truncate">
+                {user?.org_name || "Organization"}
+              </span>
+            </div>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" side="top" className="w-52">
+            <DropdownMenuGroup>
+              <DropdownMenuLabel className="truncate text-xs text-muted-foreground font-normal">
+                {user?.email}
+              </DropdownMenuLabel>
+            </DropdownMenuGroup>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              render={<Link href="/dashboard/settings" />}
+              className="cursor-pointer"
+            >
+              <Settings className="size-4" />
+              Settings
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              render={<Link href="/dashboard/billing" />}
+              className="cursor-pointer"
+            >
+              <CreditCard className="size-4" />
+              Billing
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              render={<Link href="/dashboard/support" />}
+              className="cursor-pointer"
+            >
+              <LifeBuoy className="size-4" />
+              Support
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={openLogoutDialog}
+              className="cursor-pointer text-destructive focus:text-destructive"
+            >
+              <LogOut className="size-4" />
+              Sign out
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </SidebarFooter>
 
       <SidebarRail />
+      <AlertDialog open={confirmLogout} onOpenChange={setConfirmLogout}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Sign out</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to sign out of your admin panel?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="flex-col gap-2 sm:flex-row">
+            <AlertDialogCancel onClick={() => setConfirmLogout(false)}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                setConfirmLogout(false);
+                logout();
+              }}
+            >
+              Sign out
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Sidebar>
   );
 }

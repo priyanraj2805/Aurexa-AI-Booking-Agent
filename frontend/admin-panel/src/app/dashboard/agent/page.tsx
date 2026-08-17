@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Loader2, AlertCircle, Save, Bot, Sparkles,
   Plus, GripVertical, Trash2, ChevronDown, ChevronUp,
-  ShieldCheck, CalendarDays,
+  ShieldCheck, CalendarDays, Eye, EyeOff, Copy, Check, KeyRound,
 } from "lucide-react";
 import { useAgentConfig, type PersonaConfig, type FieldDefinition, type FieldType } from "@/hooks/use-dashboard";
 import { api } from "@/lib/api";
@@ -316,6 +316,71 @@ export default function AgentCorePage() {
   const [fieldDefs, setFieldDefs] = useState<FieldDefinition[]>([]);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
 
+  // Track whether booking fields were modified — the backend validates
+  // field_definitions strictly, so we only send them when actually changed.
+  const fieldsDirtyRef = useRef(false);
+
+  // Org API key (full value fetched on demand — only masked preview from agent-config)
+  const [apiKeyFull, setApiKeyFull] = useState<string | null>(null);
+  const [apiKeyLoading, setApiKeyLoading] = useState(false);
+  const [apiKeyRevealed, setApiKeyRevealed] = useState(false);
+  const [apiKeyCopied, setApiKeyCopied] = useState(false);
+  const [apiKeyRegenerating, setApiKeyRegenerating] = useState(false);
+  const [apiKeyError, setApiKeyError] = useState<string | null>(null);
+
+  const toggleApiKeyVisibility = async () => {
+    if (apiKeyRevealed) {
+      setApiKeyRevealed(false);
+      return;
+    }
+    if (apiKeyFull !== null) {
+      setApiKeyRevealed(true);
+      return;
+    }
+    setApiKeyLoading(true);
+    setApiKeyError(null);
+    try {
+      const data = await api.get<{ api_key: string }>("/dashboard/api-key");
+      setApiKeyFull(data?.api_key || "");
+      setApiKeyRevealed(true);
+    } catch (err) {
+      setApiKeyError(err instanceof Error ? err.message : "Failed to load API key");
+    } finally {
+      setApiKeyLoading(false);
+    }
+  };
+
+  const copyApiKey = async () => {
+    try {
+      if (apiKeyFull === null) {
+        const data = await api.get<{ api_key: string }>("/dashboard/api-key");
+        setApiKeyFull(data?.api_key || "");
+      }
+      await navigator.clipboard.writeText(apiKeyFull || "");
+      setApiKeyCopied(true);
+      setTimeout(() => setApiKeyCopied(false), 2000);
+    } catch (err) {
+      setApiKeyError(err instanceof Error ? err.message : "Failed to copy API key");
+    }
+  };
+
+  const regenerateApiKey = async () => {
+    if (!window.confirm("Rotating the API key moves the current key to a 7-day grace period and issues a new one. Existing integrations keep working for 7 days. Continue?")) {
+      return;
+    }
+    setApiKeyRegenerating(true);
+    setApiKeyError(null);
+    try {
+      const data = await api.post<{ api_key: string }>("/dashboard/api-key/regenerate");
+      setApiKeyFull(data?.api_key || "");
+      setApiKeyRevealed(true);
+    } catch (err) {
+      setApiKeyError(err instanceof Error ? err.message : "Failed to regenerate API key");
+    } finally {
+      setApiKeyRegenerating(false);
+    }
+  };
+
   // Booking settings state
   const [requireOtp, setRequireOtp] = useState(true);
 
@@ -379,15 +444,20 @@ export default function AgentCorePage() {
     setSaveError(null);
     setSaveSuccess(false);
     try {
-      // Reindex order based on array position
-      const orderedDefs = fieldDefs.map((f, i) => ({ ...f, order: i }));
-      await api.put("/dashboard/agent-config", {
-        field_definitions: orderedDefs,
+      const payload: Record<string, unknown> = {
         ui_brand_color: brandColor,
         custom_prompts: persona,
         require_otp: requireOtp,
         business_name: businessName,
-      });
+      };
+      // Only send field definitions when the user actually modified them —
+      // the backend validates core booking fields (name, email, phone, date,
+      // time) and would reject an unrelated save otherwise.
+      if (fieldsDirtyRef.current) {
+        const orderedDefs = fieldDefs.map((f, i) => ({ ...f, order: i }));
+        payload.field_definitions = orderedDefs;
+      }
+      await api.put("/dashboard/agent-config", payload);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 2000);
       await refetch();
@@ -399,16 +469,19 @@ export default function AgentCorePage() {
   };
 
   const addField = () => {
+    fieldsDirtyRef.current = true;
     const newField = makeEmptyField(fieldDefs.length);
     setFieldDefs([...fieldDefs, newField]);
     setExpandedIdx(fieldDefs.length);
   };
 
   const updateField = (index: number, updated: FieldDefinition) => {
+    fieldsDirtyRef.current = true;
     setFieldDefs(fieldDefs.map((f, i) => (i === index ? updated : f)));
   };
 
   const deleteField = (index: number) => {
+    fieldsDirtyRef.current = true;
     setFieldDefs(fieldDefs.filter((_, i) => i !== index));
     if (expandedIdx === index) setExpandedIdx(null);
     else if (expandedIdx !== null && expandedIdx > index) setExpandedIdx(expandedIdx - 1);
@@ -416,6 +489,7 @@ export default function AgentCorePage() {
 
   const moveField = (from: number, to: number) => {
     if (to < 0 || to >= fieldDefs.length) return;
+    fieldsDirtyRef.current = true;
     const copy = [...fieldDefs];
     const [moved] = copy.splice(from, 1);
     copy.splice(to, 0, moved);
@@ -710,19 +784,60 @@ export default function AgentCorePage() {
               onChange={(e) => setBusinessName(e.target.value)}
               className="w-full bg-background border border-border text-foreground px-3.5 py-2.5 rounded-md text-[13px] font-sans focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
             />
-            <p className="text-[11px] text-muted-foreground mt-1">
-              Used for RAG retrieval filtering. Set to your company name (e.g., &apos;dotstark&apos;).
-            </p>
           </div>
 
-          <div>
+          <div className="md:col-span-3">
             <label className="text-[13px] text-muted-foreground font-medium mb-2 block">API Key</label>
-            <input
-              type="text"
-              value={config?.api_key || ""}
-              disabled
-              className="w-full bg-background border border-border text-muted-foreground px-3.5 py-2.5 rounded-md text-[13px] font-mono cursor-not-allowed"
-            />
+            <div className="flex items-center gap-2">
+              <div className="flex-1 flex items-center gap-2 bg-background border border-border rounded-md px-3.5 py-2.5 min-w-0">
+                <KeyRound className="size-3.5 text-muted-foreground shrink-0" />
+                <code className="text-[13px] font-mono text-foreground truncate">
+                  {apiKeyRevealed && apiKeyFull
+                    ? apiKeyFull
+                    : (config?.api_key || (apiKeyFull ? apiKeyFull.slice(0, 6) + "..." + apiKeyFull.slice(-4) : ""))}
+                </code>
+              </div>
+              <button
+                type="button"
+                onClick={toggleApiKeyVisibility}
+                disabled={apiKeyLoading || apiKeyRegenerating}
+                title={apiKeyRevealed ? "Hide API key" : "Reveal API key"}
+                className="inline-flex items-center justify-center size-9 rounded-md border border-border hover:bg-accent transition-colors disabled:opacity-50"
+              >
+                {apiKeyLoading ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : apiKeyRevealed ? (
+                  <EyeOff className="size-4" />
+                ) : (
+                  <Eye className="size-4" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={copyApiKey}
+                disabled={apiKeyRegenerating}
+                title="Copy API key"
+                className="inline-flex items-center justify-center size-9 rounded-md border border-border hover:bg-accent transition-colors disabled:opacity-50"
+              >
+                {apiKeyCopied ? (
+                  <Check className="size-4 text-green-500" />
+                ) : (
+                  <Copy className="size-4" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={regenerateApiKey}
+                disabled={apiKeyRegenerating || apiKeyLoading}
+                title="Regenerate API key"
+                className="inline-flex items-center justify-center size-9 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-50"
+              >
+                {apiKeyRegenerating ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
+              </button>
+            </div>
+            {apiKeyError && (
+              <p className="text-[11px] text-red-500 mt-1">{apiKeyError}</p>
+            )}
           </div>
 
           <div>

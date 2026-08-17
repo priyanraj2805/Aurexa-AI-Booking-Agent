@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
     LLM_MODEL: str = os.getenv("LLM_MODEL", "moonshotai/kimi-k2-instruct-0905")
 
+    # Fallback LLM — used when the primary provider fails (rate limit,
+    # timeout, 5xx). Empty values disable the fallback entirely.
+    LLM_FALLBACK_BASE_URL: str = os.getenv("LLM_FALLBACK_BASE_URL", "")
+    LLM_FALLBACK_API_KEY: str = os.getenv("LLM_FALLBACK_API_KEY", "")
+    LLM_FALLBACK_MODEL: str = os.getenv("LLM_FALLBACK_MODEL", "")
+
     # Firecrawl (for website crawling)
     FIRECRAWL_API_KEY: str = os.getenv("FIRECRAWL_API_KEY", "")
 

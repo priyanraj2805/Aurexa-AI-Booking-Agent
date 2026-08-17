@@ -18,11 +18,34 @@ import { toast } from "sonner";
 
 const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
-const TIMEZONES = [
-  "UTC", "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles",
-  "America/Toronto", "Europe/London", "Europe/Paris", "Europe/Berlin", "Asia/Kolkata",
-  "Asia/Dubai", "Asia/Singapore", "Asia/Tokyo", "Australia/Sydney",
+// Full IANA timezone list at runtime (all zones supported by the browser),
+// with a curated fallback for engines without Intl.supportedValuesOf.
+const FALLBACK_TIMEZONES = [
+  "UTC", "Africa/Abidjan", "Africa/Cairo", "Africa/Casablanca", "Africa/Johannesburg", "Africa/Lagos",
+  "Africa/Nairobi", "America/Argentina/Buenos_Aires", "America/Bogota", "America/Caracas",
+  "America/Chicago", "America/Denver", "America/Halifax", "America/Lima", "America/Los_Angeles",
+  "America/Mexico_City", "America/New_York", "America/Phoenix", "America/Santiago", "America/Sao_Paulo",
+  "America/Toronto", "America/Vancouver", "Asia/Almaty", "Asia/Baghdad", "Asia/Bangkok", "Asia/Beirut",
+  "Asia/Dhaka", "Asia/Dubai", "Asia/Hong_Kong", "Asia/Istanbul", "Asia/Jakarta", "Asia/Jerusalem",
+  "Asia/Karachi", "Asia/Kathmandu", "Asia/Kolkata", "Asia/Kuala_Lumpur", "Asia/Manila", "Asia/Riyadh",
+  "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Taipei", "Asia/Tashkent", "Asia/Tehran",
+  "Asia/Tokyo", "Asia/Yangon", "Australia/Adelaide", "Australia/Brisbane", "Australia/Melbourne",
+  "Australia/Perth", "Australia/Sydney", "Europe/Amsterdam", "Europe/Athens", "Europe/Berlin",
+  "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest", "Europe/Copenhagen", "Europe/Dublin",
+  "Europe/Helsinki", "Europe/Lisbon", "Europe/London", "Europe/Madrid", "Europe/Moscow", "Europe/Oslo",
+  "Europe/Paris", "Europe/Prague", "Europe/Rome", "Europe/Stockholm", "Europe/Vienna", "Europe/Warsaw",
+  "Europe/Zurich", "Pacific/Auckland", "Pacific/Fiji", "Pacific/Honolulu",
 ];
+
+const TIMEZONES: string[] = (() => {
+  try {
+    const supported = Intl.supportedValuesOf("timeZone");
+    if (Array.isArray(supported) && supported.length > 0) return [...supported].sort();
+  } catch {
+    // Intl.supportedValuesOf unavailable — use the curated list below.
+  }
+  return FALLBACK_TIMEZONES;
+})();
 
 const DURATIONS = [15, 30, 45, 60, 90, 120];
 

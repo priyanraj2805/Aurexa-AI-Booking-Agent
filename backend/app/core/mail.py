@@ -230,6 +230,77 @@ async def send_otp_email(
     )
 
 
+async def send_auth_otp_email(to_email: str, code: str, purpose: str):
+    """Sends a verification OTP for admin-panel registration or password reset.
+
+    Unlike `send_otp_email`, this does not require an org (the account may
+    not exist yet during registration), so it bypasses the delivery-log
+    pipeline and sends directly via SMTP in a worker thread.
+    """
+    if purpose == "register":
+        headline = "Verify Your Email"
+        subtitle = "Enter this code to finish creating your account"
+        subject = f"{code} - Verify your email"
+    elif purpose == "password_reset":
+        headline = "Reset Your Password"
+        subtitle = "Enter this code to set a new password"
+        subject = f"{code} - Password Reset Code"
+    else:
+        headline = "Sign-In Verification"
+        subtitle = "Enter this code to confirm it's really you"
+        subject = f"{code} - Your Sign-In Code"
+
+    body = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f8fafc;">
+    <div style="max-width: 420px; margin: 40px auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,0.08);">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #ff6b00 0%, #e55f00 100%); padding: 40px 32px; text-align: center;">
+            <div style="width: 64px; height: 64px; background: rgba(255,255,255,0.2); border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 16px;">
+                <span style="font-size: 32px;">&#128272;</span>
+            </div>
+            <h1 style="color: #ffffff; margin: 0; font-size: 24px; font-weight: 700; letter-spacing: -0.5px;">{headline}</h1>
+            <p style="color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px;">{subtitle}</p>
+        </div>
+
+        <!-- Code Box -->
+        <div style="padding: 40px 32px; text-align: center;">
+            <div style="background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); border: 2px dashed #e2e8f0; border-radius: 16px; padding: 28px 40px; margin-bottom: 24px; display: inline-block;">
+                <span style="font-size: 42px; font-weight: 800; letter-spacing: 12px; color: #1e293b; font-family: 'SF Mono', 'Fira Code', Monaco, monospace; background: linear-gradient(135deg, #ff6b00 0%, #e55f00 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">{code}</span>
+            </div>
+
+            <div style="background: #fef3c7; border-radius: 10px; padding: 12px 16px; margin-bottom: 20px;">
+                <p style="margin: 0; color: #92400e; font-size: 13px;">
+                    <span style="margin-right: 6px;">&#9203;</span>
+                    <strong>This code expires in 15 minutes</strong>
+                </p>
+            </div>
+
+            <p style="color: #64748b; font-size: 13px; line-height: 1.6; margin: 0;">
+                If you didn't request this code, please ignore this email. This is an automated message from the DotStark AI Booking System.
+            </p>
+        </div>
+
+        <!-- Footer -->
+        <div style="background: #f8fafc; padding: 20px 32px; border-top: 1px solid #e2e8f0;">
+            <p style="color: #94a3b8; font-size: 11px; margin: 0; text-align: center;">
+                &#169; 2026 DotStark AI Booking System
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+    """
+    await anyio.to_thread.run_sync(
+        _send_email_sync, to_email, subject, body, abandon_on_cancel=True
+    )
+
+
 async def send_confirmation_emails(
     customer_email: str,
     admin_email: str,

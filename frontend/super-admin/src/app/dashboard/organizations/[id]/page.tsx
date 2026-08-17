@@ -776,7 +776,7 @@ export default function OrgDetailPage({
             onClick={() => switchTab(t)}
             className={`rounded-t-md px-4 py-2 text-sm font-medium ${
               tab === t
-                ? "border border-b-0 border-slate-800 bg-slate-900 text-white"
+                ? "border border-b-0 border-slate-800 bg-slate-900 text-slate-100"
                 : "text-slate-400 hover:text-slate-200"
             }`}
           >

@@ -27,6 +27,7 @@ type TopOrg = {
   is_active: boolean;
   booking_count: number;
   conversation_count: number;
+  trend: number[];
 };
 
 type AuditRow = {
@@ -52,7 +53,7 @@ function KpiCard({
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
       <p className="text-xs uppercase tracking-wide text-slate-400">{label}</p>
-      <p className={`mt-1 text-2xl font-semibold ${accent ?? "text-white"}`}>
+      <p className={`mt-1 text-2xl font-semibold ${accent ?? "text-slate-100"}`}>
         {value}
       </p>
       {sub && <p className="mt-0.5 text-xs text-slate-500">{sub}</p>}
@@ -63,9 +64,17 @@ function KpiCard({
 const RANGES = [7, 14, 30];
 
 const PIE_COLORS = {
-  bookings: "#6366f1",
-  conversations: "#475569",
+  bookings: "var(--i500)",
+  conversations: "var(--s600)",
 };
+
+const LINE_COLORS = [
+  "var(--i500)",
+  "var(--e300)",
+  "var(--sk300)",
+  "var(--a300)",
+  "var(--p300)",
+];
 
 export default function DashboardPage() {
   const [stats, setStats] = useState<Stats | null>(null);
@@ -231,7 +240,7 @@ export default function DashboardPage() {
                     x="80"
                     y="82"
                     textAnchor="middle"
-                    fill="#fff"
+                    fill="var(--s100)"
                     style={{ fontSize: 24, fontWeight: 700 }}
                   >
                     {activityTotal}
@@ -240,7 +249,7 @@ export default function DashboardPage() {
                     x="80"
                     y="100"
                     textAnchor="middle"
-                    fill="#94a3b8"
+                    fill="var(--s400)"
                     style={{ fontSize: 11 }}
                   >
                     total

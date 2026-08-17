@@ -78,8 +78,12 @@ export default function SettingsPage() {
   }
 
   const disabled = !canManage;
-  const toggle =
-    "relative h-6 w-11 rounded-full transition-colors disabled:opacity-40";
+  const toggle = (on: boolean) =>
+    `relative h-6 w-11 rounded-full transition-colors disabled:opacity-40 ${
+      on ? "bg-indigo-600" : "bg-slate-700"
+    }`;
+  const trackStyle = (on: boolean) =>
+    on ? { backgroundColor: "var(--i600)" } : { backgroundColor: "var(--s700)" };
 
   return (
     <div className="max-w-2xl space-y-6">
@@ -102,7 +106,8 @@ export default function SettingsPage() {
           <button
             onClick={() => update({ mfa_enforced: !settings.mfa_enforced })}
             disabled={disabled}
-            className={toggle}
+            className={toggle(settings.mfa_enforced)}
+            style={trackStyle(settings.mfa_enforced)}
             aria-label="Toggle MFA enforcement"
           >
             <span
@@ -148,7 +153,8 @@ export default function SettingsPage() {
                   updatePolicy({ [key]: !settings.password_policy[key] })
                 }
                 disabled={disabled}
-                className={toggle}
+                className={toggle(settings.password_policy[key])}
+                style={trackStyle(settings.password_policy[key])}
                 aria-label={`Toggle ${label}`}
               >
                 <span
@@ -176,7 +182,8 @@ export default function SettingsPage() {
               updateAllowlist({ enabled: !settings.ip_allowlist.enabled })
             }
             disabled={disabled}
-            className={toggle}
+            className={toggle(settings.ip_allowlist.enabled)}
+            style={trackStyle(settings.ip_allowlist.enabled)}
             aria-label="Toggle IP allowlist"
           >
             <span
