@@ -215,16 +215,28 @@ async def verify_otp(db: AsyncSession, session_id: str, code: str) -> bool:
         session_res = await db.execute(select(ChatSession).where(ChatSession.id == sid))
         session = session_res.scalars().first()
         if session:
-            session.otp_verified = True
-            session.current_intent = "CONFIRM_BOOKING"
             session_state = dict(session.state_data) if isinstance(session.state_data, dict) else {}
-            session_state.pop(_OTP_POLICY_KEY, None)
-            internal = session_state.get("_internal")
-            if not isinstance(internal, dict):
-                internal = {}
-            internal["otp_verified_key"] = _build_otp_context_key(session)
-            session_state["_internal"] = internal
-            session.state_data = session_state
+            cancel_flow = session_state.get("_cancel_flow")
+            is_cancel_flow = (
+                isinstance(cancel_flow, dict) and cancel_flow.get("stage") == "otp"
+            )
+            if is_cancel_flow:
+                # Purpose-scoped cancel verification: flag the cancel flow only,
+                # never mark the session as booking-confirmed.
+                cancel_flow["otp_verified"] = True
+                session_state["_cancel_flow"] = cancel_flow
+                session_state.pop(_OTP_POLICY_KEY, None)
+                session.state_data = session_state
+            else:
+                session.otp_verified = True
+                session.current_intent = "CONFIRM_BOOKING"
+                session_state.pop(_OTP_POLICY_KEY, None)
+                internal = session_state.get("_internal")
+                if not isinstance(internal, dict):
+                    internal = {}
+                internal["otp_verified_key"] = _build_otp_context_key(session)
+                session_state["_internal"] = internal
+                session.state_data = session_state
              
         # Clean up used OTP
         await db.delete(otp_record)

@@ -132,7 +132,10 @@ async def dispatch_message(
     )
 
     action_payload = result.model_dump()
-    action_payload["message"] = extract_user_visible_text(action_payload.get("message", ""))[0]
+    raw_message = action_payload.get("message", "") or ""
+    action_payload["message"] = (
+        extract_user_visible_text(raw_message)[0] if raw_message.strip() else ""
+    )
 
     return ChatMessageResponse(
         session_id=body.session_id,

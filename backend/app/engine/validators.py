@@ -135,16 +135,18 @@ class DataValidator:
         if HAS_PHONE_NUMBERS:
             try:
                 parsed = phonenumbers.parse(raw_input, normalized_country or None)
-                if not phonenumbers.is_valid_number(parsed):
-                    return None, "Please provide a valid phone number.", metadata
-                canonical = phonenumbers.format_number(
-                    parsed, phonenumbers.PhoneNumberFormat.E164
-                )
-                region = phonenumbers.region_code_for_number(parsed) or normalized_country
-                metadata["country_code"] = region or normalized_country
-                return canonical, None, metadata
+                if phonenumbers.is_valid_number(parsed):
+                    canonical = phonenumbers.format_number(
+                        parsed, phonenumbers.PhoneNumberFormat.E164
+                    )
+                    region = phonenumbers.region_code_for_number(parsed) or normalized_country
+                    metadata["country_code"] = region or normalized_country
+                    return canonical, None, metadata
             except NumberParseException:
                 pass
+            # Not strictly valid per the national numbering plan (e.g. test
+            # numbers like "+91 456781230"). Fall through to the lenient
+            # digit-length check below instead of hard-rejecting the input.
 
         digits = re.sub(r"\D", "", value)
         if len(digits) < 10:

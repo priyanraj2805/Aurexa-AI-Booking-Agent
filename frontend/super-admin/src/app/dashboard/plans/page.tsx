@@ -5,6 +5,9 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useToast } from "@/components/toast";
 import { Modal, ConfirmDialog } from "@/components/modal";
+import { Pagination } from "@/components/pagination";
+import { SearchInput, SortableTh } from "@/components/filter-bar";
+import { OrgCombobox } from "@/components/org-combobox";
 
 type PlanRow = {
   id: string;
@@ -17,12 +20,6 @@ type PlanRow = {
   limits: Record<string, number | null>;
   created_at: string | null;
   updated_at: string | null;
-};
-
-type OrgRow = {
-  id: string;
-  name: string;
-  business_name: string | null;
 };
 
 const LIMIT_FIELDS: { key: string; label: string; suffix: string }[] = [
@@ -42,14 +39,33 @@ const fmtMoney = (cents: number) =>
 const fmtLimit = (v: number | null | undefined) =>
   v === null || v === undefined ? "Unlimited" : v.toLocaleString();
 
+const SORT_DEFAULTS: Record<string, "asc" | "desc"> = {
+  monthly_price_cents: "asc",
+  created_at: "desc",
+  updated_at: "desc",
+  code: "asc",
+  name: "asc",
+};
+
 export default function PlansPage() {
   const { can } = useAuth();
   const { toast } = useToast();
 
   const [plans, setPlans] = useState<PlanRow[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [showArchived, setShowArchived] = useState(false);
+  const [search, setSearch] = useState("");
+  const [sortBy, setSortBy] = useState("monthly_price_cents");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
+
+  const handleSort = (column: string, order: "asc" | "desc") => {
+    setSortBy(column);
+    setSortOrder(order);
+    setPage(1);
+  };
 
   const [editing, setEditing] = useState<PlanRow | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -69,23 +85,35 @@ export default function PlansPage() {
   const [deleting, setDeleting] = useState<PlanRow | null>(null);
   const [deletingBusy, setDeletingBusy] = useState(false);
 
+  const [unarchiving, setUnarchiving] = useState<PlanRow | null>(null);
+  const [unarchivingBusy, setUnarchivingBusy] = useState(false);
+
   const [assigning, setAssigning] = useState<PlanRow | null>(null);
-  const [assignForm, setAssignForm] = useState({ org_id: "", note: "" });
-  const [orgOptions, setOrgOptions] = useState<OrgRow[]>([]);
-  const [orgSearch, setOrgSearch] = useState("");
+  const [assignForm, setAssignForm] = useState({ org_ids: [] as string[], note: "" });
   const [assigningBusy, setAssigningBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setPlans((await api.get<{ items: PlanRow[] }>("/plans?include_inactive=true")).items);
+      const q = new URLSearchParams();
+      q.set("include_inactive", "true");
+      if (search) q.set("search", search);
+      q.set("sort_by", sortBy);
+      q.set("sort_order", sortOrder);
+      q.set("page", String(page));
+      q.set("page_size", "10");
+      const res = await api.get<{ items: PlanRow[]; total: number }>(
+        `/plans?${q.toString()}`
+      );
+      setPlans(res.items);
+      setTotal(res.total);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load plans");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [search, sortBy, sortOrder, page]);
 
   useEffect(() => {
     void load();
@@ -211,33 +239,38 @@ export default function PlansPage() {
     }
   };
 
-  const openAssign = (p: PlanRow) => {
-    setAssigning(p);
-    setAssignForm({ org_id: "", note: "" });
-    setOrgSearch("");
-    setOrgOptions([]);
-  };
-
-  const searchOrgs = async () => {
+  const unarchivePlan = async () => {
+    if (!unarchiving) return;
+    setUnarchivingBusy(true);
     try {
-      const res = await api.get<{ items: OrgRow[] }>(
-        `/tenants/orgs?search=${encodeURIComponent(orgSearch)}`
-      );
-      setOrgOptions(res.items);
+      await api.patch(`/plans/${unarchiving.id}`, { is_active: true });
+      toast("success", `${unarchiving.name} is now active`);
+      setUnarchiving(null);
+      void load();
     } catch (e) {
-      toast("error", e instanceof Error ? e.message : "Organization search failed");
+      toast("error", e instanceof Error ? e.message : "Unarchive failed");
+    } finally {
+      setUnarchivingBusy(false);
     }
   };
 
+  const openAssign = (p: PlanRow) => {
+    setAssigning(p);
+    setAssignForm({ org_ids: [], note: "" });
+  };
+
   const doAssign = async () => {
-    if (!assigning || !assignForm.org_id) return;
+    if (!assigning || assignForm.org_ids.length === 0) return;
     setAssigningBusy(true);
     try {
       await api.post(`/plans/${assigning.id}/assign`, {
-        org_id: assignForm.org_id,
+        org_ids: assignForm.org_ids,
         note: assignForm.note || null,
       });
-      toast("success", `${assigning.name} assigned`);
+      toast(
+        "success",
+        `${assigning.name} assigned to ${assignForm.org_ids.length} organization(s)`
+      );
       setAssigning(null);
     } catch (e) {
       toast("error", e instanceof Error ? e.message : "Assign failed");
@@ -247,6 +280,8 @@ export default function PlansPage() {
   };
 
   const visible = plans?.filter((p) => showArchived || p.is_active) ?? [];
+  const activeCount = plans?.filter((p) => p.is_active).length ?? 0;
+  const archivedCount = plans?.filter((p) => !p.is_active).length ?? 0;
 
   return (
     <div>
@@ -267,7 +302,16 @@ export default function PlansPage() {
         )}
       </div>
 
-      <div className="mt-4 flex items-center gap-3">
+      <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+        <SearchInput
+          value={search}
+          onChange={(v) => {
+            setSearch(v);
+            setPage(1);
+          }}
+          placeholder="Search name, code, description…"
+          className="w-64"
+        />
         <label className="flex items-center gap-2 text-sm text-slate-300">
           <input
             type="checkbox"
@@ -277,8 +321,14 @@ export default function PlansPage() {
           />
           Show archived
         </label>
-        <span className="text-sm text-slate-400">{visible.length} plans</span>
       </div>
+
+      {!loading && plans && (
+        <div className="mt-3 flex gap-4 text-sm">
+          <span className="text-green-400 font-medium">{activeCount} active</span>
+          <span className="text-slate-500">{archivedCount} archived</span>
+        </div>
+      )}
 
       {error && (
         <p className="mt-4 text-sm text-red-400" role="alert">
@@ -290,8 +340,24 @@ export default function PlansPage() {
         <table className="w-full text-left text-sm">
           <thead className="border-b border-slate-800 bg-slate-900 text-xs uppercase tracking-wide text-slate-400">
             <tr>
-              <th className="px-4 py-3">Plan</th>
-              <th className="px-4 py-3">Price</th>
+              <SortableTh
+                column="name"
+                sortBy={sortBy}
+                sortOrder={sortOrder}
+                onSort={handleSort}
+                defaultOrder={SORT_DEFAULTS.name}
+              >
+                Plan
+              </SortableTh>
+              <SortableTh
+                column="monthly_price_cents"
+                sortBy={sortBy}
+                sortOrder={sortOrder}
+                onSort={handleSort}
+                defaultOrder={SORT_DEFAULTS.monthly_price_cents}
+              >
+                Price
+              </SortableTh>
               <th className="px-4 py-3">Limits</th>
               <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3">Actions</th>
@@ -365,12 +431,20 @@ export default function PlansPage() {
                             </button>
                           )}
                           {!p.is_active && (
-                            <button
-                              onClick={() => setDeleting(p)}
-                              className="rounded border border-slate-700 px-2 py-1 text-xs text-red-400 hover:bg-red-950"
-                            >
-                              Delete
-                            </button>
+                            <>
+                              <button
+                                onClick={() => setUnarchiving(p)}
+                                className="rounded border border-slate-700 px-2 py-1 text-xs text-green-400 hover:bg-green-950"
+                              >
+                                Unarchive
+                              </button>
+                              <button
+                                onClick={() => setDeleting(p)}
+                                className="rounded border border-slate-700 px-2 py-1 text-xs text-red-400 hover:bg-red-950"
+                              >
+                                Delete
+                              </button>
+                            </>
                           )}
                         </>
                       )}
@@ -397,10 +471,16 @@ export default function PlansPage() {
         </table>
       </div>
 
+      {plans && (
+        <Pagination page={page} pageSize={10} total={total} onPageChange={setPage} />
+      )}
+
       {createOpen && (
         <Modal
           title={editing ? `Edit ${editing.name}` : "New plan"}
           onClose={() => setCreateOpen(false)}
+          confirmOnClose={!!(form.code || form.name || form.description || form.price_dollars || Object.values(form.limits).some(v => v))}
+          confirmMessage="You have unsaved changes in this plan. Discard them?"
         >
           <div className="space-y-3 text-sm">
             {!editing && (
@@ -567,53 +647,52 @@ export default function PlansPage() {
         />
       )}
 
+      {unarchiving && (
+        <ConfirmDialog
+          title="Unarchive plan"
+          message={
+            <span>
+              Unarchive <strong>{unarchiving.name}</strong>? The plan will become
+              active again and can be assigned to organizations.
+            </span>
+          }
+          confirmLabel="Unarchive"
+          busy={unarchivingBusy}
+          onConfirm={unarchivePlan}
+          onCancel={() => setUnarchiving(null)}
+        />
+      )}
+
       {assigning && (
-        <Modal title={`Assign ${assigning.name}`} onClose={() => setAssigning(null)}>
+        <Modal title={`Assign ${assigning.name}`} onClose={() => setAssigning(null)}
+          confirmOnClose={assignForm.org_ids.length > 0 || !!assignForm.note}
+          confirmMessage="You have unsaved assignment changes. Discard them?"
+        >
           <div className="space-y-3 text-sm">
             <div>
               <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
-                Search organization
+                Search organizations (select one or more)
               </label>
-              <div className="flex gap-2">
-                <input
-                  value={orgSearch}
-                  onChange={(e) => setOrgSearch(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && void searchOrgs()}
-                  placeholder="Acme Corp…"
-                  className="flex-1 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 outline-none focus:border-indigo-500"
-                />
-                <button
-                  onClick={searchOrgs}
-                  className="rounded-md border border-slate-700 px-3 py-2 text-slate-300 hover:bg-slate-800"
-                >
-                  Search
-                </button>
-              </div>
+              <OrgCombobox
+                multiple
+                value={assignForm.org_ids}
+                onSelect={(o) =>
+                  setAssignForm({
+                    ...assignForm,
+                    org_ids: assignForm.org_ids.includes(o.id)
+                      ? assignForm.org_ids
+                      : [...assignForm.org_ids, o.id],
+                  })
+                }
+                onRemove={(id) =>
+                  setAssignForm({
+                    ...assignForm,
+                    org_ids: assignForm.org_ids.filter((x) => x !== id),
+                  })
+                }
+                placeholder="Type to search — e.g. Acme…"
+              />
             </div>
-            {orgOptions.length > 0 && (
-              <div className="max-h-48 space-y-1 overflow-y-auto">
-                {orgOptions.map((o) => (
-                  <button
-                    key={o.id}
-                    onClick={() =>
-                      setAssignForm({ ...assignForm, org_id: o.id, note: o.name })
-                    }
-                    className={`block w-full rounded-md border px-3 py-2 text-left ${
-                      assignForm.org_id === o.id
-                        ? "border-indigo-500 bg-indigo-950/50"
-                        : "border-slate-800 hover:bg-slate-800"
-                    }`}
-                  >
-                    <span className="text-slate-200">{o.name}</span>
-                    {o.business_name && (
-                      <span className="block text-xs text-slate-500">
-                        {o.business_name}
-                      </span>
-                    )}
-                  </button>
-                ))}
-              </div>
-            )}
             <div>
               <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
                 Note
@@ -635,10 +714,14 @@ export default function PlansPage() {
             </button>
             <button
               onClick={doAssign}
-              disabled={assigningBusy || !assignForm.org_id}
+              disabled={assigningBusy || assignForm.org_ids.length === 0}
               className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
             >
-              {assigningBusy ? "Assigning…" : "Assign plan"}
+              {assigningBusy
+                ? "Assigning…"
+                : assignForm.org_ids.length > 1
+                  ? `Assign to ${assignForm.org_ids.length} orgs`
+                  : "Assign plan"}
             </button>
           </div>
         </Modal>

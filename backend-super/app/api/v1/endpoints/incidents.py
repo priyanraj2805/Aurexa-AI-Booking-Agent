@@ -4,7 +4,8 @@ An incident is a tracked operational event (severity critical/major/minor)
 that can be promoted from an alert or filed manually, then worked to
 resolution.
 """
-from typing import Optional
+from datetime import date
+from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -51,30 +52,52 @@ def _bad_status(v: str) -> bool:
 
 @router.get("")
 async def list_incidents(
-    severity: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
-    component: Optional[str] = Query(None),
+    severity: Optional[List[str]] = Query(None),
+    status: Optional[List[str]] = Query(None),
+    component: Optional[List[str]] = Query(None),
+    search: Optional[str] = Query(None, max_length=100),
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    sort_by: str = Query("created_at", pattern="^(created_at|updated_at|resolved_at)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(25, ge=1, le=100),
+    page_size: int = Query(10, ge=1, le=100),
     _: CurrentAdmin = Depends(require_permission("incidents.view")),
     db: AsyncSession = Depends(get_db),
 ):
     where = []
     params: dict = {}
     if severity:
-        if _bad_severity(severity):
-            raise HTTPException(400, "Invalid severity")
-        where.append("i.severity = :severity")
-        params["severity"] = severity
+        for s in severity:
+            if _bad_severity(s):
+                raise HTTPException(400, "Invalid severity")
+        placeholders = ", ".join(f":se{i}" for i in range(len(severity)))
+        where.append(f"i.severity IN ({placeholders})")
+        params.update({f"se{i}": s for i, s in enumerate(severity)})
     if status:
-        if _bad_status(status):
-            raise HTTPException(400, "Invalid status")
-        where.append("i.status = :status")
-        params["status"] = status
+        for s in status:
+            if _bad_status(s):
+                raise HTTPException(400, "Invalid status")
+        placeholders = ", ".join(f":st{i}" for i in range(len(status)))
+        where.append(f"i.status IN ({placeholders})")
+        params.update({f"st{i}": s for i, s in enumerate(status)})
     if component:
-        where.append("i.component = :component")
-        params["component"] = component
+        placeholders = ", ".join(f":co{i}" for i in range(len(component)))
+        where.append(f"i.component IN ({placeholders})")
+        params.update({f"co{i}": c for i, c in enumerate(component)})
+    if search:
+        where.append("(i.title ILIKE :search OR i.message ILIKE :search)")
+        params["search"] = f"%{search}%"
+    if from_date:
+        where.append("i.created_at >= :from_date")
+        params["from_date"] = from_date
+    if to_date:
+        where.append("i.created_at <= :to_date")
+        params["to_date"] = to_date
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    allowed_sort = {"created_at", "updated_at", "resolved_at"}
+    sort_col = sort_by if sort_by in allowed_sort else "created_at"
+    sort_dir = sort_order.upper() if sort_order in ("asc", "desc") else "DESC"
     offset = (page - 1) * page_size
 
     total = (
@@ -91,7 +114,7 @@ async def list_incidents(
                        i.resolved_at, i.created_at, i.updated_at
                 FROM super_admin.incidents i
                 {where_sql}
-                ORDER BY i.created_at DESC
+                ORDER BY i.{sort_col} {sort_dir}
                 LIMIT :limit OFFSET :offset
                 """
             ),

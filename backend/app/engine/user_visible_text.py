@@ -58,6 +58,33 @@ def looks_like_confirmation_claim(message: str) -> bool:
     return True
 
 
+_SAVED_CLAIM_VERB_PATTERN = re.compile(
+    r"\b(?:saved|updated|recorded|stored|noted(?: down)?|added|set|taken)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def looks_like_field_saved_claim(message: str, field_name: str) -> bool:
+    """True when the message asserts a user-supplied field value was saved.
+
+    Used to detect LLM claims that contradict a rejected/invalid value
+    (e.g. "I've saved your phone number" or "Your phone number is 1234567890"
+    while the phone failed validation).
+    """
+    text = message or ""
+    if _SAVED_CLAIM_VERB_PATTERN.search(text):
+        return True
+    field = (field_name or "").lower().strip()
+    if field and re.search(
+        rf"\byour\s+{re.escape(field)}"
+        rf"(?:\s+(?:number|address|value|details))?\s+is\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
 def sanitize_user_visible_text(raw_message: Any) -> str:
     text = str(raw_message or "")
     text = _THINK_BLOCK_RE.sub("", text)

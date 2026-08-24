@@ -5,6 +5,8 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useToast } from "@/components/toast";
 import { Modal } from "@/components/modal";
+import { Pagination } from "@/components/pagination";
+import { SearchInput, CheckboxFilter, DateFilter, SortableTh, isDateRangeValid, toApiDate, toApiDateTo } from "@/components/filter-bar";
 
 type IncidentRow = {
   id: string;
@@ -23,6 +25,27 @@ type IncidentRow = {
 const SEVERITIES = ["critical", "major", "minor"];
 const STATUSES = ["open", "investigating", "resolved"];
 
+const SEVERITY_OPTIONS = SEVERITIES.map((s) => ({ value: s, label: s }));
+const STATUS_OPTIONS = STATUSES.map((s) => ({ value: s, label: s }));
+const COMPONENT_OPTIONS = [
+  { value: "database", label: "Database" },
+  { value: "api", label: "API" },
+  { value: "queue", label: "Queue" },
+  { value: "worker", label: "Worker" },
+  { value: "scheduler", label: "Scheduler" },
+  { value: "frontend", label: "Frontend" },
+  { value: "auth", label: "Auth" },
+  { value: "billing", label: "Billing" },
+  { value: "notifications", label: "Notifications" },
+  { value: "unknown", label: "Unknown" },
+];
+
+const SORT_DEFAULTS: Record<string, "asc" | "desc"> = {
+  created_at: "desc",
+  updated_at: "desc",
+  resolved_at: "desc",
+};
+
 const fmtTime = (iso: string | null) =>
   iso ? new Date(iso).toLocaleString() : "—";
 
@@ -32,12 +55,25 @@ export default function IncidentsPage() {
 
   const [items, setItems] = useState<IncidentRow[]>([]);
   const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const [status, setStatus] = useState<string>("");
-  const [severity, setSeverity] = useState<string>("");
   const [busy, setBusy] = useState<string | null>(null);
+
+  const [statusFilters, setStatusFilters] = useState<string[]>([]);
+  const [severityFilters, setSeverityFilters] = useState<string[]>([]);
+  const [componentFilters, setComponentFilters] = useState<string[]>([]);
+  const [search, setSearch] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [sortBy, setSortBy] = useState("created_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+
+  const handleSort = (column: string, order: "asc" | "desc") => {
+    setSortBy(column);
+    setSortOrder(order);
+    setPage(1);
+  };
 
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState({
@@ -51,11 +87,24 @@ export default function IncidentsPage() {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    if (!isDateRangeValid(fromDate, toDate)) {
+      setItems([]);
+      setTotal(0);
+      setLoading(false);
+      return;
+    }
     try {
       const q = new URLSearchParams();
-      if (status) q.set("status", status);
-      if (severity) q.set("severity", severity);
-      q.set("page_size", "100");
+      for (const s of statusFilters) q.append("status", s);
+      for (const s of severityFilters) q.append("severity", s);
+      for (const c of componentFilters) q.append("component", c);
+      if (search) q.append("search", search);
+      if (fromDate) q.append("from_date", toApiDate(fromDate) || fromDate);
+      if (toDate) q.append("to_date", toApiDateTo(toDate) || toDate);
+      q.append("sort_by", sortBy);
+      q.append("sort_order", sortOrder);
+      q.append("page", String(page));
+      q.append("page_size", "10");
       const res = await api.get<{ items: IncidentRow[]; total: number }>(
         `/incidents?${q.toString()}`
       );
@@ -66,7 +115,7 @@ export default function IncidentsPage() {
     } finally {
       setLoading(false);
     }
-  }, [status, severity]);
+  }, [statusFilters, severityFilters, componentFilters, search, fromDate, toDate, sortBy, sortOrder, page]);
 
   useEffect(() => {
     void load();
@@ -128,6 +177,9 @@ export default function IncidentsPage() {
         ? "bg-blue-900/60 text-blue-300"
         : "bg-red-900/60 text-red-300";
 
+  const fmtTime = (iso: string | null) =>
+    iso ? new Date(iso).toLocaleString() : "—";
+
   return (
     <div>
       <div className="flex items-center justify-between">
@@ -148,44 +200,69 @@ export default function IncidentsPage() {
         )}
       </div>
 
-      <div className="mt-4 flex flex-wrap items-center gap-3 text-sm">
-        <label className="flex items-center gap-2 text-slate-300">
-          <span className="text-slate-400">Status</span>
-          <select
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-            className="rounded-md border border-slate-700 bg-slate-950 px-3 py-1.5 outline-none focus:border-indigo-500"
-          >
-            <option value="">all</option>
-            {STATUSES.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex items-center gap-2 text-slate-300">
-          <span className="text-slate-400">Severity</span>
-          <select
-            value={severity}
-            onChange={(e) => setSeverity(e.target.value)}
-            className="rounded-md border border-slate-700 bg-slate-950 px-3 py-1.5 outline-none focus:border-indigo-500"
-          >
-            <option value="">all</option>
-            {SEVERITIES.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          onClick={() => void load()}
-          className="rounded-md border border-slate-700 px-3 py-1.5 text-slate-300 hover:bg-slate-800"
-        >
-          Refresh
-        </button>
-        <span className="text-slate-500">{total} incidents</span>
+      <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+        <SearchInput
+          value={search}
+          onChange={(v) => {
+            setSearch(v);
+            setPage(1);
+          }}
+          placeholder="Search title, message…"
+          className="w-64"
+        />
+        <CheckboxFilter
+          label="Status"
+          options={[
+            { value: "open", label: "Open" },
+            { value: "investigating", label: "Investigating" },
+            { value: "resolved", label: "Resolved" },
+          ]}
+          selected={statusFilters}
+          onChange={(v) => {
+            setStatusFilters(v);
+            setPage(1);
+          }}
+        />
+        <CheckboxFilter
+          label="Severity"
+          options={[
+            { value: "critical", label: "Critical" },
+            { value: "major", label: "Major" },
+            { value: "minor", label: "Minor" },
+          ]}
+          selected={severityFilters}
+          onChange={(v) => {
+            setSeverityFilters(v);
+            setPage(1);
+          }}
+        />
+        <CheckboxFilter
+          label="Component"
+          options={[
+            { value: "database", label: "Database" },
+            { value: "api", label: "API" },
+            { value: "queue", label: "Queue" },
+            { value: "worker", label: "Worker" },
+            { value: "scheduler", label: "Scheduler" },
+            { value: "frontend", label: "Frontend" },
+            { value: "auth", label: "Auth" },
+            { value: "billing", label: "Billing" },
+            { value: "notifications", label: "Notifications" },
+            { value: "unknown", label: "Unknown" },
+          ]}
+          selected={componentFilters}
+          onChange={(v) => {
+            setComponentFilters(v);
+            setPage(1);
+          }}
+        />
+        <DateFilter
+          label="Created"
+          fromDate={fromDate}
+          toDate={toDate}
+          onFromChange={setFromDate}
+          onToChange={setToDate}
+        />
       </div>
 
       {error && (
@@ -202,8 +279,22 @@ export default function IncidentsPage() {
               <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3">Title</th>
               <th className="px-4 py-3">Component</th>
-              <th className="px-4 py-3">Created</th>
-              <th className="px-4 py-3">Resolved</th>
+              <SortableTh
+                column="created_at"
+                sortBy={sortBy}
+                sortOrder={sortOrder}
+                onSort={handleSort}
+              >
+                Created
+              </SortableTh>
+              <SortableTh
+                column="resolved_at"
+                sortBy={sortBy}
+                sortOrder={sortOrder}
+                onSort={handleSort}
+              >
+                Resolved
+              </SortableTh>
               <th className="px-4 py-3">Actions</th>
             </tr>
           </thead>
@@ -220,14 +311,26 @@ export default function IncidentsPage() {
                 <tr key={i.id} className={i.status === "resolved" ? "opacity-60" : ""}>
                   <td className="px-4 py-3">
                     <span
-                      className={`rounded-full px-2 py-0.5 text-xs font-semibold ${severityStyle(i.severity)}`}
+                      className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                        i.severity === "critical"
+                          ? "bg-red-900/60 text-red-300"
+                          : i.severity === "major"
+                            ? "bg-amber-900/60 text-amber-300"
+                            : "bg-slate-800 text-slate-300"
+                      }`}
                     >
                       {i.severity.toUpperCase()}
                     </span>
                   </td>
                   <td className="px-4 py-3">
                     <span
-                      className={`rounded-full px-2 py-0.5 text-xs font-semibold ${statusStyle(i.status)}`}
+                      className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                        i.status === "resolved"
+                          ? "bg-green-900/60 text-green-300"
+                          : i.status === "investigating"
+                            ? "bg-blue-900/60 text-blue-300"
+                            : "bg-red-900/60 text-red-300"
+                      }`}
                     >
                       {i.status.toUpperCase()}
                     </span>
@@ -291,8 +394,13 @@ export default function IncidentsPage() {
         </table>
       </div>
 
+      <Pagination page={page} pageSize={10} total={total} onPageChange={setPage} />
+
       {createOpen && (
-        <Modal title="New incident" onClose={() => setCreateOpen(false)}>
+        <Modal title="New incident" onClose={() => setCreateOpen(false)}
+          confirmOnClose={!!(form.title || form.message || form.component)}
+          confirmMessage="You have unsaved incident details. Discard them?"
+        >
           <div className="space-y-3 text-sm">
             <div>
               <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
@@ -315,7 +423,7 @@ export default function IncidentsPage() {
                   onChange={(e) => setForm({ ...form, severity: e.target.value })}
                   className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 outline-none focus:border-indigo-500"
                 >
-                  {SEVERITIES.map((s) => (
+                  {["critical", "major", "minor"].map((s) => (
                     <option key={s} value={s}>
                       {s}
                     </option>

@@ -4,7 +4,6 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { AppSidebar } from "@/components/app-sidebar";
-import { ThemeToggle } from "@/components/theme-toggle";
 import { Toaster } from "sonner";
 import { ImpersonationBanner } from "@/components/impersonation-banner";
 import { AnnouncementBell } from "@/components/announcement-bell";
@@ -27,13 +26,16 @@ function getPersistedSidebarState(): boolean {
 function getBreadcrumb(pathname: string) {
   if (pathname === "/dashboard") return { category: "App", page: "Dashboard" };
   if (pathname.includes("/conversations")) return { category: "App", page: "Inbox" };
+  if (pathname.includes("/bookings/cancelled")) return { category: "App", page: "Cancelled Bookings" };
+  if (pathname.includes("/bookings")) return { category: "App", page: "Bookings" };
+  if (pathname.includes("/audit")) return { category: "App", page: "Audit Log" };
   if (pathname.includes("/calendar")) return { category: "App", page: "Calendar" };
   if (pathname.includes("/agent")) return { category: "Settings", page: "Agent Personalisation" };
   if (pathname.includes("/business-hours")) return { category: "Settings", page: "Business Hours" };
   if (pathname.includes("/integrations")) return { category: "Settings", page: "Integration" };
   if (pathname.includes("/support")) return { category: "Settings", page: "Support" };
   if (pathname.includes("/billing")) return { category: "App", page: "Billing" };
-  if (pathname.includes("/settings")) return { category: "Settings", page: "Settings" };
+  if (pathname.includes("/settings")) return { category: "", page: "Settings" };
   return { category: "App", page: "Dashboard" };
 }
 
@@ -83,7 +85,7 @@ export default function DashboardLayout({
             <SidebarTrigger className="-ml-1 text-muted-foreground" />
             <Separator orientation="vertical" className="mr-2 h-4 hidden sm:block" />
             <span className="text-sm font-medium text-muted-foreground truncate">
-              <span className="hidden sm:inline">{breadcrumb.category} / </span>
+              <span className="hidden sm:inline">{breadcrumb.category ? `${breadcrumb.category} / ` : ""}</span>
               <span className="text-foreground">{breadcrumb.page}</span>
             </span>
           </div>
@@ -91,9 +93,8 @@ export default function DashboardLayout({
             <span className="hidden sm:inline text-[11px] font-semibold uppercase px-2 py-1 rounded bg-primary/10 text-primary">
               Agent Online
             </span>
-            <AnnouncementBell />
-            <ThemeToggle />
-          </div>
+              <AnnouncementBell />
+            </div>
         </header>
         {/* Main content — matches template: padding 40px 60px, gap 32px */}
         <main className="flex flex-1 flex-col gap-6 md:gap-8 px-4 sm:px-6 md:px-8 lg:px-[60px] py-6 md:py-10 overflow-x-hidden">

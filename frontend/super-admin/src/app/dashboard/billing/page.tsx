@@ -5,6 +5,17 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useToast } from "@/components/toast";
 import { Modal } from "@/components/modal";
+import { Pagination } from "@/components/pagination";
+import {
+  SearchInput,
+  CheckboxFilter,
+  DateFilter,
+  SortableTh,
+  isDateRangeValid,
+  toApiDate,
+  toApiDateTo,
+} from "@/components/filter-bar";
+import { OrgCombobox } from "@/components/org-combobox";
 
 type Revenue = {
   mrr_cents: number;
@@ -55,7 +66,6 @@ type InvoiceRow = {
   created_at: string | null;
 };
 
-type OrgRow = { id: string; name: string; business_name: string | null };
 type PlanRow = { id: string; code: string; name: string; is_active: boolean };
 
 type Tab = "revenue" | "subscriptions" | "invoices";
@@ -78,6 +88,35 @@ const STATUS_BADGE: Record<string, string> = {
 const badge = (status: string) =>
   STATUS_BADGE[status] ?? "bg-slate-800 text-slate-400";
 
+const SUB_STATUS_OPTIONS = [
+  { value: "active", label: "Active" },
+  { value: "trialing", label: "Trialing" },
+  { value: "past_due", label: "Past due" },
+  { value: "canceled", label: "Canceled" },
+];
+
+const INV_STATUS_OPTIONS = [
+  { value: "open", label: "Open" },
+  { value: "paid", label: "Paid" },
+  { value: "refunded", label: "Refunded" },
+  { value: "void", label: "Void" },
+  { value: "uncollectible", label: "Uncollectible" },
+];
+
+const SUB_SORT_DEFAULTS: Record<string, "asc" | "desc"> = {
+  created_at: "desc",
+  current_period_start: "desc",
+  current_period_end: "desc",
+  canceled_at: "desc",
+};
+
+const INV_SORT_DEFAULTS: Record<string, "asc" | "desc"> = {
+  created_at: "desc",
+  due_at: "asc",
+  paid_at: "desc",
+  refunded_at: "desc",
+};
+
 export default function BillingPage() {
   const { can } = useAuth();
   const { toast } = useToast();
@@ -87,12 +126,12 @@ export default function BillingPage() {
   const [revenue, setRevenue] = useState<Revenue | null>(null);
   const [subs, setSubs] = useState<SubscriptionRow[]>([]);
   const [invoices, setInvoices] = useState<InvoiceRow[]>([]);
+  const [subTotal, setSubTotal] = useState(0);
+  const [subPage, setSubPage] = useState(1);
+  const [invTotal, setInvTotal] = useState(0);
+  const [invPage, setInvPage] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-
-  // org picker (shared by subscribe/issue/refund modals)
-  const [orgOptions, setOrgOptions] = useState<OrgRow[]>([]);
-  const [orgSearch, setOrgSearch] = useState("");
 
   const [subOpen, setSubOpen] = useState(false);
   const [subForm, setSubForm] = useState({ org_id: "", plan_id: "" });
@@ -112,39 +151,101 @@ export default function BillingPage() {
   const [cancelTarget, setCancelTarget] = useState<SubscriptionRow | null>(null);
   const [cancelBusy, setCancelBusy] = useState(false);
 
+  const [subStatusFilters, setSubStatusFilters] = useState<string[]>([]);
+  const [subSearch, setSubSearch] = useState("");
+  const [subFromDate, setSubFromDate] = useState("");
+  const [subToDate, setSubToDate] = useState("");
+  const [subSortBy, setSubSortBy] = useState("created_at");
+  const [subSortOrder, setSubSortOrder] = useState<"asc" | "desc">("desc");
+
+  const handleSubSort = (column: string, order: "asc" | "desc") => {
+    setSubSortBy(column);
+    setSubSortOrder(order);
+    setSubPage(1);
+  };
+
+  const [invStatusFilters, setInvStatusFilters] = useState<string[]>([]);
+  const [invSearch, setInvSearch] = useState("");
+  const [invFromDate, setInvFromDate] = useState("");
+  const [invToDate, setInvToDate] = useState("");
+  const [invSortBy, setInvSortBy] = useState("created_at");
+  const [invSortOrder, setInvSortOrder] = useState<"asc" | "desc">("desc");
+
+  const handleInvSort = (column: string, order: "asc" | "desc") => {
+    setInvSortBy(column);
+    setInvSortOrder(order);
+    setInvPage(1);
+  };
+
   const loadAll = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
+      const subRangeOk = isDateRangeValid(subFromDate, subToDate);
+      const invRangeOk = isDateRangeValid(invFromDate, invToDate);
+      const subQ = new URLSearchParams();
+      for (const s of subStatusFilters) subQ.append("status", s);
+      if (subSearch) subQ.append("search", subSearch);
+      if (subRangeOk && subFromDate) subQ.append("from_date", toApiDate(subFromDate) || subFromDate);
+      if (subRangeOk && subToDate) subQ.append("to_date", toApiDateTo(subToDate) || subToDate);
+      subQ.append("sort_by", subSortBy);
+      subQ.append("sort_order", subSortOrder);
+      subQ.append("page", String(subPage));
+      subQ.append("page_size", "10");
+
+      const invQ = new URLSearchParams();
+      for (const s of invStatusFilters) invQ.append("status", s);
+      if (invSearch) invQ.append("search", invSearch);
+      if (invRangeOk && invFromDate) invQ.append("from_date", toApiDate(invFromDate) || invFromDate);
+      if (invRangeOk && invToDate) invQ.append("to_date", toApiDateTo(invToDate) || invToDate);
+      invQ.append("sort_by", invSortBy);
+      invQ.append("sort_order", invSortOrder);
+      invQ.append("page", String(invPage));
+      invQ.append("page_size", "10");
+
       const [rev, s, inv] = await Promise.all([
         api.get<Revenue>("/billing/reports/revenue"),
-        api.get<{ items: SubscriptionRow[] }>("/billing/subscriptions"),
-        api.get<{ items: InvoiceRow[] }>("/billing/invoices"),
+        subRangeOk
+          ? api.get<{ items: SubscriptionRow[]; total: number }>(
+              `/billing/subscriptions?${subQ.toString()}`
+            )
+          : Promise.resolve<{ items: SubscriptionRow[]; total: number }>({ items: [], total: 0 }),
+        invRangeOk
+          ? api.get<{ items: InvoiceRow[]; total: number }>(
+              `/billing/invoices?${invQ.toString()}`
+            )
+          : Promise.resolve<{ items: InvoiceRow[]; total: number }>({ items: [], total: 0 }),
       ]);
       setRevenue(rev);
       setSubs(s.items);
+      setSubTotal(s.total);
       setInvoices(inv.items);
+      setInvTotal(inv.total);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load billing data");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [
+    subPage,
+    invPage,
+    subStatusFilters,
+    subSearch,
+    subFromDate,
+    subToDate,
+    subSortBy,
+    subSortOrder,
+    invStatusFilters,
+    invSearch,
+    invFromDate,
+    invToDate,
+    invSortBy,
+    invSortOrder,
+  ]);
 
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
-
-  const searchOrgs = async (query: string) => {
-    try {
-      const res = await api.get<{ items: OrgRow[] }>(
-        `/tenants/orgs?search=${encodeURIComponent(query)}`
-      );
-      setOrgOptions(res.items);
-    } catch (e) {
-      toast("error", e instanceof Error ? e.message : "Organization search failed");
-    }
-  };
 
   const createSubscription = async () => {
     setSubBusy(true);
@@ -180,8 +281,6 @@ export default function BillingPage() {
 
   const openSubscribe = async () => {
     setSubForm({ org_id: "", plan_id: "" });
-    setOrgOptions([]);
-    setOrgSearch("");
     setSubOpen(true);
     try {
       const res = await api.get<{ items: PlanRow[] }>("/plans");
@@ -281,8 +380,6 @@ export default function BillingPage() {
             <button
               onClick={() => {
                 setIssueForm({ org_id: "", amount: "", description: "" });
-                setOrgOptions([]);
-                setOrgSearch("");
                 setIssueOpen(true);
               }}
               className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800"
@@ -414,18 +511,54 @@ export default function BillingPage() {
       )}
 
       {tab === "subscriptions" && (
-        <div className="mt-6 overflow-x-auto rounded-lg border border-slate-800">
-          <table className="w-full text-left text-sm">
-            <thead className="border-b border-slate-800 bg-slate-900 text-xs uppercase tracking-wide text-slate-400">
-              <tr>
-                <th className="px-4 py-3">Organization</th>
-                <th className="px-4 py-3">Plan</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Period</th>
-                <th className="px-4 py-3">Provider</th>
-                <th className="px-4 py-3">Actions</th>
-              </tr>
-            </thead>
+        <>
+          <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+            <SearchInput
+              value={subSearch}
+              onChange={(v) => {
+                setSubSearch(v);
+                setSubPage(1);
+              }}
+              placeholder="Search organization…"
+              className="w-64"
+            />
+            <CheckboxFilter
+              label="Status"
+              options={SUB_STATUS_OPTIONS}
+              selected={subStatusFilters}
+              onChange={(v) => {
+                setSubStatusFilters(v);
+                setSubPage(1);
+              }}
+            />
+            <DateFilter
+              label="Created"
+              fromDate={subFromDate}
+              toDate={subToDate}
+              onFromChange={setSubFromDate}
+              onToChange={setSubToDate}
+            />
+          </div>
+          <div className="mt-6 overflow-x-auto rounded-lg border border-slate-800">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-slate-800 bg-slate-900 text-xs uppercase tracking-wide text-slate-400">
+                <tr>
+                  <th className="px-4 py-3">Organization</th>
+                  <th className="px-4 py-3">Plan</th>
+                  <th className="px-4 py-3">Status</th>
+                  <SortableTh
+                    column="current_period_start"
+                    sortBy={subSortBy}
+                    sortOrder={subSortOrder}
+                    onSort={handleSubSort}
+                    defaultOrder={SUB_SORT_DEFAULTS.current_period_start}
+                  >
+                    Period
+                  </SortableTh>
+                  <th className="px-4 py-3">Provider</th>
+                  <th className="px-4 py-3">Actions</th>
+                </tr>
+              </thead>
             <tbody className="divide-y divide-slate-800 bg-slate-900/50">
               {loading && (
                 <tr>
@@ -473,22 +606,60 @@ export default function BillingPage() {
               )}
             </tbody>
           </table>
-        </div>
+          </div>
+          <Pagination page={subPage} pageSize={10} total={subTotal} onPageChange={setSubPage} />
+        </>
       )}
 
       {tab === "invoices" && (
-        <div className="mt-6 overflow-x-auto rounded-lg border border-slate-800">
-          <table className="w-full text-left text-sm">
-            <thead className="border-b border-slate-800 bg-slate-900 text-xs uppercase tracking-wide text-slate-400">
-              <tr>
-                <th className="px-4 py-3">Invoice</th>
-                <th className="px-4 py-3">Organization</th>
-                <th className="px-4 py-3">Amount</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Paid / refunded</th>
-                <th className="px-4 py-3">Actions</th>
-              </tr>
-            </thead>
+        <>
+          <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+            <SearchInput
+              value={invSearch}
+              onChange={(v) => {
+                setInvSearch(v);
+                setInvPage(1);
+              }}
+              placeholder="Search org, invoice #, description…"
+              className="w-64"
+            />
+            <CheckboxFilter
+              label="Status"
+              options={INV_STATUS_OPTIONS}
+              selected={invStatusFilters}
+              onChange={(v) => {
+                setInvStatusFilters(v);
+                setInvPage(1);
+              }}
+            />
+            <DateFilter
+              label="Created"
+              fromDate={invFromDate}
+              toDate={invToDate}
+              onFromChange={setInvFromDate}
+              onToChange={setInvToDate}
+            />
+          </div>
+          <div className="mt-6 overflow-x-auto rounded-lg border border-slate-800">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-slate-800 bg-slate-900 text-xs uppercase tracking-wide text-slate-400">
+                <tr>
+                  <th className="px-4 py-3">Invoice</th>
+                  <th className="px-4 py-3">Organization</th>
+                  <th className="px-4 py-3">Amount</th>
+                  <th className="px-4 py-3">Status</th>
+                  <SortableTh
+                    column="paid_at"
+                    sortBy={invSortBy}
+                    sortOrder={invSortOrder}
+                    onSort={handleInvSort}
+                    defaultOrder={INV_SORT_DEFAULTS.paid_at}
+                  >
+                    Paid / refunded
+                  </SortableTh>
+                  <th className="px-4 py-3">Actions</th>
+                </tr>
+              </thead>
             <tbody className="divide-y divide-slate-800 bg-slate-900/50">
               {loading && (
                 <tr>
@@ -567,49 +738,28 @@ export default function BillingPage() {
               )}
             </tbody>
           </table>
-        </div>
+          </div>
+          <Pagination page={invPage} pageSize={10} total={invTotal} onPageChange={setInvPage} />
+        </>
       )}
 
       {subOpen && (
-        <Modal title="Create subscription" onClose={() => setSubOpen(false)}>
+        <Modal title="Create subscription" onClose={() => setSubOpen(false)}
+          confirmOnClose={!!(subForm.org_id || subForm.plan_id)}
+          confirmMessage="You have unsaved subscription details. Discard them?"
+        >
           <div className="space-y-3 text-sm">
             <div>
               <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
                 Search organization
               </label>
-              <div className="flex gap-2">
-                <input
-                  value={orgSearch}
-                  onChange={(e) => setOrgSearch(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && void searchOrgs(orgSearch)}
-                  placeholder="Acme Corp…"
-                  className="flex-1 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 outline-none focus:border-indigo-500"
-                />
-                <button
-                  onClick={() => void searchOrgs(orgSearch)}
-                  className="rounded-md border border-slate-700 px-3 py-2 text-slate-300 hover:bg-slate-800"
-                >
-                  Search
-                </button>
-              </div>
+              <OrgCombobox
+                value={subForm.org_id}
+                onSelect={(o) => setSubForm({ ...subForm, org_id: o.id })}
+                onRemove={() => setSubForm({ ...subForm, org_id: "" })}
+                placeholder="Type to search — e.g. Acme…"
+              />
             </div>
-            {orgOptions.length > 0 && (
-              <div className="max-h-40 space-y-1 overflow-y-auto">
-                {orgOptions.map((o) => (
-                  <button
-                    key={o.id}
-                    onClick={() => setSubForm({ ...subForm, org_id: o.id })}
-                    className={`block w-full rounded-md border px-3 py-2 text-left ${
-                      subForm.org_id === o.id
-                        ? "border-indigo-500 bg-indigo-950/50"
-                        : "border-slate-800 hover:bg-slate-800"
-                    }`}
-                  >
-                    {o.name}
-                  </button>
-                ))}
-              </div>
-            )}
             <div>
               <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
                 Plan
@@ -648,45 +798,22 @@ export default function BillingPage() {
       )}
 
       {issueOpen && (
-        <Modal title="Issue invoice" onClose={() => setIssueOpen(false)}>
+        <Modal title="Issue invoice" onClose={() => setIssueOpen(false)}
+          confirmOnClose={!!(issueForm.org_id || issueForm.amount || issueForm.description)}
+          confirmMessage="You have unsaved invoice details. Discard them?"
+        >
           <div className="space-y-3 text-sm">
             <div>
               <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
                 Search organization
               </label>
-              <div className="flex gap-2">
-                <input
-                  value={orgSearch}
-                  onChange={(e) => setOrgSearch(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && void searchOrgs(orgSearch)}
-                  placeholder="Acme Corp…"
-                  className="flex-1 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 outline-none focus:border-indigo-500"
-                />
-                <button
-                  onClick={() => void searchOrgs(orgSearch)}
-                  className="rounded-md border border-slate-700 px-3 py-2 text-slate-300 hover:bg-slate-800"
-                >
-                  Search
-                </button>
-              </div>
+              <OrgCombobox
+                value={issueForm.org_id}
+                onSelect={(o) => setIssueForm({ ...issueForm, org_id: o.id })}
+                onRemove={() => setIssueForm({ ...issueForm, org_id: "" })}
+                placeholder="Type to search — e.g. Acme…"
+              />
             </div>
-            {orgOptions.length > 0 && (
-              <div className="max-h-40 space-y-1 overflow-y-auto">
-                {orgOptions.map((o) => (
-                  <button
-                    key={o.id}
-                    onClick={() => setIssueForm({ ...issueForm, org_id: o.id })}
-                    className={`block w-full rounded-md border px-3 py-2 text-left ${
-                      issueForm.org_id === o.id
-                        ? "border-indigo-500 bg-indigo-950/50"
-                        : "border-slate-800 hover:bg-slate-800"
-                    }`}
-                  >
-                    {o.name}
-                  </button>
-                ))}
-              </div>
-            )}
             <div>
               <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
                 Amount ($)
@@ -734,6 +861,8 @@ export default function BillingPage() {
         <Modal
           title={`Refund ${refunding.number} — ${fmtMoney(refunding.amount_cents)}`}
           onClose={() => setRefunding(null)}
+          confirmOnClose={!!(refundForm.reason || refundForm.mfa_code)}
+          confirmMessage="You have unsaved refund details. Discard them?"
         >
           <div className="space-y-3 text-sm">
             <p className="text-slate-400">

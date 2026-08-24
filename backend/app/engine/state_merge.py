@@ -47,6 +47,8 @@ def apply_state_merge(
 
     for field in reopen_fields or []:
         next_optional_skips.discard(field)
+        if field in allowed_fields:
+            merged.pop(field, None)
 
     for field in skipped_fields or []:
         if field in optional_field_set:
@@ -74,6 +76,19 @@ def apply_state_merge(
     conflict_follow_up = [name for name in conflict_map if name in allowed_fields]
     follow_up = _ordered_unique(required_missing + invalid_follow_up + conflict_follow_up)
     follow_up = [field for field in follow_up if field not in next_optional_skips]
+
+    # Reopened fields must lead the follow-up queue so the widget asks for
+    # the field being changed (not the next missing one) first. A field is
+    # only re-asked when no fresh value was captured in this same turn.
+    reopened_missing = [
+        field
+        for field in (reopen_fields or [])
+        if field in allowed_fields
+        and field not in merged
+        and field not in next_optional_skips
+    ]
+    if reopened_missing:
+        follow_up = _ordered_unique(reopened_missing + follow_up)
 
     return {
         "collected_fields": merged,

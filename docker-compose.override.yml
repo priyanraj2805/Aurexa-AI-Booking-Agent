@@ -1,0 +1,15 @@
+﻿services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    volumes:
+      - ./cloudflared/config.yml:/etc/cloudflared/config.yml:ro
+      - ./cloudflared/credentials.json:/etc/cloudflared/credentials.json:ro
+    networks:
+      - app-network
+    depends_on:
+      - admin-panel
+      - backend
+      - super-admin
+      - backend-super

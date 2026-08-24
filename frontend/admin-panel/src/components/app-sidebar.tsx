@@ -13,6 +13,10 @@ import {
   LifeBuoy,
   CreditCard,
   Settings,
+  ScrollText,
+  Sun,
+  Moon,
+  Palette,
 } from "lucide-react";
 
 import {
@@ -44,11 +48,16 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
 } from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/lib/auth-context";
+import { useTheme } from "next-themes";
 
 const navApp = [
   { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
+  { title: "Audit Log", url: "/dashboard/audit", icon: ScrollText },
   { title: "Calendar", url: "/dashboard/calendar", icon: CalendarClock },
   { title: "Inbox", url: "/dashboard/conversations", icon: Inbox },
 ];
@@ -61,6 +70,7 @@ const navSettings = [
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const { user, logout } = useAuth();
+  const { theme, setTheme } = useTheme();
   const pathname = usePathname();
   const router = useRouter();
   const { isMobile, setOpenMobile, openMobile } = useSidebar();
@@ -286,6 +296,29 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               <LifeBuoy className="size-4" />
               Support
             </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger className="cursor-pointer">
+                <Palette className="size-4" />
+                Theme
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuItem
+                  onClick={() => setTheme("light")}
+                  className={theme === "light" ? "font-medium bg-accent" : ""}
+                >
+                  <Sun className="size-3.5" />
+                  White theme
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => setTheme("dark")}
+                  className={theme === "dark" ? "font-medium bg-accent" : ""}
+                >
+                  <Moon className="size-3.5" />
+                  Dark theme
+                </DropdownMenuItem>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
             <DropdownMenuSeparator />
             <DropdownMenuItem
               onClick={openLogoutDialog}

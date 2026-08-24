@@ -17,8 +17,13 @@ from app.engine.checkpoint_manager import CheckpointManager
 from app.engine.agent.graph import booking_agent
 from app.engine.evaluator import StateEvaluator
 from app.engine import message_processor
+from app.engine import cancel_flow
 from app.engine.recipient_resolution import resolve_email_from_collected_data
-from app.engine.user_visible_text import extract_user_visible_text, looks_like_confirmation_claim
+from app.engine.user_visible_text import (
+    extract_user_visible_text,
+    looks_like_confirmation_claim,
+    looks_like_field_saved_claim,
+)
 from app.schemas.agent import FieldDefinition, parse_field_definitions, order_field_definitions
 
 logger = logging.getLogger(__name__)
@@ -221,6 +226,7 @@ def _is_non_terminal_directive(directive: str) -> bool:
         "REQUIRE_TEXTAREA",
         "REQUIRE_NUMBER_INPUT",
         "REQUIRE_OTP_MODAL",
+        "REQUIRE_CANCEL_LOOKUP",
     }
 
 
@@ -235,6 +241,31 @@ def _guard_user_visible_booking_message(
 ) -> str:
     if directive == "BOOKING_CONFIRMED_CARD":
         return assistant_message
+
+    if directive == "CANCELLED_CONFIRMATION_CARD":
+        return assistant_message
+
+    active_field = str((field_meta or {}).get("name") or "").strip()
+    invalid_error = ""
+    if active_field:
+        merge_diag = (field_meta or {}).get("merge_diagnostics")
+        if isinstance(merge_diag, dict):
+            invalid_fields = merge_diag.get("invalid_fields")
+            if isinstance(invalid_fields, dict) and active_field in invalid_fields:
+                invalid_error = str(invalid_fields.get(active_field) or "")
+        if not invalid_error:
+            validation_error = (field_meta or {}).get("validation_error")
+            if isinstance(validation_error, str):
+                invalid_error = validation_error.strip()
+    if (
+        invalid_error
+        and looks_like_field_saved_claim(assistant_message, active_field)
+    ):
+        label = str(
+            (field_meta or {}).get("label") or active_field.replace("_", " ")
+        ).lower()
+        return f"I couldn't save that {label}. {invalid_error}"
+
     if not looks_like_confirmation_claim(assistant_message):
         return assistant_message
 
@@ -283,6 +314,217 @@ def _guard_user_visible_booking_message(
 
     return "I still need to complete your booking before I can confirm it."
 
+_POST_BOOKING_ACTION_THRESHOLD = 0.70
+
+
+async def _llm_post_booking_analysis(
+    message_text: str, status: str, pending_cancel: bool, collected_data: Dict[str, Any]
+) -> Dict[str, Any]:
+    """LLM-based analysis of a message on a finished session. The model
+    classifies intent AND writes the conversational reply in one call —
+    no hardcoded phrase matching."""
+    import json as _json
+
+    prompt = f"""Analyze the user message in a booking support conversation.
+
+SESSION_STATUS: {status}
+PENDING_CANCEL_CONFIRMATION: {str(pending_cancel).lower()}
+BOOKING_DETAILS: {_json.dumps(collected_data or {}, default=str)}
+
+USER_MESSAGE: "{message_text}"
+
+Classify the user's intent. Use ONLY the message's actual meaning:
+
+- classification "ACTION_REQUEST": the user is clearly stating they want to
+  perform cancel/reschedule/rebook RIGHT NOW. Examples: "cancel my booking",
+  "I want to cancel my booking", "please cancel it", "reschedule",
+  "I need to reschedule", "book again".
+- classification "INFO_QUESTION": the user only asks HOW/WHETHER something is
+  possible, not that they want it done now. Examples: "how do I cancel?",
+  "can I change the time?".
+- classification "CONFIRM": user confirms a previously asked action.
+- classification "DENY": user declines a previously asked action.
+- classification "ACKNOWLEDGMENT": thanks/ok/sure/acknowledgment, not a request.
+- classification "NEUTRAL": anything else.
+
+action is "CANCEL", "RESCHEDULE", or "REBOOK" ONLY for ACTION_REQUEST;
+otherwise "NONE".
+
+IMPORTANT: A user who says "I want to cancel my booking" (or similar direct
+request) IS making an ACTION_REQUEST — do NOT treat it as an info question and
+do NOT reply asking whether they want to proceed.
+
+If no action will be executed, write "reply": a warm 1-2 sentence assistant
+reply that is accurate for the situation (booking confirmed/cancelled/expired),
+answers the user's question if any, and mentions they can say "cancel my
+booking" / "reschedule" when the booking is confirmed.
+
+Return ONLY valid JSON:
+{{"classification": "ACTION_REQUEST|INFO_QUESTION|CONFIRM|DENY|ACKNOWLEDGMENT|NEUTRAL",
+  "action": "CANCEL|RESCHEDULE|REBOOK|NONE",
+  "confidence": 0.0,
+  "reply": "..."}}
+"""
+    try:
+        result = await message_processor.llm_engine._call_llm(
+            prompt,
+            system_prompt="You are a strict booking-support intent classifier. Output JSON only.",
+            json_mode=True,
+        )
+        payload = _json.loads(str(result or ""))
+        classification = str(payload.get("classification", "NEUTRAL")).upper()
+        action = str(payload.get("action", "NONE")).upper()
+        confidence = float(payload.get("confidence", 0.0))
+        reply = str(payload.get("reply") or "").strip()
+        return {
+            "classification": classification,
+            "action": action,
+            "confidence": confidence,
+            "reply": reply,
+        }
+    except Exception:
+        return {
+            "classification": "NEUTRAL",
+            "action": "NONE",
+            "confidence": 0.0,
+            "reply": "",
+        }
+
+
+async def _handle_post_booking_session(
+    db: AsyncSession,
+    org: Organization,
+    org_config: OrgConfig,
+    chat_session: ChatSessionState,
+    message_text: str,
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> ActionPayload:
+    """
+    Handling for messages on finished sessions (CONFIRMED / CANCELLED /
+    EXPIRED). The LLM analyzes each message automatically (intent + reply)
+    and the result is dispatched deterministically — no hardcoded phrases,
+    and the booking flow is never re-entered.
+    """
+    status = chat_session.session_status
+
+    # LLM analysis of the user's actual message.
+    analysis = await _llm_post_booking_analysis(
+        message_text=message_text,
+        status=status,
+        pending_cancel=bool(chat_session.pending_cancel),
+        collected_data=dict(chat_session.collected_data or {}),
+    )
+    classification = str(analysis.get("classification") or "NEUTRAL").upper()
+    action = str(analysis.get("action") or "NONE").upper()
+    confidence = float(analysis.get("confidence") or 0.0)
+    reply = str(analysis.get("reply") or "").strip()
+    is_action_request = (
+        confidence >= _POST_BOOKING_ACTION_THRESHOLD
+        and action in ("CANCEL", "RESCHEDULE", "REBOOK")
+    )
+
+    # 1. Explicit cancel request on a CONFIRMED booking → OTP-protected cancel
+    #    flow (lookup → cancel-scoped OTP → execution).
+    if status == "CONFIRMED" and is_action_request and action == "CANCEL":
+        action_payload = await cancel_flow.start_cancel_flow(db, chat_session, message_text)
+        await _persist_transcript_best_effort(
+            db,
+            session_id=chat_session.session_id,
+            user_message=message_text,
+            assistant_message=action_payload.message,
+            directive=action_payload.widget_directive or "TEXT_INPUT",
+            intent="CANCEL_BOOKING",
+        )
+        return action_payload
+
+    # 2. Explicit reschedule request on a CONFIRMED booking → cancel slot +
+    #    reopen flow, keeping name/email/phone (date/time re-collected).
+    if status == "CONFIRMED" and is_action_request and action == "RESCHEDULE":
+        return await message_processor._reschedule_booking(
+            db, org, chat_session, background_tasks
+        )
+
+    # 3. Confirmation / denial of a previously asked (legacy) cancellation.
+    if status == "CONFIRMED" and chat_session.pending_cancel:
+        if classification == "CONFIRM":
+            chat_session.pending_cancel = False
+            await crud_chat.update_chat_session(
+                db, chat_session.session_id, chat_session
+            )
+            return await message_processor._cancel_confirmed_booking(
+                db, org, chat_session, background_tasks
+            )
+        if classification == "DENY":
+            chat_session.pending_cancel = False
+            await crud_chat.update_chat_session(
+                db, chat_session.session_id, chat_session
+            )
+            msg = "No worries — your booking stays as is! Let me know if you need anything else. 😊"
+            action_payload = ActionPayload(
+                message=msg, widget_directive="TEXT_INPUT", is_terminal=False
+            )
+            await _persist_transcript_best_effort(
+                db,
+                session_id=chat_session.session_id,
+                user_message=message_text,
+                assistant_message=msg,
+                directive="TEXT_INPUT",
+                intent=chat_session.current_intent,
+            )
+            return action_payload
+
+    # 4. Rebook from CANCELLED / EXPIRED → fresh booking state.
+    if status in ("CANCELLED", "EXPIRED") and action == "REBOOK" and (
+        is_action_request or classification in ("CONFIRM", "NEUTRAL")
+    ):
+        cancel_flow.reset_for_new_booking(chat_session)
+        await cancel_flow._persist_session(
+            db, chat_session, remove_keys=cancel_flow.SESSION_RESET_REMOVE_KEYS
+        )
+        try:
+            from app.engine.agent.graph import memory as _graph_memory
+            await _graph_memory.adelete_thread(chat_session.session_id)
+        except Exception as _thread_err:
+            logger.warning(
+                "graph_thread_reset_failed",
+                extra={"session_id": chat_session.session_id, "error": str(_thread_err)},
+            )
+        msg = "Hello! 👋 I'd be happy to help you book a new appointment. What's your full name?"
+        action_payload = ActionPayload(
+            message=msg, widget_directive="TEXT_INPUT", is_terminal=False
+        )
+        await _persist_transcript_best_effort(
+            db,
+            session_id=chat_session.session_id,
+            user_message=message_text,
+            assistant_message=msg,
+            directive="TEXT_INPUT",
+            intent="START_BOOKING",
+        )
+        return action_payload
+
+    # 5. Everything else → the LLM's own status-aware reply. Always TEXT_INPUT;
+    #    never a booking-collection widget.
+    if not reply:
+        reply = {
+            "CONFIRMED": "Your booking is confirmed! You can say 'cancel my booking' or 'reschedule' anytime.",
+            "CANCELLED": "Your previous booking was cancelled. Just say 'I want to book' to start a new one!",
+            "EXPIRED": "This session expired. Say 'I want to book' to start a new booking!",
+        }.get(status, "Is there anything else I can help you with?")
+    action_payload = ActionPayload(
+        message=reply, widget_directive="TEXT_INPUT", is_terminal=False
+    )
+    await _persist_transcript_best_effort(
+        db,
+        session_id=chat_session.session_id,
+        user_message=message_text,
+        assistant_message=reply,
+        directive="TEXT_INPUT",
+        intent=chat_session.current_intent,
+    )
+    return action_payload
+
+
 async def process_message_with_graph(
     db: AsyncSession,
     org: Organization,
@@ -299,11 +541,30 @@ async def process_message_with_graph(
     session_id = chat_session.session_id
     existing_summary, existing_window = _load_runtime_context(chat_session)
 
+    # Cancellation gate: deterministic pre-graph handling while a cancel flow is
+    # active (lookup → OTP → execute). Runs before the resend fast-path below so
+    # cancel-context OTP resends never leak into the booking flow.
+    cancel_action = await cancel_flow.handle_active_cancel_flow(
+        db, org, org_config, chat_session, message_text, background_tasks
+    )
+    if cancel_action is not None:
+        return cancel_action
+
     # Fast-path: explicit OTP resend while awaiting verification.
     # The LLM is unreliable at routing a bare "resend", so handle it directly.
     if _is_resend_request(message_text) and _is_awaiting_otp(chat_session):
         return await _handle_graph_otp_resend(
             db, org, chat_session, message_text, background_tasks
+        )
+
+    # Post-booking gate: a finished session (CONFIRMED / CANCELLED / EXPIRED)
+    # must NEVER re-enter the booking flow. The graph has no status awareness
+    # and would happily re-collect fields (e.g. "sure" after a confirmed
+    # booking surfaced a date picker + no-slot fallback). Route post-booking
+    # messages deterministically instead.
+    if chat_session.session_status in ("CONFIRMED", "CANCELLED", "EXPIRED"):
+        return await _handle_post_booking_session(
+            db, org, org_config, chat_session, message_text, background_tasks
         )
 
     # Convert org_config to a clean dictionary removing SQLAlchemy's internal state
@@ -370,6 +631,22 @@ async def process_message_with_graph(
     assistant_message, structured_assistant_payload = _extract_user_visible_message(
         getattr(last_message, "content", "")
     )
+
+    # Cancellation entry: if the LLM classified (or keywords indicate) a cancel
+    # request and no cancel flow is active, branch into the deterministic
+    # cancellation flow instead of applying booking state.
+    llm_intent = str((structured_assistant_payload or {}).get("user_intent") or "")
+    if cancel_flow.is_cancel_intent(message_text, llm_user_intent=llm_intent):
+        action = await cancel_flow.start_cancel_flow(db, chat_session, message_text)
+        await _persist_transcript_best_effort(
+            db,
+            session_id=session_id,
+            user_message=message_text,
+            assistant_message=action.message,
+            directive=action.widget_directive or "TEXT_INPUT",
+            intent="CANCEL_BOOKING",
+        )
+        return action
     
     existing_collected_data = (
         dict(chat_session.collected_data) if isinstance(chat_session.collected_data, dict) else {}
@@ -448,11 +725,86 @@ async def process_message_with_graph(
         ]
         follow_up_fields = list(chat_session.missing_fields)
 
+    # ── Change collected field override (deterministic Python-side) ──
+    # When the user asks to change a field that was already collected, re-ask
+    # exactly that field instead of emitting the next missing field's widget.
+    # Skipped when the same turn already captured a fresh value for the field.
+    CHANGE_COLLECTED_FIELD_KEYWORDS = {
+        "name": [
+            "change name",
+            "change my name",
+            "update name",
+            "wrong name",
+        ],
+        "email": [
+            "change email",
+            "change my email",
+            "update email",
+            "wrong email",
+            "different email",
+        ],
+        "phone": [
+            "change phone",
+            "change my phone",
+            "update phone",
+            "wrong phone",
+            "change number",
+            "change my number",
+            "different number",
+        ],
+        "date": [
+            "change date",
+            "change the date",
+            "change my date",
+            "different date",
+            "another date",
+            "wrong date",
+            "pick another date",
+            "choose another date",
+            "switch date",
+            "update date",
+            "new date",
+        ],
+        "time": [
+            "change time",
+            "change my time",
+            "change the time",
+            "wrong time",
+            "update time",
+            "different time",
+        ],
+    }
+    missing_set_override = set(chat_session.missing_fields or [])
+    changed_field = None
+    for field, kws in CHANGE_COLLECTED_FIELD_KEYWORDS.items():
+        if field in missing_set_override:
+            continue
+        if field not in (chat_session.collected_data or {}):
+            continue
+        if any(kw in message_text.lower() for kw in kws):
+            changed_field = field
+            break
+    if changed_field:
+        chat_session.collected_data.pop(changed_field, None)
+        if changed_field in ("date", "time"):
+            chat_session.collected_data.pop("selected_slot_id", None)
+            chat_session.collected_data.pop("selected_slot_start_utc", None)
+            chat_session.collected_data.pop("locked_slot_id", None)
+            chat_session.collected_data.pop("locked_slot_start_utc", None)
+        if changed_field == "date":
+            chat_session.collected_data.pop("time", None)
+        follow_up_fields = [changed_field] + [
+            f for f in follow_up_fields if f != changed_field
+        ]
+        chat_session.missing_fields = list(follow_up_fields)
+
     await crud_chat.update_chat_session(db, session_id, chat_session)
     session_state_dirty = False
 
     async def _write_checkpoint(sid: str, checkpoint: Dict[str, Any]) -> None:
         await crud_chat.save_session_checkpoint(db, sid, checkpoint)
+        if isinstance(chat_session.collected_data, dict):
+            chat_session.collected_data[crud_chat.RUNTIME_CHECKPOINT_KEY] = checkpoint
 
     checkpoint_manager = CheckpointManager(write_checkpoint=_write_checkpoint)
     context_window = _normalize_context_window(result.get("context_window"))
@@ -529,8 +881,9 @@ async def process_message_with_graph(
                 if (
                     isinstance(validation_errors.get(core_field), str)
                     and validation_errors.get(core_field, "").strip()
-                    and core_field not in follow_up_fields
                 ):
+                    if core_field in follow_up_fields:
+                        follow_up_fields.remove(core_field)
                     follow_up_fields.insert(0, core_field)
             chat_session.missing_fields = follow_up_fields
         active_field = str(field_meta.get("name") or "").strip()

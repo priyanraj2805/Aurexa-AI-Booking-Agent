@@ -19,6 +19,7 @@ from app.api.v1.endpoints import (
     support_requests,
     broadcasts,
     account,
+    notifications,
 )
 from app.core.config import settings
 from app.api.v1.endpoints.internal import bridge as internal_bridge
@@ -49,6 +50,9 @@ api_router.include_router(
 )
 api_router.include_router(broadcasts.router, prefix="/broadcasts", tags=["broadcasts"])
 api_router.include_router(account.router, prefix="/account", tags=["account"])
+api_router.include_router(
+    notifications.router, prefix="/dashboard/notifications", tags=["notifications"]
+)
 
 # Super Admin internal bridge — registered ONLY when the env gate is on.
 # (verify_bridge additionally 404s while disabled, so this is doubly inert.)

@@ -1,4 +1,5 @@
-from typing import Optional
+from datetime import date
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, text
@@ -13,23 +14,49 @@ router = APIRouter()
 
 @router.get("")
 async def list_audit_logs(
-    action: Optional[str] = Query(None),
+    action: Optional[List[str]] = Query(None),
     actor_email: Optional[str] = Query(None),
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
+    search: Optional[str] = Query(None, max_length=100),
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    sort_by: str = Query("created_at", pattern="^created_at$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(require_permission("audit.view")),
 ):
     where = []
     params: dict = {}
     if action:
-        where.append("action = :action")
-        params["action"] = action
+        placeholders = ", ".join(f":ac{i}" for i in range(len(action)))
+        where.append(f"action IN ({placeholders})")
+        params.update({f"ac{i}": a for i, a in enumerate(action)})
     if actor_email:
         where.append("actor_email ILIKE :actor_email")
         params["actor_email"] = f"%{actor_email}%"
-
+    if search:
+        where.append(
+            "(actor_email ILIKE :search OR action ILIKE :search OR resource_type ILIKE :search "
+            "OR resource_id ILIKE :search OR ip_address ILIKE :search)"
+        )
+        params["search"] = f"%{search}%"
+    if from_date:
+        where.append("created_at >= :from_date")
+        params["from_date"] = from_date
+    if to_date:
+        where.append("created_at <= :to_date")
+        params["to_date"] = to_date
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    offset = (page - 1) * page_size
+
+    total = (
+        await db.execute(
+            text(f"SELECT COUNT(*) FROM super_admin.audit_logs {where_sql}"),
+            params,
+        )
+    ).scalar_one()
+
     rows = (
         await db.execute(
             text(
@@ -39,14 +66,19 @@ async def list_audit_logs(
                        previous_hash, record_hash, created_at
                 FROM super_admin.audit_logs
                 {where_sql}
-                ORDER BY created_at DESC, id DESC
+                ORDER BY created_at {sort_order.upper()}
                 LIMIT :limit OFFSET :offset
                 """
             ),
-            {**params, "limit": limit, "offset": offset},
+            {**params, "limit": page_size, "offset": offset},
         )
     ).mappings().all()
-    return [dict(r) for r in rows]
+    return {
+        "items": [dict(r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.get("/verify")

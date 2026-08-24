@@ -2,8 +2,19 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { api, uploadFile } from "@/lib/api";
+import { isDateRangeValid, toApiDate, toApiDateTo } from "@/components/filter-bar";
 
 // ── Types matching backend response schemas ──────
+
+export interface DailyCount {
+  date: string;
+  count: number;
+}
+
+export interface ChannelCount {
+  channel: string;
+  count: number;
+}
 
 export interface Stats {
   total_bookings: number;
@@ -12,6 +23,12 @@ export interface Stats {
   cancelled_sessions: number;
   has_schedule: boolean;
   bookings_this_week: number;
+  unresolved_alerts_total: number;
+  unresolved_critical_alerts: number;
+  reliability_link: string;
+  bookings_by_day: DailyCount[];
+  cancelled_by_day: DailyCount[];
+  channel_breakdown: ChannelCount[];
 }
 
 export interface BookingItem {
@@ -24,6 +41,35 @@ export interface BookingItem {
   created_at: string;
 }
 
+export interface BookingPageItem extends BookingItem {
+  session_id: string | null;
+  session_status: string | null;
+}
+
+export interface CancelledBookingItem {
+  id: string;
+  customer_name: string;
+  customer_email: string;
+  customer_phone: string | null;
+  booking_date: string | null;
+  booking_time: string | null;
+  cancelled_at: string | null;
+}
+
+export interface AuditLogItem {
+  id: string;
+  org_id: string;
+  actor_id: string | null;
+  actor_email: string | null;
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  old_values: Record<string, unknown> | null;
+  new_values: Record<string, unknown> | null;
+  ip_address: string | null;
+  created_at: string;
+}
+
 export interface ConversationItem {
   id: string;
   session_status: string;
@@ -33,6 +79,9 @@ export interface ConversationItem {
   created_at: string;
   updated_at: string;
   channel: string;
+  customer_name?: string | null;
+  customer_email?: string | null;
+  customer_phone?: string | null;
 }
 
 export interface MessageItem {
@@ -49,6 +98,8 @@ export interface PersonaConfig {
   tone?: string;
   industry_context?: string;
   custom_instructions?: string;
+  business_name?: string;
+  business_tagline?: string;
 }
 
 export type FieldType = "text" | "email" | "phone" | "date" | "time" | "select" | "textarea" | "number";
@@ -215,16 +266,102 @@ function useApi<T>(path: string, deps: unknown[] = []) {
 
 // ── Exported hooks ───────────────────────────────
 
-export function useStats() {
-  return useApi<Stats>("/dashboard/stats");
+export function useStats(days?: number) {
+  const path = days ? `/dashboard/stats?days=${days}` : "/dashboard/stats";
+  return useApi<Stats>(path, [days]);
 }
 
 export function useRecentBookings(limit = 20) {
   return useApi<BookingItem[]>(`/dashboard/recent-bookings?limit=${limit}`);
 }
 
-export function useConversations(limit = 200) {
-  return useApi<ConversationItem[]>(`/dashboard/conversations?limit=${limit}`);
+export function useBookings(
+  page: number,
+  pageSize = 10,
+  filters?: { search?: string; fromDate?: string; toDate?: string }
+) {
+  const rangeOk = isDateRangeValid(filters?.fromDate || "", filters?.toDate || "");
+  const qs = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+  if (rangeOk && filters?.search) qs.append("search", filters.search);
+  if (rangeOk && filters?.fromDate) qs.append("from_date", toApiDate(filters.fromDate) || filters.fromDate);
+  if (rangeOk && filters?.toDate) qs.append("to_date", toApiDateTo(filters.toDate) || filters.toDate);
+  return useApi<Paginated<BookingPageItem>>(
+    rangeOk ? `/dashboard/bookings?${qs.toString()}` : "",
+    [page, pageSize, filters?.search, filters?.fromDate, filters?.toDate, rangeOk]
+  );
+}
+
+export function useCancelledBookings(
+  page: number,
+  pageSize = 10,
+  filters?: { search?: string; fromDate?: string; toDate?: string }
+) {
+  const rangeOk = isDateRangeValid(filters?.fromDate || "", filters?.toDate || "");
+  const qs = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+  if (rangeOk && filters?.search) qs.append("search", filters.search);
+  if (rangeOk && filters?.fromDate) qs.append("from_date", toApiDate(filters.fromDate) || filters.fromDate);
+  if (rangeOk && filters?.toDate) qs.append("to_date", toApiDateTo(filters.toDate) || filters.toDate);
+  return useApi<Paginated<CancelledBookingItem>>(
+    rangeOk ? `/dashboard/bookings/cancelled?${qs.toString()}` : "",
+    [page, pageSize, filters?.search, filters?.fromDate, filters?.toDate, rangeOk]
+  );
+}
+
+export function useAuditLogs(fromDate?: string, toDate?: string) {
+  const qs = new URLSearchParams({ page_size: "200" });
+  if (fromDate) qs.append("start_date", `${fromDate}T00:00:00`);
+  if (toDate) qs.append("end_date", `${toDate}T23:59:59`);
+  return useApi<AuditLogItem[]>(`/audit/logs?${qs.toString()}`, [fromDate, toDate]);
+}
+
+export interface Paginated<T> {
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export function useConversations(
+  page: number,
+  pageSize = 10,
+  filters?: {
+    search?: string;
+    status?: string[];
+    channel?: string[];
+    fromDate?: string;
+    toDate?: string;
+    sortBy?: string;
+    sortOrder?: "asc" | "desc";
+  }
+) {
+  const rangeOk = isDateRangeValid(filters?.fromDate || "", filters?.toDate || "");
+  const qs = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  if (filters?.search) qs.append("search", filters.search);
+  if (filters?.status?.length) filters.status.forEach((s) => qs.append("status", s));
+  if (filters?.channel?.length) filters.channel.forEach((c) => qs.append("channel", c));
+  if (rangeOk && filters?.fromDate) qs.append("from_date", toApiDate(filters.fromDate) || filters.fromDate);
+  if (rangeOk && filters?.toDate) qs.append("to_date", toApiDateTo(filters.toDate) || filters.toDate);
+  if (filters?.sortBy) qs.append("sort_by", filters.sortBy);
+  if (filters?.sortOrder) qs.append("sort_order", filters.sortOrder);
+  const url = qs.toString();
+  return useApi<Paginated<ConversationItem>>(
+    `/dashboard/conversations${url ? `?${url}` : ""}`,
+    [
+      page,
+      pageSize,
+      filters?.search,
+      filters?.status?.join(","),
+      filters?.channel?.join(","),
+      filters?.fromDate,
+      filters?.toDate,
+      filters?.sortBy,
+      filters?.sortOrder,
+      rangeOk,
+    ]
+  );
 }
 
 export function useAgentConfig() {

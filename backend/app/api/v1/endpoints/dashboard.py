@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, ValidationError
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import func as sa_func
+from sqlalchemy import func as sa_func, or_, desc, asc, String
 
 from app.db.database import get_db
 from app.models.user import User
@@ -44,6 +44,14 @@ logger = logging.getLogger(__name__)
 MAX_FIELD_DEFINITIONS = 20
 MAX_SELECT_OPTIONS = 50
 CORE_FIELD_NAMES = {"name", "email", "phone", "date", "time"}
+
+
+def _clean_customer_value(value: Any) -> Optional[str]:
+    """Return a non-empty string from a collected_data value, else None."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _allows_optional_contact_fields(custom_prompts: Any) -> bool:
@@ -196,7 +204,19 @@ def _integrations_redirect_url(frontend_url: Optional[str] = None, **params: str
     )
 
 
+_CALLBACK_ENV_NAMES = {
+    "google_calendar_callback": "GOOGLE_REDIRECT_URI",
+    "outlook_calendar_callback": "MICROSOFT_REDIRECT_URI",
+    "zoom_callback": "ZOOM_REDIRECT_URI",
+}
+
+
 def _callback_url(request: Request, route_name: str) -> str:
+    env_name = _CALLBACK_ENV_NAMES.get(route_name)
+    if env_name:
+        env_value = (os.getenv(env_name) or "").strip()
+        if env_value:
+            return env_value
     return str(request.url_for(route_name))
 
 
@@ -343,6 +363,16 @@ async def get_runtime_urls(
 # ══════════════════════════════════════════════════
 
 
+class DailyCount(BaseModel):
+    date: str  # YYYY-MM-DD
+    count: int
+
+
+class ChannelCount(BaseModel):
+    channel: str
+    count: int
+
+
 class StatsResponse(BaseModel):
     total_bookings: int
     active_sessions: int
@@ -353,6 +383,9 @@ class StatsResponse(BaseModel):
     unresolved_alerts_total: int
     unresolved_critical_alerts: int
     reliability_link: str
+    bookings_by_day: List[DailyCount] = []  # Last 14 days of bookings
+    cancelled_by_day: List[DailyCount] = []  # Last 14 days of cancelled sessions
+    channel_breakdown: List[ChannelCount] = []  # CONFIRMED sessions by channel
 
 
 class BookingItem(BaseModel):
@@ -365,6 +398,42 @@ class BookingItem(BaseModel):
     created_at: datetime
 
 
+class BookingPageItem(BaseModel):
+    id: str
+    customer_name: str
+    customer_email: str
+    customer_phone: Optional[str]
+    slot_start: Optional[datetime]
+    slot_end: Optional[datetime]
+    created_at: datetime
+    session_id: Optional[str] = None
+    session_status: Optional[str] = None
+
+
+class BookingPageResponse(BaseModel):
+    items: List[BookingPageItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class CancelledBookingItem(BaseModel):
+    id: str
+    customer_name: str
+    customer_email: str
+    customer_phone: Optional[str] = None
+    booking_date: Optional[str] = None
+    booking_time: Optional[str] = None
+    cancelled_at: Optional[datetime] = None
+
+
+class CancelledBookingPageResponse(BaseModel):
+    items: List[CancelledBookingItem]
+    total: int
+    page: int
+    page_size: int
+
+
 class ConversationItem(BaseModel):
     id: str
     session_status: str
@@ -374,6 +443,9 @@ class ConversationItem(BaseModel):
     created_at: datetime
     updated_at: datetime
     channel: str = "web"
+    customer_name: Optional[str] = None
+    customer_email: Optional[str] = None
+    customer_phone: Optional[str] = None
 
 
 class AgentConfigResponse(BaseModel):
@@ -459,6 +531,7 @@ class DependencyHealthResponse(BaseModel):
 async def get_stats(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    days: int = Query(default=14, ge=7, le=90),
 ):
     """Overview statistics for the current org."""
     org_id = user.org_id
@@ -544,6 +617,44 @@ async def get_stats(
     )
     stats = stats_result.one()
 
+    # ── Daily series (last N days) + channel breakdown ──
+    from sqlalchemy import cast as sa_cast, Date as sa_date
+
+    days_ago = datetime.now(timezone.utc) - timedelta(days=days - 1)
+
+    booking_rows = await db.execute(
+        select(sa_cast(Booking.created_at, sa_date).label("day"), sa_func.count().label("c"))
+        .where(Booking.org_id == org_id, Booking.created_at >= days_ago)
+        .group_by("day")
+    )
+    cancelled_rows = await db.execute(
+        select(sa_cast(ChatSession.created_at, sa_date).label("day"), sa_func.count().label("c"))
+        .where(
+            ChatSession.org_id == org_id,
+            ChatSession.session_status == "CANCELLED",
+            ChatSession.created_at >= days_ago,
+        )
+        .group_by("day")
+    )
+    channel_rows = await db.execute(
+        select(ChatSession.channel, sa_func.count())
+        .where(
+            ChatSession.org_id == org_id,
+            ChatSession.session_status == "CONFIRMED",
+            ChatSession.channel.isnot(None),
+        )
+        .group_by(ChatSession.channel)
+    )
+
+    def fill_series(rows: list) -> List[DailyCount]:
+        counts = {str(r[0]): r[1] for r in rows}
+        start = datetime.now(timezone.utc).date() - timedelta(days=days - 1)
+        out: List[DailyCount] = []
+        for i in range(days):
+            day = start + timedelta(days=i)
+            out.append(DailyCount(date=day.isoformat(), count=counts.get(day.isoformat(), 0)))
+        return out
+
     return StatsResponse(
         total_bookings=stats.total_bookings or 0,
         active_sessions=stats.active_sessions or 0,
@@ -554,6 +665,11 @@ async def get_stats(
         unresolved_alerts_total=stats.unresolved_alerts_total or 0,
         unresolved_critical_alerts=stats.unresolved_critical_alerts or 0,
         reliability_link="/dashboard/reliability?unresolved_only=true&severity=critical&recent_hours=24",
+        bookings_by_day=fill_series(booking_rows.all()),
+        cancelled_by_day=fill_series(cancelled_rows.all()),
+        channel_breakdown=[
+            ChannelCount(channel=r[0] or "web", count=r[1]) for r in channel_rows.all()
+        ],
     )
 
 
@@ -617,40 +733,234 @@ async def get_recent_bookings(
     return items
 
 
-@router.get("/conversations", response_model=List[ConversationItem])
+@router.get("/conversations")
 async def get_conversations(
-    limit: int = Query(default=200, ge=1, le=500),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=100),
     include_archived: bool = Query(default=False),
+    search: Optional[str] = Query(None, max_length=100),
+    status: Optional[List[str]] = Query(None),
+    channel: Optional[List[str]] = Query(None),
+    from_date: Optional[str] = Query(None),
+    to_date: Optional[str] = Query(None),
+    sort_by: str = Query("updated_at", pattern="^(created_at|updated_at|session_status|current_intent|channel)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List chat sessions for the current org."""
+    """List chat sessions for the current org (paginated)."""
+    from datetime import timedelta
+
     predicates = [ChatSession.org_id == user.org_id]
     if not include_archived:
         predicates.append(ChatSession.session_status != "ARCHIVED")
         predicates.append(ChatSession.archived_at.is_(None))
 
+    if search:
+        like = f"%{search}%"
+        predicates.append(
+            or_(
+                ChatSession.current_intent.ilike(f"%{search}%"),
+                ChatSession.channel.ilike(f"%{search}%"),
+                ChatSession.id.cast(String).ilike(f"%{search}%"),
+                ChatSession.state_data["name"].astext.ilike(like),
+                ChatSession.state_data["email"].astext.ilike(like),
+                ChatSession.state_data["phone"].astext.ilike(like),
+            )
+        )
+    if status:
+        predicates.append(ChatSession.session_status.in_(status))
+    if channel:
+        predicates.append(ChatSession.channel.in_(channel))
+    if from_date:
+        try:
+            fd = datetime.strptime(from_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="from_date must be YYYY-MM-DD")
+        predicates.append(ChatSession.created_at >= fd)
+    if to_date:
+        try:
+            td = datetime.strptime(to_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="to_date must be YYYY-MM-DD")
+        predicates.append(ChatSession.created_at < td)
+
+    total = (
+        await db.execute(select(sa_func.count()).select_from(ChatSession).where(*predicates))
+    ).scalar_one()
+
+    allowed_sort = {"created_at", "updated_at", "session_status", "current_intent", "channel"}
+    sort_col = sort_by if sort_by in allowed_sort else "updated_at"
+    sort_dir = desc if sort_order == "desc" else asc
+    sort_column = getattr(ChatSession, sort_col)
+
+    result = await db.execute(
+        select(ChatSession)
+        .where(*predicates)
+        .order_by(sort_column.desc() if sort_dir == desc else sort_column.asc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    sessions = result.scalars().all()
+
+    return {
+        "items": [
+            ConversationItem(
+                id=str(s.id),
+                session_status=s.session_status or "ACTIVE",
+                current_intent=s.current_intent,
+                collected_data=s.state_data or {},
+                missing_fields=s.missing_fields or [],
+                created_at=s.created_at,
+                updated_at=s.updated_at,
+                channel=s.channel or "web",
+                customer_name=_clean_customer_value((s.state_data or {}).get("name")),
+                customer_email=_clean_customer_value((s.state_data or {}).get("email")),
+                customer_phone=_clean_customer_value((s.state_data or {}).get("phone")),
+            )
+            for s in sessions
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@router.get("/bookings", response_model=BookingPageResponse)
+async def list_bookings(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=100),
+    search: Optional[str] = Query(None, max_length=100),
+    from_date: Optional[str] = Query(None),
+    to_date: Optional[str] = Query(None),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Paginated bookings list for the current org (search + date range)."""
+    from datetime import timedelta
+
+    predicates = [Booking.org_id == user.org_id]
+    if search:
+        like = f"%{search}%"
+        predicates.append(
+            or_(
+                Booking.customer_name.ilike(like),
+                Booking.customer_email.ilike(like),
+                Booking.customer_phone.ilike(like),
+            )
+        )
+    if from_date:
+        try:
+            fd = datetime.strptime(from_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="from_date must be YYYY-MM-DD")
+        predicates.append(Booking.created_at >= fd)
+    if to_date:
+        try:
+            td = datetime.strptime(to_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="to_date must be YYYY-MM-DD")
+        predicates.append(Booking.created_at < td)
+
+    total = (
+        await db.execute(select(sa_func.count()).select_from(Booking).where(*predicates))
+    ).scalar_one()
+
+    result = await db.execute(
+        select(Booking, TimeSlot, ChatSession)
+        .outerjoin(TimeSlot, Booking.slot_id == TimeSlot.id)
+        .outerjoin(ChatSession, Booking.session_id == ChatSession.id)
+        .where(*predicates)
+        .order_by(Booking.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+
+    items = [
+        BookingPageItem(
+            id=str(b.id),
+            customer_name=b.customer_name or "Unknown",
+            customer_email=b.customer_email or "",
+            customer_phone=b.customer_phone,
+            slot_start=slot.start_time if slot else None,
+            slot_end=slot.end_time if slot else None,
+            created_at=b.created_at,
+            session_id=str(s.id) if s else None,
+            session_status=s.session_status if s else None,
+        )
+        for b, slot, s in result.all()
+    ]
+    return BookingPageResponse(items=items, total=total, page=page, page_size=page_size)
+
+
+@router.get("/bookings/cancelled", response_model=CancelledBookingPageResponse)
+async def list_cancelled_bookings(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=100),
+    search: Optional[str] = Query(None, max_length=100),
+    from_date: Optional[str] = Query(None),
+    to_date: Optional[str] = Query(None),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Paginated cancelled bookings = CANCELLED chat sessions for the org."""
+    from datetime import timedelta
+
+    predicates = [
+        ChatSession.org_id == user.org_id,
+        ChatSession.session_status == "CANCELLED",
+    ]
+    if search:
+        like = f"%{search}%"
+        predicates.append(
+            or_(
+                ChatSession.state_data["name"].astext.ilike(like),
+                ChatSession.state_data["email"].astext.ilike(like),
+            )
+        )
+    if from_date:
+        try:
+            fd = datetime.strptime(from_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="from_date must be YYYY-MM-DD")
+        predicates.append(ChatSession.updated_at >= fd)
+    if to_date:
+        try:
+            td = datetime.strptime(to_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="to_date must be YYYY-MM-DD")
+        predicates.append(ChatSession.updated_at < td)
+
+    total = (
+        await db.execute(select(sa_func.count()).select_from(ChatSession).where(*predicates))
+    ).scalar_one()
+
     result = await db.execute(
         select(ChatSession)
         .where(*predicates)
         .order_by(ChatSession.updated_at.desc())
-        .limit(limit)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     )
     sessions = result.scalars().all()
 
-    return [
-        ConversationItem(
-            id=str(s.id),
-            session_status=s.session_status or "ACTIVE",
-            current_intent=s.current_intent,
-            collected_data=s.state_data or {},
-            missing_fields=s.missing_fields or [],
-            created_at=s.created_at,
-            updated_at=s.updated_at,
-            channel=s.channel or "web",
+    items = []
+    for s in sessions:
+        data = s.state_data or {}
+        items.append(
+            CancelledBookingItem(
+                id=str(s.id),
+                customer_name=data.get("name") or data.get("customer_name") or "Unknown",
+                customer_email=data.get("email") or data.get("customer_email") or "",
+                customer_phone=data.get("phone") or None,
+                booking_date=data.get("date") or None,
+                booking_time=data.get("time") or None,
+                cancelled_at=s.updated_at,
+            )
         )
-        for s in sessions
-    ]
+    return CancelledBookingPageResponse(
+        items=items, total=total, page=page, page_size=page_size
+    )
 
 
 @router.get("/agent-config", response_model=AgentConfigResponse)
@@ -1086,6 +1396,20 @@ async def cancel_booking_admin(
     if chat_session:
         chat_session.session_status = "CANCELLED"
         await db.commit()
+
+    from app.core.org_notify import notify_org
+
+    await notify_org(
+        org_id=user.org_id,
+        kind="booking_cancelled",
+        title="Appointment cancelled",
+        body=(
+            f"Booking for {booking.customer_name or 'a customer'} "
+            f"({old_values.get('date') or 'unknown date'} {old_values.get('time') or ''}) was cancelled by an admin.".strip()
+        ),
+        resource_type="booking",
+        resource_id=str(booking.id),
+    )
 
     log_audit_event(
         background_tasks,

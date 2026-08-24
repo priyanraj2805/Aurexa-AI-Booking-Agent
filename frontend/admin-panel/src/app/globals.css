@@ -81,6 +81,8 @@
   --sidebar-accent-foreground: #111111;
   --sidebar-border: #e5e5e5;
   --sidebar-ring: #ef5d25;
+  --i500: #ef5d25;
+  --s600: #d4d4d8;
 }
 
 /* ─── Dark Mode: Kilo Code Palette ─── */
@@ -116,6 +118,8 @@
   --sidebar-accent-foreground: #ffffff;
   --sidebar-border: #27272a;
   --sidebar-ring: #3b82f6;
+  --i500: #6366f1;
+  --s600: #475569;
 }
 
 @layer base {
@@ -177,3 +181,20 @@
 .theme-toggle-btn:hover .theme-icon {
   transform: rotate(20deg) scale(1.15);
 }
+
+/* ─── Scrollbar Styling ─── */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 4px;
+  height: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.3);
+  border-radius: 999px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.5);
+}
+

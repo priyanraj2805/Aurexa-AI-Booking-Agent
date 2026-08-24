@@ -9,8 +9,8 @@ request, and a SECOND admin approves it. Rules:
     APPROVED on bridge failure so it can be retried.
   - Every transition is written to the hash-chained audit log.
 """
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -122,16 +122,49 @@ async def create_approval(
 
 @router.get("")
 async def list_approvals(
-    status: Optional[str] = Query(None),
-    limit: int = Query(50, ge=1, le=200),
+    status: Optional[List[str]] = Query(None),
+    search: Optional[str] = Query(None, max_length=100),
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    sort_by: str = Query("created_at", pattern="^(created_at|updated_at|reviewed_at|executed_at|expires_at)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     _: CurrentAdmin = Depends(require_any_permission("orgs.delete", "billing.refund")),
 ):
-    where = ""
-    params: dict = {"limit": limit}
+    where = []
+    params: dict = {}
     if status:
-        where = "WHERE status = :status"
-        params["status"] = status.upper()
+        cleaned = [s.upper() for s in status]
+        placeholders = ", ".join(f":st{i}" for i in range(len(cleaned)))
+        where.append(f"status IN ({placeholders})")
+        params.update({f"st{i}": s for i, s in enumerate(cleaned)})
+    if search:
+        where.append(
+            "(requested_by_email ILIKE :search OR request_type ILIKE :search "
+            "OR CAST(resource_id AS text) ILIKE :search OR review_note ILIKE :search)"
+        )
+        params["search"] = f"%{search}%"
+    if from_date:
+        where.append("created_at >= :from_date")
+        params["from_date"] = from_date
+    if to_date:
+        where.append("created_at <= :to_date")
+        params["to_date"] = to_date
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    allowed_sort = {"created_at", "updated_at", "reviewed_at", "executed_at", "expires_at"}
+    sort_col = sort_by if sort_by in allowed_sort else "created_at"
+    sort_dir = sort_order.upper() if sort_order in ("asc", "desc") else "DESC"
+    offset = (page - 1) * page_size
+
+    total = (
+        await db.execute(
+            text(f"SELECT COUNT(*) FROM super_admin.approvals {where_sql}"),
+            params,
+        )
+    ).scalar_one()
+
     rows = (
         await db.execute(
             text(
@@ -141,15 +174,20 @@ async def list_approvals(
                        reviewed_by_id, reviewed_by_email, review_note,
                        created_at, expires_at, reviewed_at, executed_at
                 FROM super_admin.approvals
-                {where}
-                ORDER BY created_at DESC
-                LIMIT :limit
+                {where_sql}
+                ORDER BY {sort_col} {sort_dir}
+                LIMIT :limit OFFSET :offset
                 """
             ),
-            params,
+            {**params, "limit": page_size, "offset": offset},
         )
     ).mappings()
-    return {"items": [_row_to_dict(r) for r in rows]}
+    return {
+        "items": [_row_to_dict(r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.post("/{approval_id}/approve")

@@ -4,6 +4,16 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/toast";
 import { ConfirmDialog, Modal } from "@/components/modal";
+import { Pagination } from "@/components/pagination";
+import {
+  SearchInput,
+  CheckboxFilter,
+  DateFilter,
+  SortableTh,
+  isDateRangeValid,
+  toApiDate,
+  toApiDateTo,
+} from "@/components/filter-bar";
 
 type Approval = {
   id: string;
@@ -31,6 +41,22 @@ const STATUS_STYLES: Record<string, string> = {
   EXPIRED: "bg-slate-800 text-slate-400",
 };
 
+const STATUS_OPTIONS = [
+  { value: "PENDING", label: "Pending" },
+  { value: "APPROVED", label: "Approved" },
+  { value: "EXECUTED", label: "Executed" },
+  { value: "REJECTED", label: "Rejected" },
+  { value: "EXPIRED", label: "Expired" },
+];
+
+const SORT_DEFAULTS: Record<string, "asc" | "desc"> = {
+  created_at: "desc",
+  updated_at: "desc",
+  reviewed_at: "desc",
+  executed_at: "desc",
+  expires_at: "asc",
+};
+
 function StatusBadge({ status }: { status: string }) {
   return (
     <span
@@ -46,6 +72,8 @@ function StatusBadge({ status }: { status: string }) {
 export default function ApprovalsPage() {
   const { toast } = useToast();
   const [items, setItems] = useState<Approval[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -56,18 +84,49 @@ export default function ApprovalsPage() {
   const [stepupCode, setStepupCode] = useState("");
   const [stepupBusy, setStepupBusy] = useState(false);
 
+  const [statusFilters, setStatusFilters] = useState<string[]>([]);
+  const [search, setSearch] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [sortBy, setSortBy] = useState("created_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+
+  const handleSort = (column: string, order: "asc" | "desc") => {
+    setSortBy(column);
+    setSortOrder(order);
+    setPage(1);
+  };
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    if (!isDateRangeValid(fromDate, toDate)) {
+      setItems([]);
+      setTotal(0);
+      setLoading(false);
+      return;
+    }
     try {
-      const res = await api.get<{ items: Approval[] }>("/approvals?limit=100");
+      const q = new URLSearchParams();
+      for (const s of statusFilters) q.append("status", s);
+      if (search) q.append("search", search);
+      if (fromDate) q.append("from_date", toApiDate(fromDate) || fromDate);
+      if (toDate) q.append("to_date", toApiDateTo(toDate) || toDate);
+      q.append("sort_by", sortBy);
+      q.append("sort_order", sortOrder);
+      q.append("page", String(page));
+      q.append("page_size", "10");
+      const res = await api.get<{ items: Approval[]; total: number }>(
+        `/approvals?${q.toString()}`
+      );
       setItems(res.items);
+      setTotal(res.total);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load approvals");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [statusFilters, search, fromDate, toDate, sortBy, sortOrder, page]);
 
   useEffect(() => {
     load();
@@ -134,6 +193,34 @@ export default function ApprovalsPage() {
         Destructive actions need a second admin. Requests expire after 24 hours.
       </p>
 
+      <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+        <SearchInput
+          value={search}
+          onChange={(v) => {
+            setSearch(v);
+            setPage(1);
+          }}
+          placeholder="Search request, email, note…"
+          className="w-64"
+        />
+        <CheckboxFilter
+          label="Status"
+          options={STATUS_OPTIONS}
+          selected={statusFilters}
+          onChange={(v) => {
+            setStatusFilters(v);
+            setPage(1);
+          }}
+        />
+        <DateFilter
+          label="Created"
+          fromDate={fromDate}
+          toDate={toDate}
+          onFromChange={setFromDate}
+          onToChange={setToDate}
+        />
+      </div>
+
       {error && (
         <p className="mt-4 text-sm text-red-400" role="alert">
           {error}
@@ -150,7 +237,15 @@ export default function ApprovalsPage() {
               <th className="px-4 py-3">Request</th>
               <th className="px-4 py-3">Resource</th>
               <th className="px-4 py-3">Requested by</th>
-              <th className="px-4 py-3">Expires</th>
+              <SortableTh
+                column="expires_at"
+                sortBy={sortBy}
+                sortOrder={sortOrder}
+                onSort={handleSort}
+                defaultOrder={SORT_DEFAULTS.expires_at}
+              >
+                Expires
+              </SortableTh>
               <th className="px-4 py-3"></th>
             </tr>
           </thead>
@@ -231,7 +326,15 @@ export default function ApprovalsPage() {
               <th className="px-4 py-3">Requested by</th>
               <th className="px-4 py-3">Reviewed by</th>
               <th className="px-4 py-3">Note</th>
-              <th className="px-4 py-3">Created</th>
+              <SortableTh
+                column="created_at"
+                sortBy={sortBy}
+                sortOrder={sortOrder}
+                onSort={handleSort}
+                defaultOrder={SORT_DEFAULTS.created_at}
+              >
+                Created
+              </SortableTh>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800 bg-slate-900/50">
@@ -269,6 +372,8 @@ export default function ApprovalsPage() {
           </tbody>
         </table>
       </div>
+
+      <Pagination page={page} pageSize={10} total={total} onPageChange={setPage} />
 
       {acting && (
         <ConfirmDialog

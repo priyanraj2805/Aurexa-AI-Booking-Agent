@@ -5,6 +5,9 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useToast } from "@/components/toast";
 import { Modal, ConfirmDialog } from "@/components/modal";
+import { Pagination } from "@/components/pagination";
+import { SearchInput, DateFilter, SortableTh, isDateRangeValid, toApiDate, toApiDateTo } from "@/components/filter-bar";
+import { OrgCombobox } from "@/components/org-combobox";
 
 type BroadcastRow = {
   id: string;
@@ -19,9 +22,12 @@ type BroadcastRow = {
   updated_at: string | null;
 };
 
-type OrgRow = { id: string; name: string; business_name: string | null };
-
-const STATUSES = ["all", "draft", "reviewed", "sent", "cancelled"] as const;
+const SORT_DEFAULTS: Record<string, "asc" | "desc"> = {
+  created_at: "desc",
+  updated_at: "desc",
+  sent_at: "desc",
+  reviewed_at: "desc",
+};
 const AUDIENCE_LABEL: Record<BroadcastRow["audience"], string> = {
   all_orgs: "All orgs",
   selected_orgs: "Selected orgs",
@@ -36,9 +42,22 @@ export default function NotificationsPage() {
   const { toast } = useToast();
 
   const [items, setItems] = useState<BroadcastRow[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [statusFilter, setStatusFilter] = useState<string>("all");
+
+  const [search, setSearch] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [sortBy, setSortBy] = useState("created_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+
+  const handleSort = (column: string, order: "asc" | "desc") => {
+    setSortBy(column);
+    setSortOrder(order);
+    setPage(1);
+  };
 
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<BroadcastRow | null>(null);
@@ -50,9 +69,6 @@ export default function NotificationsPage() {
   });
   const [saving, setSaving] = useState(false);
 
-  const [orgSearch, setOrgSearch] = useState("");
-  const [orgOptions, setOrgOptions] = useState<OrgRow[]>([]);
-
   const [reviewing, setReviewing] = useState<BroadcastRow | null>(null);
   const [reviewingBusy, setReviewingBusy] = useState(false);
   const [sending, setSending] = useState<BroadcastRow | null>(null);
@@ -63,22 +79,33 @@ export default function NotificationsPage() {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    if (!isDateRangeValid(fromDate, toDate)) {
+      setItems([]);
+      setTotal(0);
+      setLoading(false);
+      return;
+    }
     try {
-      setItems(
-        (
-          await api.get<{ items: BroadcastRow[] }>(
-            `/notifications?page_size=100${
-              statusFilter !== "all" ? `&status=${statusFilter}` : ""
-            }`
-          )
-        ).items
+      const params = new URLSearchParams({
+        page: String(page),
+        page_size: "10",
+        sort_by: sortBy,
+        sort_order: sortOrder,
+      });
+      if (search) params.append("search", search);
+      if (fromDate) params.append("from_date", toApiDate(fromDate) || fromDate);
+      if (toDate) params.append("to_date", toApiDateTo(toDate) || toDate);
+      const res = await api.get<{ items: BroadcastRow[]; total: number }>(
+        `/notifications?${params.toString()}`
       );
+      setItems(res.items);
+      setTotal(res.total);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load broadcasts");
     } finally {
       setLoading(false);
     }
-  }, [statusFilter]);
+  }, [search, fromDate, toDate, sortBy, sortOrder, page]);
 
   useEffect(() => {
     void load();
@@ -112,41 +139,36 @@ export default function NotificationsPage() {
     setCreateOpen(true);
   };
 
-  const searchOrgs = async () => {
-    try {
-      const res = await api.get<{ items: OrgRow[] }>(
-        `/tenants/orgs?search=${encodeURIComponent(orgSearch)}`
-      );
-      setOrgOptions(res.items);
-    } catch (e) {
-      toast("error", e instanceof Error ? e.message : "Organization search failed");
-    }
-  };
-
   const toggleOrg = (id: string) => {
     setForm((f) => ({
       ...f,
-      org_ids: f.org_ids.includes(id)
-        ? f.org_ids.filter((x) => x !== id)
-        : [...f.org_ids, id],
+      org_ids: f.org_ids.includes(id) ? f.org_ids.filter((x) => x !== id) : [...f.org_ids, id],
     }));
   };
 
   const saveBroadcast = async () => {
+    if (!form.title.trim() || !form.body.trim()) {
+      toast("error", "Title and body are required");
+      return;
+    }
     setSaving(true);
     try {
-      const body = {
-        title: form.title.trim(),
-        body: form.body.trim(),
-        audience: form.audience,
-        org_ids: form.org_ids,
-      };
       if (editing) {
-        await api.patch(`/notifications/${editing.id}`, body);
+        await api.patch(`/notifications/${editing.id}`, {
+          title: form.title.trim(),
+          body: form.body.trim(),
+          audience: form.audience,
+          org_ids: form.org_ids,
+        });
         toast("success", "Broadcast updated");
       } else {
-        await api.post<{ broadcast_id: string }>("/notifications", body);
-        toast("success", "Broadcast draft created");
+        await api.post("/notifications", {
+          title: form.title.trim(),
+          body: form.body.trim(),
+          audience: form.audience,
+          org_ids: form.org_ids,
+        });
+        toast("success", "Broadcast created");
       }
       setCreateOpen(false);
       void load();
@@ -162,7 +184,7 @@ export default function NotificationsPage() {
     setReviewingBusy(true);
     try {
       await api.post(`/notifications/${reviewing.id}/review`);
-      toast("success", `"${reviewing.title}" marked reviewed`);
+      toast("success", "Broadcast reviewed");
       setReviewing(null);
       void load();
     } catch (e) {
@@ -176,10 +198,8 @@ export default function NotificationsPage() {
     if (!sending) return;
     setSendingBusy(true);
     try {
-      const res = await api.post<{ recipient_count: number }>(
-        `/notifications/${sending.id}/send`
-      );
-      toast("success", `"${sending.title}" sent to ${res.recipient_count} recipient(s)`);
+      await api.post(`/notifications/${sending.id}/send`);
+      toast("success", "Broadcast sent");
       setSending(null);
       void load();
     } catch (e) {
@@ -194,7 +214,7 @@ export default function NotificationsPage() {
     setCancellingBusy(true);
     try {
       await api.post(`/notifications/${cancelling.id}/cancel`);
-      toast("success", `"${cancelling.title}" cancelled`);
+      toast("success", "Broadcast cancelled");
       setCancelling(null);
       void load();
     } catch (e) {
@@ -203,17 +223,6 @@ export default function NotificationsPage() {
       setCancellingBusy(false);
     }
   };
-
-  const statusBadge = (s: string) =>
-    s === "sent"
-      ? "bg-green-900/60 text-green-300"
-      : s === "reviewed"
-        ? "bg-sky-900/60 text-sky-300"
-        : s === "cancelled"
-          ? "bg-slate-800 text-slate-400"
-          : "bg-amber-900/60 text-amber-300";
-
-  const visible = items ?? [];
 
   return (
     <div>
@@ -235,19 +244,23 @@ export default function NotificationsPage() {
         )}
       </div>
 
-      <div className="mt-4 flex items-center gap-3">
-        <select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          className="rounded-md border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-indigo-500"
-        >
-          {STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {s === "all" ? "All statuses" : s}
-            </option>
-          ))}
-        </select>
-        <span className="text-sm text-slate-400">{visible.length} broadcasts</span>
+      <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+        <SearchInput
+          value={search}
+          onChange={(v) => {
+            setSearch(v);
+            setPage(1);
+          }}
+          placeholder="Search title or body…"
+          className="w-64"
+        />
+        <DateFilter
+          label="Created"
+          fromDate={fromDate}
+          toDate={toDate}
+          onFromChange={setFromDate}
+          onToChange={setToDate}
+        />
       </div>
 
       {error && (
@@ -263,8 +276,33 @@ export default function NotificationsPage() {
               <th className="px-4 py-3">Broadcast</th>
               <th className="px-4 py-3">Audience</th>
               <th className="px-4 py-3">Status</th>
-              <th className="px-4 py-3">Reviewed</th>
-              <th className="px-4 py-3">Sent</th>
+              <SortableTh
+                column="reviewed_at"
+                sortBy={sortBy}
+                sortOrder={sortOrder}
+                onSort={handleSort}
+                defaultOrder={SORT_DEFAULTS.reviewed_at}
+              >
+                Reviewed
+              </SortableTh>
+              <SortableTh
+                column="sent_at"
+                sortBy={sortBy}
+                sortOrder={sortOrder}
+                onSort={handleSort}
+                defaultOrder={SORT_DEFAULTS.sent_at}
+              >
+                Sent
+              </SortableTh>
+              <SortableTh
+                column="created_at"
+                sortBy={sortBy}
+                sortOrder={sortOrder}
+                onSort={handleSort}
+                defaultOrder={SORT_DEFAULTS.created_at}
+              >
+                Created
+              </SortableTh>
               <th className="px-4 py-3">Actions</th>
             </tr>
           </thead>
@@ -272,92 +310,92 @@ export default function NotificationsPage() {
             {loading &&
               [0, 1, 2].map((i) => (
                 <tr key={i}>
-                  <td colSpan={6} className="px-4 py-3 text-slate-500">
+                  <td colSpan={7} className="px-4 py-3 text-slate-500">
                     Loading…
                   </td>
                 </tr>
               ))}
             {!loading &&
-              visible.map((b) => (
+              (items ?? []).map((b) => (
                 <tr key={b.id} className={b.status === "cancelled" ? "opacity-50" : ""}>
                   <td className="max-w-xs px-4 py-3">
                     <div className="font-medium text-slate-100">{b.title}</div>
-                    <div className="line-clamp-2 text-xs text-slate-500">{b.body}</div>
+                    <div className="text-xs text-slate-500 truncate">{b.body}</div>
                   </td>
-                  <td className="px-4 py-3 text-xs text-slate-300">
-                    {AUDIENCE_LABEL[b.audience]}
-                    {b.audience === "selected_orgs" && (
-                      <div className="text-slate-500">
-                        {(b.org_ids ?? []).length} org(s)
-                      </div>
-                    )}
-                  </td>
+                  <td className="px-4 py-3">{AUDIENCE_LABEL[b.audience]}</td>
                   <td className="px-4 py-3">
                     <span
-                      className={`rounded-full px-2 py-0.5 text-xs font-semibold ${statusBadge(b.status)}`}
+                      className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                        b.status === "draft"
+                          ? "bg-slate-800 text-slate-400"
+                          : b.status === "reviewed"
+                          ? "bg-amber-950/60 text-amber-300"
+                          : b.status === "sent"
+                          ? "bg-green-950/60 text-green-300"
+                          : "bg-red-950/60 text-red-300"
+                      }`}
                     >
                       {b.status.toUpperCase()}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-xs text-slate-500">
-                    {fmtDate(b.reviewed_at)}
-                  </td>
-                  <td className="px-4 py-3 text-xs text-slate-500">
-                    {fmtDate(b.sent_at)}
-                  </td>
+                  <td className="px-4 py-3 text-xs text-slate-400">{fmtDate(b.reviewed_at)}</td>
+                  <td className="px-4 py-3 text-xs text-slate-400">{fmtDate(b.sent_at)}</td>
+                  <td className="px-4 py-3 text-xs text-slate-400">{fmtDate(b.created_at)}</td>
                   <td className="px-4 py-3">
-                    {can("notifications.manage") && (
-                      <div className="flex flex-wrap gap-2">
-                        {b.status === "draft" && (
-                          <>
+                    <div className="flex items-center gap-2">
+                      {can("notifications.manage") && (
+                        <>
+                          {b.status === "draft" && (
+                            <>
+                              <button
+                                onClick={() => setReviewing(b)}
+                                disabled={reviewingBusy}
+                                className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+                              >
+                                Review
+                              </button>
+                              <button
+                                onClick={() => setEditing(b)}
+                                className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => openDuplicate(b)}
+                                className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
+                              >
+                                Duplicate
+                              </button>
+                            </>
+                          )}
+                          {b.status === "reviewed" && (
                             <button
-                              onClick={() => openEdit(b)}
-                              className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
+                              onClick={() => setSending(b)}
+                              disabled={sendingBusy}
+                              className="rounded bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
                             >
-                              Edit
+                              Send
                             </button>
+                          )}
+                          {["draft", "reviewed"].includes(b.status) && (
                             <button
-                              onClick={() => setReviewing(b)}
-                              className="rounded border border-slate-700 px-2 py-1 text-xs text-sky-300 hover:bg-slate-800"
+                              onClick={() => setCancelling(b)}
+                              disabled={cancellingBusy}
+                              className="rounded border border-red-600 bg-red-950/50 px-2 py-1 text-xs text-red-300 hover:bg-red-950 disabled:opacity-50"
                             >
-                              Review
+                              Cancel
                             </button>
-                          </>
-                        )}
-                        {b.status === "reviewed" && (
-                          <button
-                            onClick={() => setSending(b)}
-                            className="rounded border border-green-800 px-2 py-1 text-xs text-green-300 hover:bg-green-950"
-                          >
-                            Send
-                          </button>
-                        )}
-                        {(b.status === "draft" || b.status === "reviewed") && (
-                          <button
-                            onClick={() => setCancelling(b)}
-                            className="rounded border border-slate-700 px-2 py-1 text-xs text-red-400 hover:bg-red-950"
-                          >
-                            Cancel
-                          </button>
-                        )}
-                        {(b.status === "sent" || b.status === "cancelled") && (
-                          <button
-                            onClick={() => openDuplicate(b)}
-                            title="Copy as a new draft"
-                            className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
-                          >
-                            Duplicate
-                          </button>
-                        )}
-                      </div>
-                    )}
+                          )}
+                        </>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
-            {!loading && visible.length === 0 && (
+            {!loading && (!items || items.length === 0) && (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-slate-400">
-                  No broadcasts match the current filter
+                <td colSpan={7} className="px-4 py-8 text-center text-slate-400">
+                  No broadcasts found
                 </td>
               </tr>
             )}
@@ -365,88 +403,55 @@ export default function NotificationsPage() {
         </table>
       </div>
 
+      {items && (
+        <Pagination page={page} pageSize={10} total={total} onPageChange={setPage} />
+      )}
+
       {createOpen && (
-        <Modal
-          title={editing ? `Edit ${editing.title}` : "New broadcast"}
-          onClose={() => setCreateOpen(false)}
+        <Modal title={editing ? `Edit ${editing.title}` : "New broadcast"} onClose={() => setCreateOpen(false)}
+          confirmOnClose={!!(form.title || form.body)}
+          confirmMessage="You have unsaved broadcast changes. Discard them?"
         >
           <div className="space-y-3 text-sm">
             <div>
-              <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
-                Title *
-              </label>
+              <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">Title *</label>
               <input
                 value={form.title}
                 onChange={(e) => setForm({ ...form, title: e.target.value })}
-                placeholder="Scheduled maintenance tonight"
                 className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 outline-none focus:border-indigo-500"
               />
             </div>
             <div>
-              <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
-                Message *
-              </label>
+              <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">Body *</label>
               <textarea
                 value={form.body}
                 onChange={(e) => setForm({ ...form, body: e.target.value })}
                 rows={4}
-                placeholder="We'll be performing maintenance from 23:00–23:30 UTC…"
                 className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 outline-none focus:border-indigo-500"
               />
             </div>
             <div>
-              <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
-                Audience
-              </label>
+              <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">Audience</label>
               <select
                 value={form.audience}
-                onChange={(e) =>
-                  setForm({ ...form, audience: e.target.value as BroadcastRow["audience"] })
-                }
+                onChange={(e) => setForm({ ...form, audience: e.target.value as BroadcastRow["audience"] })}
                 className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 outline-none focus:border-indigo-500"
               >
-                <option value="all_orgs">All organizations</option>
-                <option value="selected_orgs">Selected organizations</option>
-                <option value="staff">Platform staff</option>
+                <option value="all_orgs">All orgs</option>
+                <option value="selected_orgs">Selected orgs</option>
+                <option value="staff">Staff</option>
               </select>
             </div>
             {form.audience === "selected_orgs" && (
-              <div className="rounded-md border border-slate-800 p-3">
-                <p className="mb-2 text-xs uppercase tracking-wide text-slate-500">
-                  Recipients ({form.org_ids.length} selected)
-                </p>
-                <div className="flex gap-2">
-                  <input
-                    value={orgSearch}
-                    onChange={(e) => setOrgSearch(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && void searchOrgs()}
-                    placeholder="Search orgs…"
-                    className="flex-1 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 outline-none focus:border-indigo-500"
-                  />
-                  <button
-                    onClick={searchOrgs}
-                    className="rounded-md border border-slate-700 px-3 py-2 text-slate-300 hover:bg-slate-800"
-                  >
-                    Search
-                  </button>
-                </div>
-                {orgOptions.length > 0 && (
-                  <div className="mt-2 max-h-40 space-y-1 overflow-y-auto">
-                    {orgOptions.map((o) => (
-                      <button
-                        key={o.id}
-                        onClick={() => toggleOrg(o.id)}
-                        className={`block w-full rounded-md border px-3 py-1.5 text-left ${
-                          form.org_ids.includes(o.id)
-                            ? "border-indigo-500 bg-indigo-950/50"
-                            : "border-slate-800 hover:bg-slate-800"
-                        }`}
-                      >
-                        {o.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
+              <div>
+                <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">Organizations</label>
+                <OrgCombobox
+                  multiple
+                  value={form.org_ids}
+                  onSelect={(o) => toggleOrg(o.id)}
+                  onRemove={(id) => toggleOrg(id)}
+                  placeholder="Type to search — e.g. Acme…"
+                />
               </div>
             )}
           </div>
@@ -460,15 +465,10 @@ export default function NotificationsPage() {
             </button>
             <button
               onClick={saveBroadcast}
-              disabled={
-                saving ||
-                form.title.trim().length < 3 ||
-                form.body.trim().length < 3 ||
-                (form.audience === "selected_orgs" && form.org_ids.length === 0)
-              }
+              disabled={saving || !form.title.trim() || !form.body.trim()}
               className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
             >
-              {saving ? "Saving…" : editing ? "Save changes" : "Create draft"}
+              {saving ? "Saving…" : editing ? "Save changes" : "Create broadcast"}
             </button>
           </div>
         </Modal>
@@ -477,13 +477,8 @@ export default function NotificationsPage() {
       {reviewing && (
         <ConfirmDialog
           title="Review broadcast"
-          message={
-            <span>
-              Mark <strong>{reviewing.title}</strong> as reviewed? It can then be
-              sent to the audience.
-            </span>
-          }
-          confirmLabel="Mark reviewed"
+          message={<>Review <strong>{reviewing.title}</strong>? This moves it to "Reviewed" status.</>}
+          confirmLabel="Review"
           busy={reviewingBusy}
           onConfirm={doReview}
           onCancel={() => setReviewing(null)}
@@ -493,17 +488,7 @@ export default function NotificationsPage() {
       {sending && (
         <ConfirmDialog
           title="Send broadcast"
-          message={
-            <span>
-              Send <strong>{sending.title}</strong> to{" "}
-              {sending.audience === "all_orgs"
-                ? "all organizations"
-                : sending.audience === "staff"
-                  ? "platform staff"
-                  : `${(sending.org_ids ?? []).length} selected organizations`}
-              ? This cannot be undone.
-            </span>
-          }
+          message={<>Send <strong>{sending.title}</strong> to all recipients?</>}
           confirmLabel="Send"
           busy={sendingBusy}
           onConfirm={doSend}
@@ -514,13 +499,8 @@ export default function NotificationsPage() {
       {cancelling && (
         <ConfirmDialog
           title="Cancel broadcast"
-          message={
-            <span>
-              Cancel <strong>{cancelling.title}</strong>? A cancelled broadcast
-              cannot be sent or edited.
-            </span>
-          }
-          confirmLabel="Cancel broadcast"
+          message={<>Cancel <strong>{cancelling.title}</strong>? This action cannot be undone.</>}
+          confirmLabel="Cancel"
           danger
           busy={cancellingBusy}
           onConfirm={doCancel}

@@ -13,11 +13,11 @@ Plan catalog CRUD + per-org plan assignments + monthly usage read-out.
 import json
 import re
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,8 +52,20 @@ class PlanUpdate(BaseModel):
 
 
 class PlanAssign(BaseModel):
-    org_id: UUID
+    org_id: Optional[UUID] = None
+    org_ids: List[UUID] = []
     note: Optional[str] = None
+
+    @field_validator("org_ids")
+    @classmethod
+    def _dedupe_org_ids(cls, v: List[UUID]) -> List[UUID]:
+        seen = set()
+        out = []
+        for item in v:
+            if item not in seen:
+                seen.add(item)
+                out.append(item)
+        return out
 
 
 def _validate_limits(limits: Dict[str, Optional[int]]) -> None:
@@ -96,24 +108,56 @@ async def _get_plan_or_404(db: AsyncSession, plan_id: UUID):
 @router.get("")
 async def list_plans(
     include_inactive: bool = Query(False),
+    search: Optional[str] = Query(None, max_length=100),
+    sort_by: str = Query("monthly_price_cents", pattern="^(monthly_price_cents|created_at|updated_at|code|name)$"),
+    sort_order: str = Query("asc", pattern="^(asc|desc)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     _: CurrentAdmin = Depends(require_permission("plans.view")),
 ):
+    extra = ""
+    params: dict = {}
+    if search:
+        extra = " AND (name ILIKE :search OR code ILIKE :search OR COALESCE(description, '') ILIKE :search)"
+        params["search"] = f"%{search}%"
+    base_from = f"""
+        FROM super_admin.plans
+        WHERE (:include_inactive OR is_active){extra}
+    """
+    params["include_inactive"] = include_inactive
+    allowed_sort = {"monthly_price_cents", "created_at", "updated_at", "code", "name"}
+    sort_col = sort_by if sort_by in allowed_sort else "monthly_price_cents"
+    sort_dir = sort_order.upper() if sort_order in ("asc", "desc") else "ASC"
+    offset = (page - 1) * page_size
+
+    total = (
+        await db.execute(
+            text(f"SELECT COUNT(*) {base_from}"),
+            params,
+        )
+    ).scalar_one()
+
     rows = (
         await db.execute(
             text(
-                """
+                f"""
                 SELECT id, code, name, description, is_active,
                        monthly_price_cents, period, limits, created_at, updated_at
-                FROM super_admin.plans
-                WHERE (:include_inactive OR is_active)
-                ORDER BY monthly_price_cents, code
+                {base_from}
+                ORDER BY {sort_col} {sort_dir}, code
+                LIMIT :limit OFFSET :offset
                 """
             ),
-            {"include_inactive": include_inactive},
+            {**params, "limit": page_size, "offset": offset},
         )
     ).mappings()
-    return {"items": [_plan_row(r) for r in rows]}
+    return {
+        "items": [_plan_row(r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.get("/{plan_id}")
@@ -470,70 +514,90 @@ async def assign_plan(
     if not plan["is_active"]:
         raise HTTPException(status_code=422, detail="Cannot assign an archived plan")
 
-    org = (
-        await db.execute(
-            text("SELECT id, name FROM public.organizations WHERE id = :org_id"),
-            {"org_id": payload.org_id},
-        )
-    ).mappings().first()
-    if not org:
-        raise HTTPException(status_code=404, detail="Organization not found")
+    org_ids = payload.org_ids if payload.org_ids else ([payload.org_id] if payload.org_id else [])
+    if not org_ids:
+        raise HTTPException(status_code=422, detail="At least one organization is required")
 
-    old = (
+    orgs = (
+        await db.execute(
+            text("SELECT id, name FROM public.organizations WHERE id = ANY(:org_ids)"),
+            {"org_ids": org_ids},
+        )
+    ).mappings().all()
+    by_id = {str(r["id"]): r["name"] for r in orgs}
+    missing = [str(oid) for oid in org_ids if str(oid) not in by_id]
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Organization(s) not found: {', '.join(missing)}",
+        )
+
+    assigned = []
+    for org_id in org_ids:
+        old = (
+            await db.execute(
+                text(
+                    """
+                    SELECT a.plan_id, p.code
+                    FROM super_admin.plan_assignments a
+                    JOIN super_admin.plans p ON p.id = a.plan_id
+                    WHERE a.org_id = :org_id AND a.status = 'active'
+                    """
+                ),
+                {"org_id": org_id},
+            )
+        ).mappings().first()
+
+        await db.execute(
+            text(
+                "UPDATE super_admin.plan_assignments SET status = 'revoked', revoked_at = now() "
+                "WHERE org_id = :org_id AND status = 'active'"
+            ),
+            {"org_id": org_id},
+        )
         await db.execute(
             text(
                 """
-                SELECT a.plan_id, p.code
-                FROM super_admin.plan_assignments a
-                JOIN super_admin.plans p ON p.id = a.plan_id
-                WHERE a.org_id = :org_id AND a.status = 'active'
+                INSERT INTO super_admin.plan_assignments
+                    (org_id, plan_id, status, assigned_by_id, assigned_by_email, note)
+                VALUES
+                    (:org_id, :plan_id, 'active', :admin_id, :admin_email, :note)
                 """
             ),
-            {"org_id": payload.org_id},
+            {
+                "org_id": org_id,
+                "plan_id": plan_id,
+                "admin_id": admin.id,
+                "admin_email": admin.email,
+                "note": payload.note,
+            },
         )
-    ).mappings().first()
+        assigned.append(
+            {
+                "org_id": str(org_id),
+                "org_name": by_id[str(org_id)],
+                "from_plan": old["code"] if old else None,
+                "to_plan": plan["code"],
+            }
+        )
 
-    await db.execute(
-        text(
-            "UPDATE super_admin.plan_assignments SET status = 'revoked', revoked_at = now() "
-            "WHERE org_id = :org_id AND status = 'active'"
-        ),
-        {"org_id": payload.org_id},
-    )
-    await db.execute(
-        text(
-            """
-            INSERT INTO super_admin.plan_assignments
-                (org_id, plan_id, status, assigned_by_id, assigned_by_email, note)
-            VALUES
-                (:org_id, :plan_id, 'active', :admin_id, :admin_email, :note)
-            """
-        ),
-        {
-            "org_id": payload.org_id,
-            "plan_id": plan_id,
-            "admin_id": admin.id,
-            "admin_email": admin.email,
-            "note": payload.note,
-        },
-    )
+        await write_audit_log(
+            actor_id=admin.id,
+            actor_email=admin.email,
+            action="plan.assign",
+            resource_type="organization",
+            resource_id=str(org_id),
+            new_values={
+                "org_name": by_id[str(org_id)],
+                "from_plan": old["code"] if old else None,
+                "to_plan": plan["code"],
+            },
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+
     await db.commit()
-
-    await write_audit_log(
-        actor_id=admin.id,
-        actor_email=admin.email,
-        action="plan.assign",
-        resource_type="organization",
-        resource_id=str(payload.org_id),
-        new_values={
-            "org_name": org["name"],
-            "from_plan": old["code"] if old else None,
-            "to_plan": plan["code"],
-        },
-        ip_address=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-    )
-    return {"ok": True, "org_id": str(payload.org_id), "plan_code": plan["code"]}
+    return {"ok": True, "plan_code": plan["code"], "count": len(assigned), "assigned": assigned}
 
 
 async def _org_usage(db: AsyncSession, org_id: UUID, month: str) -> dict:

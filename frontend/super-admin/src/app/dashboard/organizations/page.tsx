@@ -6,13 +6,22 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useToast } from "@/components/toast";
 import { Modal } from "@/components/modal";
+import { Pagination } from "@/components/pagination";
+import {
+  SearchInput,
+  CheckboxFilter,
+  DateFilter,
+  SortableTh,
+  isDateRangeValid,
+  toApiDate,
+  toApiDateTo,
+} from "@/components/filter-bar";
 
 type OrgRow = {
   id: string;
   name: string;
   business_name: string | null;
   is_active: boolean;
-  api_key_masked: string;
   created_at: string | null;
   user_count: number;
   booking_count: number;
@@ -28,12 +37,29 @@ type OrgList = {
   items: OrgRow[];
 };
 
+const PAGE_SIZE = 10;
+
+const STATUS_OPTIONS = [
+  { value: "true", label: "Active" },
+  { value: "false", label: "Suspended" },
+];
+
+const SORT_DEFAULTS: Record<string, "asc" | "desc"> = {
+  created_at: "desc",
+  name: "asc",
+};
+
 export default function OrganizationsPage() {
   const { can } = useAuth();
   const { toast } = useToast();
   const [data, setData] = useState<OrgList | null>(null);
   const [search, setSearch] = useState("");
-  const [isActive, setIsActive] = useState<string>("");
+  const [statusFilters, setStatusFilters] = useState<string[]>([]);
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [sortBy, setSortBy] = useState("created_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  const [page, setPage] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -42,20 +68,37 @@ export default function OrganizationsPage() {
   const [creating, setCreating] = useState(false);
   const [created, setCreated] = useState<{ org_id: string; api_key: string } | null>(null);
 
+  const handleSort = (column: string, order: "asc" | "desc") => {
+    setSortBy(column);
+    setSortOrder(order);
+    setPage(1);
+  };
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    if (!isDateRangeValid(fromDate, toDate)) {
+      setData({ items: [], total: 0, page, page_size: PAGE_SIZE });
+      setLoading(false);
+      return;
+    }
     try {
       const params = new URLSearchParams();
+      params.set("page", String(page));
+      params.set("page_size", String(PAGE_SIZE));
       if (search) params.set("search", search);
-      if (isActive !== "") params.set("is_active", isActive);
+      for (const s of statusFilters) params.append("is_active", s);
+      if (fromDate) params.set("from_date", toApiDate(fromDate) || fromDate);
+      if (toDate) params.set("to_date", toApiDateTo(toDate) || toDate);
+      params.set("sort_by", sortBy);
+      params.set("sort_order", sortOrder);
       setData(await api.get<OrgList>(`/tenants/orgs?${params.toString()}`));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load organizations");
     } finally {
       setLoading(false);
     }
-  }, [search, isActive]);
+  }, [search, statusFilters, fromDate, toDate, sortBy, sortOrder, page]);
 
   useEffect(() => {
     load();
@@ -105,25 +148,32 @@ export default function OrganizationsPage() {
         )}
       </div>
 
-      <div className="mt-4 flex items-center gap-3">
-        <input
+      <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+        <SearchInput
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(v) => {
+            setSearch(v);
+            setPage(1);
+          }}
           placeholder="Search name or business name…"
-          className="w-64 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-indigo-500"
+          className="w-64"
         />
-        <select
-          value={isActive}
-          onChange={(e) => setIsActive(e.target.value)}
-          className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-indigo-500"
-        >
-          <option value="">All statuses</option>
-          <option value="true">Active</option>
-          <option value="false">Suspended</option>
-        </select>
-        <span className="text-sm text-slate-400">
-          {data ? `${data.total} orgs` : ""}
-        </span>
+        <CheckboxFilter
+          label="Status"
+          options={STATUS_OPTIONS}
+          selected={statusFilters}
+          onChange={(v) => {
+            setStatusFilters(v);
+            setPage(1);
+          }}
+        />
+        <DateFilter
+          label="Created"
+          fromDate={fromDate}
+          toDate={toDate}
+          onFromChange={setFromDate}
+          onToChange={setToDate}
+        />
       </div>
 
       {error && (
@@ -136,12 +186,28 @@ export default function OrganizationsPage() {
         <table className="w-full text-left text-sm">
           <thead className="border-b border-slate-800 bg-slate-900 text-xs uppercase tracking-wide text-slate-400">
             <tr>
-              <th className="px-4 py-3">Organization</th>
+              <SortableTh
+                column="name"
+                sortBy={sortBy}
+                sortOrder={sortOrder}
+                onSort={handleSort}
+                defaultOrder={SORT_DEFAULTS.name}
+              >
+                Organization
+              </SortableTh>
               <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3">Users</th>
               <th className="px-4 py-3">Bookings</th>
               <th className="px-4 py-3">Conversations</th>
-              <th className="px-4 py-3">API Key</th>
+              <SortableTh
+                column="created_at"
+                sortBy={sortBy}
+                sortOrder={sortOrder}
+                onSort={handleSort}
+                defaultOrder={SORT_DEFAULTS.created_at}
+              >
+                Created
+              </SortableTh>
               <th className="px-4 py-3">Last activity</th>
             </tr>
           </thead>
@@ -184,8 +250,10 @@ export default function OrganizationsPage() {
                   <td className="px-4 py-3">{o.user_count}</td>
                   <td className="px-4 py-3">{o.booking_count}</td>
                   <td className="px-4 py-3">{o.conversation_count}</td>
-                  <td className="px-4 py-3 font-mono text-xs text-slate-400">
-                    {o.api_key_masked}
+                  <td className="px-4 py-3 text-slate-400">
+                    {o.created_at
+                      ? new Date(o.created_at).toLocaleString()
+                      : "—"}
                   </td>
                   <td className="px-4 py-3 text-slate-400">
                     {o.last_activity_at
@@ -204,6 +272,15 @@ export default function OrganizationsPage() {
           </tbody>
         </table>
       </div>
+
+      {data && (
+        <Pagination
+          page={page}
+          pageSize={PAGE_SIZE}
+          total={data.total}
+          onPageChange={setPage}
+        />
+      )}
 
       {createOpen && (
         <Modal

@@ -1,20 +1,39 @@
 "use client";
 
-import { ReactNode } from "react";
+import { ReactNode, useState } from "react";
 
 export function Modal({
   title,
   onClose,
   children,
+  confirmOnClose,
+  confirmMessage,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
+  confirmOnClose?: boolean;
+  confirmMessage?: string;
 }) {
+  const [showConfirm, setShowConfirm] = useState(false);
+
+  const handleClose = () => {
+    if (confirmOnClose) {
+      setShowConfirm(true);
+    } else {
+      onClose();
+    }
+  };
+
+  const handleConfirmClose = () => {
+    setShowConfirm(false);
+    onClose();
+  };
+
   return (
     <div
       className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4"
-      onClick={onClose}
+      onClick={handleClose}
     >
       <div
         className="w-full max-w-md rounded-lg border border-slate-700 bg-slate-900 p-5 shadow-xl"
@@ -23,7 +42,7 @@ export function Modal({
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold">{title}</h2>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="text-slate-400 hover:text-slate-100"
             aria-label="Close"
           >
@@ -32,6 +51,21 @@ export function Modal({
         </div>
         <div className="mt-4">{children}</div>
       </div>
+
+      {showConfirm && (
+        <ConfirmDialog
+          title="Discard changes?"
+          message={
+            <span>
+              {confirmMessage || "You have unsaved changes. Are you sure you want to close this form?"}
+            </span>
+          }
+          confirmLabel="Discard"
+          danger
+          onConfirm={handleConfirmClose}
+          onCancel={() => setShowConfirm(false)}
+        />
+      )}
     </div>
   );
 }

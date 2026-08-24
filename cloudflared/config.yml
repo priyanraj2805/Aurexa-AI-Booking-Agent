@@ -1,0 +1,15 @@
+﻿tunnel: bf0e9445-99b6-4871-b235-6e06fef7ff0c
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  - hostname: dotstark.tech
+    service: http://admin-panel:3002
+  - hostname: www.dotstark.tech
+    service: http://admin-panel:3002
+  - hostname: api.dotstark.tech
+    service: http://backend:8005
+  - hostname: super.dotstark.tech
+    service: http://super-admin:3003
+  - hostname: super-api.dotstark.tech
+    service: http://backend-super:8006
+  - service: http_status:404

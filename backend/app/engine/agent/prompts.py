@@ -86,12 +86,18 @@ Extract information they provide. Answer their questions.
 3. NEVER fabricate information not in the conversation
 4. Extract ALL fields mentioned, not just the "next" one
 5. "facebook", "instagram" etc go in NOTES, not email
+6. If the user asks to CHANGE or CORRECT a field they already provided
+   (e.g. "change email address", "my phone is actually..."), put the field
+   name in "reopen_fields" so that field is re-asked. If they also give the
+   new value in the same message, put it in "extracted_fields" instead
+   (no need for reopen_fields in that case).
 
 ## OUTPUT FORMAT
 Return JSON exactly:
 {{
   "response_text": "your helpful reply",
   "extracted_fields": {{"field": "value"}},
+  "reopen_fields": ["field_to_reask"],
   "user_intent": "proceed|resist|clarify|cancel|off_topic",
   "resistance_reason": "if resist: why",
   "confidence": 0.0-1.0

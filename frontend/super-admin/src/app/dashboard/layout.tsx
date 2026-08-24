@@ -20,14 +20,28 @@ import {
   ScrollText,
   Settings,
   Users,
+  Sun,
+  Moon,
+  Palette,
+  Sparkles,
 } from "lucide-react";
 import { AuthProvider, useAuth } from "@/lib/auth-context";
 import { ToastProvider } from "@/components/toast";
-import { ConfirmDialog } from "@/components/modal";
 import { ImpersonationBanner } from "@/components/impersonation-banner";
 import { NotificationBell } from "@/components/notification-bell";
-import { UiSwitcher } from "@/components/ui-switcher";
 import { api } from "@/lib/api";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuLabel,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
+  DropdownSubItem,
+} from "@/components/dropdown-menu";
 
 type NavModule = {
   name: string;
@@ -53,14 +67,116 @@ const MODULES: NavModule[] = [
 ];
 
 const SIDEBAR_STATE_KEY = "super_admin_sidebar_collapsed";
+const THEME_KEY = "super_admin_theme";
+
+function UserMenu({ collapsed }: { collapsed: boolean }) {
+  const { admin, logout } = useAuth();
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(THEME_KEY);
+      if (stored === "light") setTheme("light");
+    } catch {}
+    setMounted(true);
+  }, []);
+
+  const switchTheme = (t: "dark" | "light") => {
+    setTheme(t);
+    if (t === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    } else {
+      document.documentElement.removeAttribute("data-theme");
+    }
+    try { localStorage.setItem(THEME_KEY, t); } catch {}
+  };
+
+  if (!admin) return null;
+
+  if (collapsed) {
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          className="flex items-center justify-center rounded-full bg-indigo-600/20 text-indigo-400 hover:bg-indigo-600/30 transition-colors"
+          title={admin.full_name || admin.email}
+        >
+          <div className="h-8 w-8 rounded-full bg-indigo-600/20 flex items-center justify-center text-sm font-medium">
+            {(admin.full_name || admin.email || "?").charAt(0).toUpperCase()}
+          </div>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent side="top" align="start" className="w-56">
+          <DropdownMenuLabel>Signed in as</DropdownMenuLabel>
+          <div className="px-2 pb-1 text-sm text-slate-200 truncate">{admin.email}</div>
+          <DropdownMenuSeparator />
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              <Palette className="size-4" /> Theme
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              <DropdownSubItem onClick={() => switchTheme("light")} active={mounted && theme === "light"}>
+                <Sun className="size-3.5" /> White theme
+              </DropdownSubItem>
+              <DropdownSubItem onClick={() => switchTheme("dark")} active={mounted && theme === "dark"}>
+                <Moon className="size-3.5" /> Dark theme
+              </DropdownSubItem>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem destructive onClick={() => logout()}>
+            <LogOut className="size-4" />
+            Sign out
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
+  }
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-slate-800">
+        <div className="h-8 w-8 shrink-0 rounded-full bg-indigo-600/20 flex items-center justify-center text-sm font-medium text-indigo-400">
+          {(admin.full_name || admin.email || "?").charAt(0).toUpperCase()}
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-slate-200 truncate">{admin.full_name || admin.email}</p>
+          <p className="text-xs text-slate-400 truncate">{admin.role_name}</p>
+        </div>
+        <svg className="size-4 shrink-0 text-slate-500" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 2l4 4-4 4"/></svg>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="top" align="start" className="w-56">
+        <DropdownMenuLabel>Signed in as</DropdownMenuLabel>
+        <div className="px-2 pb-1 text-sm text-slate-200 truncate">{admin.email}</div>
+        <DropdownMenuSeparator />
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>
+            <Palette className="size-4" /> Theme
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            <DropdownSubItem onClick={() => switchTheme("light")} active={mounted && theme === "light"}>
+              <Sun className="size-3.5" /> White theme
+            </DropdownSubItem>
+            <DropdownSubItem onClick={() => switchTheme("dark")} active={mounted && theme === "dark"}>
+              <Moon className="size-3.5" /> Dark theme
+            </DropdownSubItem>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem destructive onClick={() => logout()}>
+          <LogOut className="size-4" />
+          Sign out
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
 function Shell({ children }: { children: React.ReactNode }) {
-  const { admin, isLoading, can, logout } = useAuth();
+  const { admin, isLoading, can } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
   const [counts, setCounts] = useState<Record<string, number>>({});
-  const [confirmLogout, setConfirmLogout] = useState(false);
 
   const POLL_MS = 30000;
 
@@ -70,8 +186,6 @@ function Shell({ children }: { children: React.ReactNode }) {
     }
   }, [isLoading, admin, router]);
 
-  // Pending-work badges for nav items: approvals awaiting review, open
-  // incidents, open support tickets. Polled like the notification bell.
   useEffect(() => {
     if (isLoading || !admin) return;
     let alive = true;
@@ -116,8 +230,6 @@ function Shell({ children }: { children: React.ReactNode }) {
           try {
             next[j.key] = await j.run();
           } catch (err) {
-            // Never swallow badge-poll failures silently — surface them so
-            // wiring bugs (missing import, wrong endpoint) are visible.
             console.error(`[nav-badge] failed to load count for ${j.key}`, err);
           }
         })
@@ -138,9 +250,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     try {
       setCollapsed(localStorage.getItem(SIDEBAR_STATE_KEY) === "1");
-    } catch {
-      // storage unavailable — keep default expanded
-    }
+    } catch {}
   }, []);
 
   const toggleCollapsed = () => {
@@ -148,9 +258,7 @@ function Shell({ children }: { children: React.ReactNode }) {
       const next = !prev;
       try {
         localStorage.setItem(SIDEBAR_STATE_KEY, next ? "1" : "0");
-      } catch {
-        // storage unavailable — state still works for the session
-      }
+      } catch {}
       return next;
     });
   };
@@ -171,18 +279,31 @@ function Shell({ children }: { children: React.ReactNode }) {
     <div className="flex h-screen overflow-hidden">
       <ImpersonationBanner />
       <aside
-        className={`shrink-0 overflow-y-auto border-r border-slate-800 bg-slate-900 p-4 pt-16 transition-[width] duration-200 ${
+        className={`shrink-0 border-r border-slate-800 bg-slate-900 pt-16 transition-[width] duration-200 flex flex-col ${
           collapsed ? "w-16" : "w-60"
         }`}
       >
         <div
           className={`flex items-center pb-4 ${
-            collapsed ? "justify-center" : "justify-between px-2"
+            collapsed ? "justify-center px-2" : "justify-between px-4"
           }`}
         >
           {!collapsed && (
-            <span className="text-sm font-bold uppercase tracking-wide text-slate-400">
-              Super Admin
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 shadow-md shadow-indigo-600/30">
+                <Sparkles className="size-4 text-white" />
+              </span>
+              <div className="min-w-0 leading-tight">
+                <p className="truncate text-sm font-bold text-slate-100">DotStark</p>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                  Super Admin
+                </p>
+              </div>
+            </div>
+          )}
+          {collapsed && (
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 shadow-md shadow-indigo-600/30">
+              <Sparkles className="size-4 text-white" />
             </span>
           )}
           <button
@@ -198,7 +319,7 @@ function Shell({ children }: { children: React.ReactNode }) {
             )}
           </button>
         </div>
-        <nav className="space-y-1">
+        <nav className="space-y-1 overflow-y-auto px-4 flex-1 min-h-0">
           {visibleModules.map((m) => {
             const active =
               m.path === "/dashboard"
@@ -211,12 +332,12 @@ function Shell({ children }: { children: React.ReactNode }) {
                 key={m.path}
                 href={m.path}
                 title={collapsed ? m.name : undefined}
-                className={`relative flex items-center rounded-md text-sm ${
+                className={`relative flex items-center rounded-lg text-sm transition-all duration-200 ${
                   collapsed ? "justify-center px-0 py-2" : "gap-3 px-3 py-2"
                 } ${
                   active
-                    ? "bg-indigo-600 font-medium text-white"
-                    : "text-slate-300 hover:bg-slate-800"
+                    ? "bg-gradient-to-r from-indigo-600 to-indigo-500 font-medium text-white shadow-md shadow-indigo-600/25"
+                    : "text-slate-300 hover:bg-slate-800 hover:text-slate-100"
                 }`}
               >
                 <Icon
@@ -239,50 +360,12 @@ function Shell({ children }: { children: React.ReactNode }) {
             );
           })}
         </nav>
-        <div className="mt-6 border-t border-slate-800 pt-4">
-          {collapsed ? (
-            <div className="flex justify-center">
-              <button
-                onClick={() => setConfirmLogout(true)}
-                title="Sign out"
-                aria-label="Sign out"
-                className="rounded-md p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
-              >
-                <LogOut className="h-5 w-5" />
-              </button>
-            </div>
-          ) : (
-            <>
-              <p className="px-2 text-sm font-medium text-slate-200">
-                {admin.full_name || admin.email}
-              </p>
-              <p className="px-2 text-xs text-slate-400">{admin.role_name}</p>
-              <button
-                onClick={() => setConfirmLogout(true)}
-                className="mt-3 w-full rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-800"
-              >
-                Sign out
-              </button>
-            </>
-          )}
+        <div className="mt-6 border-t border-slate-800 pt-4 px-4 shrink-0">
+          <UserMenu collapsed={collapsed} />
         </div>
       </aside>
-      {confirmLogout && (
-        <ConfirmDialog
-          title="Sign out"
-          message="Are you sure you want to sign out?"
-          confirmLabel="Sign out"
-          danger
-          onConfirm={() => {
-            setConfirmLogout(false);
-            logout();
-          }}
-          onCancel={() => setConfirmLogout(false)}
-        />
-      )}
       <main className="flex-1 overflow-y-auto">
         <div className="sticky top-0 z-30 flex items-center justify-end gap-3 border-b border-slate-800 bg-slate-950/80 px-6 py-2 backdrop-blur">
-          <UiSwitcher />
           <NotificationBell />
         </div>
         <div className="p-8">{children}</div>

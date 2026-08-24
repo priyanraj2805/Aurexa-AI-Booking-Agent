@@ -9,8 +9,8 @@ Refund safeguards:
 import csv
 import io
 import uuid as uuid_mod
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -66,28 +66,73 @@ async def _get_invoice_or_404(db: AsyncSession, invoice_id: UUID):
 @router.get("/subscriptions")
 async def list_subscriptions(
     org_id: Optional[UUID] = Query(None),
+    status: Optional[List[str]] = Query(None),
+    search: Optional[str] = Query(None, max_length=100),
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    sort_by: str = Query("created_at", pattern="^(created_at|current_period_start|current_period_end|canceled_at)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     _: CurrentAdmin = Depends(require_permission("billing.view")),
 ):
+    where = []
+    params: dict = {"org_id": org_id}
+    if status:
+        placeholders = ", ".join(f":st{i}" for i in range(len(status)))
+        where.append(f"s.status IN ({placeholders})")
+        params.update({f"st{i}": v for i, v in enumerate(status)})
+    if search:
+        where.append("o.name ILIKE :search")
+        params["search"] = f"%{search}%"
+    if from_date:
+        where.append("s.created_at >= :from_date")
+        params["from_date"] = from_date
+    if to_date:
+        where.append("s.created_at <= :to_date")
+        params["to_date"] = to_date
+    where_sql = (" AND " + " AND ".join(where)) if where else ""
+    base_from = f"""
+        FROM super_admin.subscriptions s
+        JOIN super_admin.plans p ON p.id = s.plan_id
+        JOIN public.organizations o ON o.id = s.org_id
+        WHERE (CAST(:org_id AS uuid) IS NULL OR s.org_id = :org_id){where_sql}
+    """
+    allowed_sort = {"created_at", "current_period_start", "current_period_end", "canceled_at"}
+    sort_col = sort_by if sort_by in allowed_sort else "created_at"
+    sort_dir = sort_order.upper() if sort_order in ("asc", "desc") else "DESC"
+    offset = (page - 1) * page_size
+
+    total = (
+        await db.execute(
+            text(f"SELECT COUNT(*) {base_from}"),
+            params,
+        )
+    ).scalar_one()
+
     rows = (
         await db.execute(
             text(
-                """
+                f"""
                 SELECT s.id, s.org_id, o.name AS org_name, s.plan_id, p.code AS plan_code,
                        p.name AS plan_name, s.provider, s.status,
                        s.current_period_start, s.current_period_end,
                        s.cancel_at_period_end, s.canceled_at, s.created_at
-                FROM super_admin.subscriptions s
-                JOIN super_admin.plans p ON p.id = s.plan_id
-                JOIN public.organizations o ON o.id = s.org_id
-                WHERE (CAST(:org_id AS uuid) IS NULL OR s.org_id = :org_id)
-                ORDER BY s.created_at DESC
+                {base_from}
+                ORDER BY s.{sort_col} {sort_dir}
+                LIMIT :limit OFFSET :offset
                 """
             ),
-            {"org_id": org_id},
+            {**params, "limit": page_size, "offset": offset},
         )
     ).mappings()
-    return {"items": [dict(r) for r in rows]}
+    return {
+        "items": [dict(r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.post("/subscriptions")
@@ -236,22 +281,65 @@ async def cancel_subscription(
 @router.get("/invoices")
 async def list_invoices(
     org_id: Optional[UUID] = Query(None),
-    status: Optional[str] = Query(None),
-    limit: int = Query(50, ge=1, le=200),
+    status: Optional[List[str]] = Query(None),
+    search: Optional[str] = Query(None, max_length=100),
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    sort_by: str = Query("created_at", pattern="^(created_at|due_at|paid_at|refunded_at)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     _: CurrentAdmin = Depends(require_permission("billing.view")),
 ):
     where = []
-    params: dict = {"limit": limit}
+    params: dict = {}
     if org_id:
         where.append("i.org_id = :org_id")
         params["org_id"] = org_id
     if status:
-        if status.lower() not in INVOICE_STATUSES:
-            raise HTTPException(status_code=422, detail=f"status must be one of {INVOICE_STATUSES}")
-        where.append("i.status = :status")
-        params["status"] = status.lower()
+        cleaned = [s.lower() for s in status]
+        for s in cleaned:
+            if s not in INVOICE_STATUSES:
+                raise HTTPException(status_code=422, detail=f"status must be one of {INVOICE_STATUSES}")
+        placeholders = ", ".join(f":st{i}" for i in range(len(cleaned)))
+        where.append(f"i.status IN ({placeholders})")
+        params.update({f"st{i}": s for i, s in enumerate(cleaned)})
+    if search:
+        where.append(
+            "(o.name ILIKE :search OR i.number ILIKE :search OR i.description ILIKE :search)"
+        )
+        params["search"] = f"%{search}%"
+    if from_date:
+        where.append("i.created_at >= :from_date")
+        params["from_date"] = from_date
+    if to_date:
+        where.append("i.created_at <= :to_date")
+        params["to_date"] = to_date
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    allowed_sort = {"created_at", "due_at", "paid_at", "refunded_at"}
+    sort_col = sort_by if sort_by in allowed_sort else "created_at"
+    sort_dir = sort_order.upper() if sort_order in ("asc", "desc") else "DESC"
+    if sort_col == "paid_at":
+        sort_expr = "COALESCE(i.paid_at, i.refunded_at)"
+    else:
+        sort_expr = f"i.{sort_col}"
+    offset = (page - 1) * page_size
+
+    total = (
+        await db.execute(
+            text(
+                f"""
+                SELECT COUNT(*)
+                FROM super_admin.invoices i
+                JOIN public.organizations o ON o.id = i.org_id
+                {where_sql}
+                """
+            ),
+            params,
+        )
+    ).scalar_one()
+
     rows = (
         await db.execute(
             text(
@@ -262,14 +350,19 @@ async def list_invoices(
                 FROM super_admin.invoices i
                 JOIN public.organizations o ON o.id = i.org_id
                 {where_sql}
-                ORDER BY i.created_at DESC
-                LIMIT :limit
+                ORDER BY {sort_expr} {sort_dir}
+                LIMIT :limit OFFSET :offset
                 """
             ),
-            params,
+            {**params, "limit": page_size, "offset": offset},
         )
     ).mappings()
-    return {"items": [dict(r) for r in rows]}
+    return {
+        "items": [dict(r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.post("/invoices")

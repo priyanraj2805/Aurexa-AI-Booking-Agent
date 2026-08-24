@@ -90,16 +90,39 @@ async def create_support_request(
 
 @router.get("/requests")
 async def list_support_requests(
+    status: Optional[List[str]] = Query(None),
+    priority: Optional[List[str]] = Query(None),
+    search: Optional[str] = Query(None, max_length=100),
+    from_date: Optional[str] = Query(None),
+    to_date: Optional[str] = Query(None),
+    sort_by: str = Query("created_at", pattern="^(created_at|updated_at|replied_at|resolved_at)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     org = await _resolve_org(db, user)
+    params: dict = {"org_id": org["org_id"]}
+    if status:
+        params["status"] = status
+    if priority:
+        params["priority"] = priority
+    if search:
+        params["search"] = search
+    if from_date:
+        params["from_date"] = from_date
+    if to_date:
+        params["to_date"] = to_date
+    params.update(
+        {"sort_by": sort_by, "sort_order": sort_order, "page": page, "page_size": page_size}
+    )
     try:
         async with httpx.AsyncClient(timeout=20, base_url=settings.SUPER_ADMIN_API_URL) as client:
             resp = await client.get(
                 "/api/v1/support/tickets",
                 headers=_service_headers(),
-                params={"org_id": org["org_id"]},
+                params=params,
             )
     except httpx.HTTPError as exc:
         logger.warning("Support ticket list forward failed: %s", exc)

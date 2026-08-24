@@ -310,6 +310,8 @@ export default function AgentCorePage() {
     tone: "professional",
     industry_context: "",
     custom_instructions: "",
+    business_name: "",
+    business_tagline: "",
   });
 
   // Rich field definitions state
@@ -397,6 +399,8 @@ export default function AgentCorePage() {
           tone: config.custom_prompts.tone || "professional",
           industry_context: config.custom_prompts.industry_context || "",
           custom_instructions: config.custom_prompts.custom_instructions || "",
+          business_name: config.custom_prompts.business_name || "",
+          business_tagline: config.custom_prompts.business_tagline || "",
         });
       }
       // Load field definitions (or convert legacy flat fields)
@@ -662,6 +666,61 @@ export default function AgentCorePage() {
               className="w-full bg-background border border-border text-foreground px-3.5 py-2.5 rounded-md text-[13px] font-sans focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
             />
           </div>
+
+          <div>
+            <label className="text-[13px] text-muted-foreground font-medium mb-2 block">
+              Business Name
+            </label>
+            <input
+              type="text"
+              value={persona.business_name || ""}
+              onChange={(e) => updatePersona("business_name", e.target.value)}
+              placeholder="e.g. BrightSmile Dental"
+              className="w-full bg-background border border-border text-foreground px-3.5 py-2.5 rounded-md text-[13px] font-sans focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+            />
+            <p className="text-[11px] text-muted-foreground mt-1.5">
+              Shown in the chat widget header.
+            </p>
+          </div>
+
+          <div>
+            <label className="text-[13px] text-muted-foreground font-medium mb-2 block">
+              Business Tagline
+            </label>
+            <input
+              type="text"
+              value={persona.business_tagline || ""}
+              onChange={(e) => updatePersona("business_tagline", e.target.value)}
+              placeholder="e.g. Dental Care · Appointment Booking"
+              className="w-full bg-background border border-border text-foreground px-3.5 py-2.5 rounded-md text-[13px] font-sans focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+            />
+            <p className="text-[11px] text-muted-foreground mt-1.5">
+              Short line describing your profession, shown under the business name.
+            </p>
+          </div>
+
+          <div>
+            <label className="text-[13px] text-muted-foreground font-medium mb-2 block">
+              Brand Color
+            </label>
+            <div className="flex items-center gap-3">
+              <input
+                type="color"
+                value={brandColor}
+                onChange={(e) => setBrandColor(e.target.value)}
+                className="size-10 rounded-md border border-border cursor-pointer"
+              />
+              <input
+                type="text"
+                value={brandColor}
+                onChange={(e) => setBrandColor(e.target.value)}
+                className="w-28 bg-background border border-border text-foreground px-3.5 py-2.5 rounded-md text-[13px] font-mono focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+              />
+            </div>
+            <p className="text-[11px] text-muted-foreground mt-1.5">
+              Widget theme color.
+            </p>
+          </div>
         </div>
       </div>
 
@@ -771,93 +830,69 @@ export default function AgentCorePage() {
         </div>
       </div>
 
-      {/* Organization Info */}
+      {/* API Key */}
       <div className="bg-card border border-border rounded-xl p-4 sm:p-6">
-        <h3 className="text-base font-semibold mb-5">Organization Info</h3>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-          <div>
-            <label className="text-[13px] text-muted-foreground font-medium mb-2 block">Business Name</label>
-            <input
-              type="text"
-              value={businessName}
-              onChange={(e) => setBusinessName(e.target.value)}
-              className="w-full bg-background border border-border text-foreground px-3.5 py-2.5 rounded-md text-[13px] font-sans focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
-            />
+        <div className="flex items-center gap-3 mb-5">
+          <div className="flex items-center justify-center size-9 rounded-lg bg-primary/10 text-primary">
+            <KeyRound className="size-5" />
           </div>
-
-          <div className="md:col-span-3">
-            <label className="text-[13px] text-muted-foreground font-medium mb-2 block">API Key</label>
-            <div className="flex items-center gap-2">
-              <div className="flex-1 flex items-center gap-2 bg-background border border-border rounded-md px-3.5 py-2.5 min-w-0">
-                <KeyRound className="size-3.5 text-muted-foreground shrink-0" />
-                <code className="text-[13px] font-mono text-foreground truncate">
-                  {apiKeyRevealed && apiKeyFull
-                    ? apiKeyFull
-                    : (config?.api_key || (apiKeyFull ? apiKeyFull.slice(0, 6) + "..." + apiKeyFull.slice(-4) : ""))}
-                </code>
-              </div>
-              <button
-                type="button"
-                onClick={toggleApiKeyVisibility}
-                disabled={apiKeyLoading || apiKeyRegenerating}
-                title={apiKeyRevealed ? "Hide API key" : "Reveal API key"}
-                className="inline-flex items-center justify-center size-9 rounded-md border border-border hover:bg-accent transition-colors disabled:opacity-50"
-              >
-                {apiKeyLoading ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : apiKeyRevealed ? (
-                  <EyeOff className="size-4" />
-                ) : (
-                  <Eye className="size-4" />
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={copyApiKey}
-                disabled={apiKeyRegenerating}
-                title="Copy API key"
-                className="inline-flex items-center justify-center size-9 rounded-md border border-border hover:bg-accent transition-colors disabled:opacity-50"
-              >
-                {apiKeyCopied ? (
-                  <Check className="size-4 text-green-500" />
-                ) : (
-                  <Copy className="size-4" />
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={regenerateApiKey}
-                disabled={apiKeyRegenerating || apiKeyLoading}
-                title="Regenerate API key"
-                className="inline-flex items-center justify-center size-9 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-50"
-              >
-                {apiKeyRegenerating ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
-              </button>
-            </div>
-            {apiKeyError && (
-              <p className="text-[11px] text-red-500 mt-1">{apiKeyError}</p>
-            )}
-          </div>
-
           <div>
-            <label className="text-[13px] text-muted-foreground font-medium mb-2 block">Brand Color</label>
-            <div className="flex items-center gap-3">
-              <input
-                type="color"
-                value={brandColor}
-                onChange={(e) => setBrandColor(e.target.value)}
-                className="size-10 rounded-md border border-border cursor-pointer"
-              />
-              <input
-                type="text"
-                value={brandColor}
-                onChange={(e) => setBrandColor(e.target.value)}
-                className="w-28 bg-background border border-border text-foreground px-3.5 py-2.5 rounded-md text-[13px] font-mono focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
-              />
-            </div>
+            <h3 className="text-base font-semibold">API Key</h3>
+            <p className="text-[13px] text-muted-foreground">
+              Use this key to authenticate legacy integrations with your booking agent.
+            </p>
           </div>
         </div>
+
+        <div className="flex items-center gap-2">
+          <div className="flex-1 flex items-center gap-2 bg-background border border-border rounded-md px-3.5 py-2.5 min-w-0">
+            <code className="text-[13px] font-mono text-foreground truncate">
+              {apiKeyRevealed && apiKeyFull
+                ? apiKeyFull
+                : (config?.api_key || (apiKeyFull ? apiKeyFull.slice(0, 6) + "..." + apiKeyFull.slice(-4) : ""))}
+            </code>
+          </div>
+          <button
+            type="button"
+            onClick={toggleApiKeyVisibility}
+            disabled={apiKeyLoading || apiKeyRegenerating}
+            title={apiKeyRevealed ? "Hide API key" : "Reveal API key"}
+            className="inline-flex items-center justify-center size-9 rounded-md border border-border hover:bg-accent transition-colors disabled:opacity-50"
+          >
+            {apiKeyLoading ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : apiKeyRevealed ? (
+              <EyeOff className="size-4" />
+            ) : (
+              <Eye className="size-4" />
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={copyApiKey}
+            disabled={apiKeyRegenerating}
+            title="Copy API key"
+            className="inline-flex items-center justify-center size-9 rounded-md border border-border hover:bg-accent transition-colors disabled:opacity-50"
+          >
+            {apiKeyCopied ? (
+              <Check className="size-4 text-green-500" />
+            ) : (
+              <Copy className="size-4" />
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={regenerateApiKey}
+            disabled={apiKeyRegenerating || apiKeyLoading}
+            title="Regenerate API key"
+            className="inline-flex items-center justify-center size-9 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-50"
+          >
+            {apiKeyRegenerating ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
+          </button>
+        </div>
+        {apiKeyError && (
+          <p className="text-[11px] text-red-500 mt-1">{apiKeyError}</p>
+        )}
       </div>
 
       {/* Knowledge Base (Vectorless RAG: PDF upload + website crawl) */}

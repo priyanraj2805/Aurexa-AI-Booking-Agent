@@ -11,9 +11,16 @@ import {
   MessageSquare,
   User,
   Building2,
+  Search,
+  ChevronDown,
+  ChevronUp,
+  Calendar,
+  ArrowUpDown,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
+import { Pagination } from "@/components/pagination";
+import { SearchInput, CheckboxFilter, DateFilter, SortSelect, SortOrder, isDateRangeValid, toApiDate, toApiDateTo } from "@/components/filter-bar";
 
 type Ticket = {
   id: string;
@@ -52,21 +59,70 @@ export default function SupportPage() {
   const [priority, setPriority] = useState("normal");
   const [submitting, setSubmitting] = useState(false);
   const [tickets, setTickets] = useState<Ticket[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
+
+  const [search, setSearch] = useState("");
+  const [statusFilters, setStatusFilters] = useState<string[]>([]);
+  const [priorityFilters, setPriorityFilters] = useState<string[]>([]);
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [sortBy, setSortBy] = useState("created_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+
+  const STATUS_OPTIONS = [
+    { value: "open", label: "Open" },
+    { value: "in_progress", label: "In progress" },
+    { value: "resolved", label: "Resolved" },
+  ];
+  const PRIORITY_OPTIONS = [
+    { value: "low", label: "Low" },
+    { value: "normal", label: "Normal" },
+    { value: "high", label: "High" },
+    { value: "urgent", label: "Urgent" },
+  ];
+  const SORT_OPTIONS = [
+    { value: "created_at", label: "Created" },
+    { value: "updated_at", label: "Updated" },
+    { value: "replied_at", label: "Replied" },
+    { value: "resolved_at", label: "Resolved" },
+  ];
 
   const loadTickets = useCallback(async () => {
     try {
-      const res = await api.get<{ items: Ticket[] }>("/support/requests");
+      if (!isDateRangeValid(fromDate, toDate)) {
+        setTickets([]);
+        setTotal(0);
+        setLoading(false);
+        return;
+      }
+      const params = new URLSearchParams({
+        page: String(page),
+        page_size: "10",
+        sort_by: sortBy,
+        sort_order: sortOrder,
+      });
+      if (search) params.append("search", search);
+      for (const s of statusFilters) params.append("status", s);
+      for (const p of priorityFilters) params.append("priority", p);
+      if (fromDate) params.append("from_date", toApiDate(fromDate) || fromDate);
+      if (toDate) params.append("to_date", toApiDateTo(toDate) || toDate);
+      const res = await api.get<{ items: Ticket[]; total: number }>(
+        `/support/requests?${params.toString()}`
+      );
       setTickets(res.items);
+      setTotal(res.total);
     } catch (e) {
       setTickets([]);
+      setTotal(0);
       if (e instanceof Error && !e.message.includes("Unauthorized")) {
         toast.error(e.message);
       }
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [page, search, statusFilters, priorityFilters, fromDate, toDate, sortBy, sortOrder]);
 
   useEffect(() => {
     void loadTickets();
@@ -176,11 +232,58 @@ export default function SupportPage() {
         <div className="flex items-center gap-2">
           <Inbox className="size-5 text-primary" />
           <h2 className="text-base font-semibold">Your requests</h2>
-          {tickets && tickets.length > 0 && (
+          {tickets && total > 0 && (
             <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
-              {tickets.length}
+              {total}
             </span>
           )}
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+          <SearchInput
+            value={search}
+            onChange={(v) => {
+              setSearch(v);
+              setPage(1);
+            }}
+            placeholder="Search subject, detail…"
+            className="w-64"
+          />
+          <CheckboxFilter
+            label="Status"
+            options={STATUS_OPTIONS}
+            selected={statusFilters}
+            onChange={(v) => {
+              setStatusFilters(v);
+              setPage(1);
+            }}
+          />
+          <CheckboxFilter
+            label="Priority"
+            options={PRIORITY_OPTIONS}
+            selected={priorityFilters}
+            onChange={(v) => {
+              setPriorityFilters(v);
+              setPage(1);
+            }}
+          />
+          <DateFilter
+            label="Created"
+            fromDate={fromDate}
+            toDate={toDate}
+            onFromChange={setFromDate}
+            onToChange={setToDate}
+          />
+          <SortSelect
+            value={sortBy}
+            onChange={(v) => {
+              setSortBy(v);
+              setPage(1);
+            }}
+            options={SORT_OPTIONS}
+          />
+          <SortOrder value={sortOrder} onChange={setSortOrder} />
+          <span className="text-sm text-muted-foreground">{total} requests</span>
         </div>
 
         <div className="mt-4 space-y-3">
@@ -261,6 +364,10 @@ export default function SupportPage() {
               </div>
             ))}
         </div>
+
+        {total > 0 && (
+          <Pagination page={page} pageSize={10} total={total} onPageChange={setPage} />
+        )}
       </section>
     </div>
   );

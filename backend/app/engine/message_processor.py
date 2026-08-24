@@ -859,6 +859,86 @@ async def process_message(
         )
         return action
 
+    # ── Change collected field override (deterministic Python-side) ──
+    # When the user asks to change a field that was already collected, re-ask
+    # exactly that field instead of emitting the next missing field's widget.
+    # Skips if the same turn already contains the new value (normal merge path).
+    CHANGE_COLLECTED_FIELD_KEYWORDS = {
+        "name": [
+            "change name",
+            "change my name",
+            "update name",
+            "wrong name",
+        ],
+        "email": [
+            "change email",
+            "change my email",
+            "update email",
+            "wrong email",
+            "different email",
+        ],
+        "phone": [
+            "change phone",
+            "change my phone",
+            "update phone",
+            "wrong phone",
+            "change number",
+            "change my number",
+            "different number",
+        ],
+        "time": [
+            "change time",
+            "change my time",
+            "change the time",
+            "wrong time",
+            "update time",
+            "different time",
+        ],
+    }
+    missing_set = set(chat_session.missing_fields or [])
+    changed_field = None
+    for field, kws in CHANGE_COLLECTED_FIELD_KEYWORDS.items():
+        if field in missing_set:
+            continue
+        if field not in chat_session.collected_data:
+            continue
+        if (raw_entities or {}).get(field):
+            continue
+        if any(kw in user_msg_lower for kw in kws):
+            changed_field = field
+            break
+    if changed_field:
+        chat_session.collected_data.pop(changed_field, None)
+        if changed_field == "time":
+            chat_session.collected_data.pop("selected_slot_id", None)
+            _clear_lock_slot_metadata(chat_session)
+        chat_session.missing_fields = [changed_field] + [
+            f for f in (chat_session.missing_fields or []) if f != changed_field
+        ]
+        await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+        next_step = StateEvaluator.determine_next_action(
+            chat_session.missing_fields, chat_session.current_intent, field_definitions
+        )
+        changed_directive = str(next_step.get("directive") or "TEXT_INPUT")
+        msg = _build_context_aware_response(
+            directive=changed_directive,
+            field_meta=next_step.get("field_meta"),
+            collected_data=chat_session.collected_data,
+            valid_data={},
+            errors={},
+            llm_generated_msg=llm_generated_msg,
+            agent_name=persona.get("agent_name", "Booking Assistant"),
+        )
+        action = ActionPayload(
+            message=msg,
+            widget_directive=changed_directive,
+            field_meta=next_step.get("field_meta"),
+        )
+        await _save_transcript(
+            db, chat_session.session_id, message_text, msg, changed_directive
+        )
+        return action
+
     # ── OTP Verification (for channels without modal support like WhatsApp) ─
     match = None
     if (
@@ -1732,13 +1812,15 @@ async def _handle_post_booking(
     if status in ("CANCELLED", "EXPIRED"):
         wants_to_rebook = any(kw in user_msg_lower for kw in REBOOK_KEYWORDS)
         if wants_to_rebook:
-            chat_session.session_status = "ACTIVE"
-            chat_session.collected_data = {}
-            chat_session.missing_fields = None
-            chat_session.current_intent = "START_BOOKING"
-            chat_session.otp_verified = False
-            await crud_chat.update_chat_session(
-                db, chat_session.session_id, chat_session
+            from app.engine.cancel_flow import (
+                _persist_session,
+                SESSION_RESET_REMOVE_KEYS,
+                reset_for_new_booking,
+            )
+
+            reset_for_new_booking(chat_session)
+            await _persist_session(
+                db, chat_session, remove_keys=SESSION_RESET_REMOVE_KEYS
             )
             return await process_message(
                 db, org, org_config, chat_session, message_text
@@ -1843,7 +1925,9 @@ async def _reschedule_booking(
     chat_session.current_intent = "EDIT_DATA"
     chat_session.otp_verified = False
     chat_session.missing_fields = ["date", "time"]
-    await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+    from app.engine.cancel_flow import _persist_session, SESSION_RESET_REMOVE_KEYS
+
+    await _persist_session(db, chat_session, remove_keys=SESSION_RESET_REMOVE_KEYS)
 
     if cancelled:
         if background_tasks:
@@ -1917,6 +2001,21 @@ async def _cancel_confirmed_booking(
     customer_email = _resolve_session_email(chat_session)
 
     if cancelled:
+        from app.core.org_notify import notify_org
+
+        await notify_org(
+            org_id=org.id,
+            kind="booking_cancelled",
+            title="Appointment cancelled",
+            body=(
+                f"{chat_session.collected_data.get('name') or 'A customer'} cancelled "
+                f"their appointment on {chat_session.collected_data.get('date') or 'an unknown date'} "
+                f"at {chat_session.collected_data.get('time') or ''}".strip()
+                + "."
+            ),
+            resource_type="booking",
+            resource_id=str(existing_booking.id) if existing_booking else None,
+        )
         if background_tasks:
             log_audit_event(
                 background_tasks,
@@ -2491,6 +2590,22 @@ async def _execute_booking(
         chat_session.session_status = "CONFIRMED"
         _clear_lock_slot_metadata(chat_session)
         await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+
+        from app.core.org_notify import notify_org
+
+        await notify_org(
+            org_id=org.id,
+            kind="booking_created",
+            title="New appointment booked",
+            body=(
+                f"{chat_session.collected_data.get('name') or 'A customer'} booked "
+                f"{chat_session.collected_data.get('date') or 'a slot'} at "
+                f"{chat_session.collected_data.get('time') or ''}".strip()
+                + "."
+            ),
+            resource_type="booking",
+            resource_id=str(booking.id),
+        )
 
         # Create Google Calendar event (best-effort)
         config_result = await db.execute(

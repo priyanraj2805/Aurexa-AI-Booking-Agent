@@ -59,8 +59,12 @@ async def recover_session_state(
         chat_session.missing_fields = state["missing_fields"]
     if state.get("current_intent") is not None:
         chat_session.current_intent = state["current_intent"]
-    if state.get("session_status") is not None:
-        chat_session.session_status = state["session_status"]
+    # NOTE: session_status is intentionally NOT restored from the checkpoint.
+    # Checkpoints are written mid-turn (before booking/OTP completes), so their
+    # session_status is always stale relative to the chat_sessions row, which is
+    # the authoritative lifecycle status (ACTIVE/CONFIRMING/CONFIRMED/CANCELLED/
+    # EXPIRED). Restoring it here would clobber a CONFIRMED/CANCELLED session
+    # back to ACTIVE and break the post-booking gate on the next message.
 
     return {
         "policy": recovery.policy,

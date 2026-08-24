@@ -2,12 +2,10 @@
 
 /* ─── UI skins ────────────────────────────────────────────────────────────
    super-admin uses hardcoded slate/indigo classes. We remap those palette
-   entries through CSS vars so a single `data-ui` attribute on <html> swaps
+   entries through CSS vars so a `data-theme` attribute on <html> swaps
    the whole control plane between skins:
-     - "classic": original dark slate 950 + indigo 600 control-plane look
-     - "admin"  : DotStark admin-panel look (light bg, orange primary,
-                  light-mode status chips)
-   Switched from the header toggle; persisted in localStorage.            */
+      (default): original dark slate 950 + indigo 600 control-plane look
+      "light"   : DotStark admin-panel look (light bg, orange primary)     */
 
 @theme inline {
   --color-slate-50: var(--s50);
@@ -62,9 +60,8 @@
   --color-orange-300: var(--o300);
 }
 
-/* ─── Classic skin — original super-admin control-plane look (tailwind defaults) ─── */
-:root,
-:root[data-ui="classic"] {
+/* ─── Dark skin (default) ─── */
+:root {
   --s50: #f8fafc;
   --s100: #f1f5f9;
   --s200: #e2e8f0;
@@ -117,8 +114,8 @@
   --o300: #fdba74;
 }
 
-/* ─── Admin skin — DotStark admin-panel palette (light) ─── */
-:root[data-ui="admin"] {
+/* ─── Light skin ─── */
+html[data-theme="light"] {
   --s50: #fafafa;
   --s100: #111111;
   --s200: #18181b;
@@ -171,16 +168,35 @@
   --o300: #c2410c;
 }
 
-/* ─── UI-switch visibility ────────────────────────────────────────────────
-   Classic skin keeps the original ghost icon button. In the light admin
-   skin the header is near-white, so give the switch a light chip look so it
-   does not blend in.                                                */
-:root[data-ui="admin"] .ui-switch {
+/* ─── Body adapts to theme ─── */
+body {
+  background-color: var(--s950);
+  color: var(--s100);
+}
+
+/* ─── UI-switch visibility ─── */
+html[data-theme="light"] .ui-switch {
   background: #f4f4f5;
   border-color: #e4e4e7;
   color: #3f3f46;
 }
-:root[data-ui="admin"] .ui-switch:hover {
+html[data-theme="light"] .ui-switch:hover {
   background: #e4e4e7;
   color: #18181b;
+}
+
+/* ─── Thin scrollbar (chart navigator) ─── */
+.scrollbar-thin::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 999px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.6);
 }

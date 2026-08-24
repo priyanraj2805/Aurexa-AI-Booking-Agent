@@ -533,7 +533,9 @@ async def call_model(
             if "date" not in gated_follow_up_fields:
                 gated_follow_up_fields.insert(0, "date")
         for core_field in ("phone", "email"):
-            if core_field in validation_errors and core_field not in gated_follow_up_fields:
+            if core_field in validation_errors:
+                if core_field in gated_follow_up_fields:
+                    gated_follow_up_fields.remove(core_field)
                 gated_follow_up_fields.insert(0, core_field)
 
         current_intent = str(state.get("current_intent") or "START_BOOKING")

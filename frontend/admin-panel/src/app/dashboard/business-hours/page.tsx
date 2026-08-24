@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef, type ReactNode } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
-  Loader2, AlertCircle, Save, Plus, Trash2, CalendarOff, Clock, Eye, Calendar,
+  Loader2, AlertCircle, Save, Plus, Trash2, CalendarOff, Clock, Eye, Calendar, ChevronDown,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import {
@@ -48,6 +48,116 @@ const TIMEZONES: string[] = (() => {
 })();
 
 const DURATIONS = [15, 30, 45, 60, 90, 120];
+
+// ── Searchable timezone picker ─────────────────────────────────────────────────
+
+function TimezonePicker({ value, onChange }: { value: string; onChange: (tz: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState(value);
+  const [highlight, setHighlight] = useState(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+
+  const filtered = useMemo(() => {
+    const q = text.trim().toLowerCase();
+    if (!q) return value ? [value, ...TIMEZONES.filter((tz) => tz !== value)] : TIMEZONES;
+    return TIMEZONES.filter((tz) => tz.toLowerCase().includes(q));
+  }, [text, value]);
+
+  useEffect(() => setText(value), [value]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  useEffect(() => setHighlight(0), [text, open]);
+
+  useEffect(() => {
+    const el = listRef.current?.children[highlight] as HTMLElement | undefined;
+    el?.scrollIntoView({ block: "nearest" });
+  }, [highlight]);
+
+  const select = (tz: string) => {
+    setText(tz);
+    onChange(tz);
+    setOpen(false);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      setOpen(false);
+      return;
+    }
+    if (!open && (e.key === "ArrowDown" || e.key === "Enter")) {
+      setOpen(true);
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlight((h) => Math.min(h + 1, filtered.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlight((h) => Math.max(h - 1, 0));
+    } else if (e.key === "Enter" && open && filtered[highlight]) {
+      e.preventDefault();
+      select(filtered[highlight]);
+    }
+  };
+
+  return (
+    <div ref={rootRef} className="relative">
+      <input
+        type="text"
+        aria-label="Timezone"
+        role="combobox"
+        aria-expanded={open}
+        value={text}
+        placeholder="Search timezone…"
+        onFocus={() => setOpen(true)}
+        onChange={(e) => {
+          setText(e.target.value);
+          setOpen(true);
+        }}
+        onKeyDown={onKeyDown}
+        className="w-full bg-secondary border border-border rounded-lg px-3 py-2 pr-8 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+      />
+      <ChevronDown
+        className={`absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none transition-transform ${open ? "rotate-180" : ""}`}
+      />
+      {open && (
+        <ul
+          ref={listRef}
+          className="absolute z-20 mt-1 w-full max-h-56 overflow-auto bg-card border border-border rounded-lg shadow-lg py-1"
+        >
+          {filtered.length === 0 ? (
+            <li className="px-3 py-2 text-sm text-muted-foreground">No timezone matches</li>
+          ) : (
+            filtered.map((tz, i) => (
+              <li
+                key={tz}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  select(tz);
+                }}
+                onMouseEnter={() => setHighlight(i)}
+                className={`px-3 py-1.5 text-sm cursor-pointer ${
+                  i === highlight ? "bg-secondary" : ""
+                } ${tz === value ? "text-primary font-medium" : ""}`}
+              >
+                {tz}
+              </li>
+            ))
+          )}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 // ── Default schedule ───────────────────────────────────────────────────────────
 
@@ -177,16 +287,10 @@ function WeeklyScheduleTab() {
           </div>
           <div>
             <label className="block text-xs font-medium text-muted-foreground mb-1.5">Timezone</label>
-            <select
-              aria-label="Timezone"
+            <TimezonePicker
               value={schedule.timezone}
-              onChange={(e) => updateMeta("timezone", e.target.value)}
-              className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
-            >
-              {TIMEZONES.map((tz) => (
-                <option key={tz} value={tz}>{tz}</option>
-              ))}
-            </select>
+              onChange={(tz) => updateMeta("timezone", tz)}
+            />
           </div>
         </div>
       </div>

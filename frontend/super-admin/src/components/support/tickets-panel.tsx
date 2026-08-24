@@ -5,6 +5,16 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useToast } from "@/components/toast";
 import { Modal } from "@/components/modal";
+import { Pagination } from "@/components/pagination";
+import {
+  SearchInput,
+  CheckboxFilter,
+  DateFilter,
+  SortableTh,
+  isDateRangeValid,
+  toApiDate,
+  toApiDateTo,
+} from "@/components/filter-bar";
 
 type Ticket = {
   id: string;
@@ -44,6 +54,26 @@ const priorityStyle = (p: string) =>
         ? "text-slate-400"
         : "text-slate-300";
 
+const STATUS_OPTIONS = [
+  { value: "open", label: "Open" },
+  { value: "in_progress", label: "In progress" },
+  { value: "resolved", label: "Resolved" },
+];
+
+const PRIORITY_OPTIONS = [
+  { value: "urgent", label: "Urgent" },
+  { value: "high", label: "High" },
+  { value: "normal", label: "Normal" },
+  { value: "low", label: "Low" },
+];
+
+const SORT_DEFAULTS: Record<string, "asc" | "desc"> = {
+  created_at: "desc",
+  updated_at: "desc",
+  replied_at: "desc",
+  resolved_at: "desc",
+};
+
 export default function TicketsPanel() {
   const { can } = useAuth();
   const { toast } = useToast();
@@ -52,8 +82,21 @@ export default function TicketsPanel() {
   const canManage = can("support.tickets.manage");
 
   const [tickets, setTickets] = useState<Ticket[] | null>(null);
-  const [statusFilter, setStatusFilter] = useState("");
-  const [priorityFilter, setPriorityFilter] = useState("");
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [statusFilters, setStatusFilters] = useState<string[]>([]);
+  const [priorityFilters, setPriorityFilters] = useState<string[]>([]);
+  const [search, setSearch] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [sortBy, setSortBy] = useState("created_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+
+  const handleSort = (column: string, order: "asc" | "desc") => {
+    setSortBy(column);
+    setSortOrder(order);
+    setPage(1);
+  };
   const [managed, setManaged] = useState<Ticket | null>(null);
   const [newStatus, setNewStatus] = useState("");
   const [replyText, setReplyText] = useState("");
@@ -61,19 +104,43 @@ export default function TicketsPanel() {
 
   const load = useCallback(async () => {
     if (!canView) return;
+    if (!isDateRangeValid(fromDate, toDate)) {
+      setTickets([]);
+      setTotal(0);
+      return;
+    }
     const params = new URLSearchParams();
-    if (statusFilter) params.set("status", statusFilter);
-    if (priorityFilter) params.set("priority", priorityFilter);
+    for (const s of statusFilters) params.append("status", s);
+    for (const p of priorityFilters) params.append("priority", p);
+    if (search) params.set("search", search);
+    if (fromDate) params.set("from_date", toApiDate(fromDate) || fromDate);
+    if (toDate) params.set("to_date", toApiDateTo(toDate) || toDate);
+    params.set("sort_by", sortBy);
+    params.set("sort_order", sortOrder);
+    params.set("page", String(page));
+    params.set("page_size", "10");
     try {
-      const res = await api.get<{ items: Ticket[] }>(
-        `/support/queue${params.toString() ? `?${params.toString()}` : ""}`
+      const res = await api.get<{ items: Ticket[]; total: number }>(
+        `/support/queue?${params.toString()}`
       );
       setTickets(res.items);
+      setTotal(res.total);
     } catch (e) {
       toast("error", e instanceof Error ? e.message : "Failed to load tickets");
       setTickets([]);
     }
-  }, [canView, statusFilter, priorityFilter, toast]);
+  }, [
+    canView,
+    statusFilters,
+    priorityFilters,
+    search,
+    fromDate,
+    toDate,
+    sortBy,
+    sortOrder,
+    page,
+    toast,
+  ]);
 
   useEffect(() => {
     void load();
@@ -103,11 +170,6 @@ export default function TicketsPanel() {
     }
   };
 
-  const counts = (tickets ?? []).reduce(
-    (acc, t) => ({ ...acc, [t.status]: (acc[t.status] ?? 0) + 1 }),
-    {} as Record<string, number>
-  );
-
   if (!canView) {
     return (
       <div className="rounded-lg border border-slate-800 p-6 text-slate-400">
@@ -123,36 +185,41 @@ export default function TicketsPanel() {
         reply — the org admin is notified by email.
       </p>
 
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex gap-1.5 text-xs">
-          {(["", "open", "in_progress", "resolved"] as const).map((s) => (
-            <button
-              key={s || "all"}
-              onClick={() => setStatusFilter(s)}
-              className={`rounded-full border px-3 py-1 ${
-                statusFilter === s
-                  ? "border-indigo-600 bg-indigo-600 text-white"
-                  : "border-slate-700 text-slate-300 hover:bg-slate-800"
-              }`}
-            >
-              {s === "" ? "All" : s.replace("_", " ")}{" "}
-              {s && counts[s] ? `(${counts[s]})` : ""}
-            </button>
-          ))}
-        </div>
-        <div className="ml-auto">
-          <select
-            value={priorityFilter}
-            onChange={(e) => setPriorityFilter(e.target.value)}
-            className="rounded-md border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-slate-300 outline-none"
-          >
-            <option value="">All priorities</option>
-            <option value="urgent">Urgent</option>
-            <option value="high">High</option>
-            <option value="normal">Normal</option>
-            <option value="low">Low</option>
-          </select>
-        </div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <SearchInput
+          value={search}
+          onChange={(v) => {
+            setSearch(v);
+            setPage(1);
+          }}
+          placeholder="Search subject, detail, org…"
+          className="w-64"
+        />
+        <CheckboxFilter
+          label="Status"
+          options={STATUS_OPTIONS}
+          selected={statusFilters}
+          onChange={(v) => {
+            setStatusFilters(v);
+            setPage(1);
+          }}
+        />
+        <CheckboxFilter
+          label="Priority"
+          options={PRIORITY_OPTIONS}
+          selected={priorityFilters}
+          onChange={(v) => {
+            setPriorityFilters(v);
+            setPage(1);
+          }}
+        />
+        <DateFilter
+          label="Filed"
+          fromDate={fromDate}
+          toDate={toDate}
+          onFromChange={setFromDate}
+          onToChange={setToDate}
+        />
       </div>
 
       <div className="overflow-x-auto rounded-lg border border-slate-800">
@@ -164,7 +231,15 @@ export default function TicketsPanel() {
               <th className="px-4 py-3">Org</th>
               <th className="px-4 py-3">Reporter</th>
               <th className="px-4 py-3">Subject</th>
-              <th className="px-4 py-3">Filed</th>
+              <SortableTh
+                column="created_at"
+                sortBy={sortBy}
+                sortOrder={sortOrder}
+                onSort={handleSort}
+                defaultOrder={SORT_DEFAULTS.created_at}
+              >
+                Filed
+              </SortableTh>
               <th className="px-4 py-3"></th>
             </tr>
           </thead>
@@ -226,6 +301,10 @@ export default function TicketsPanel() {
           </tbody>
         </table>
       </div>
+
+      {tickets && (
+        <Pagination page={page} pageSize={10} total={total} onPageChange={setPage} />
+      )}
 
       {managed && (
         <Modal title={`Triage — ${managed.subject}`} onClose={() => !saving && setManaged(null)}>

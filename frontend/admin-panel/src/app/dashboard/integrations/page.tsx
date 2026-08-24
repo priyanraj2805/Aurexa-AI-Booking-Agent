@@ -143,7 +143,7 @@ interface MeetingProviderUiState {
 export default function IntegrationsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [activeTab, setActiveTab] = useState<"overview" | "widget" | "whatsapp" | "calendar">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "widget" | "whatsapp" | "calendar" | "providers">("overview");
   const [copied, setCopied] = useState(false);
   const [publicApiBaseInput, setPublicApiBaseInput] = useState("");
   const [runtimeUrls, setRuntimeUrls] = useState<RuntimeUrls | null>(null);
@@ -647,14 +647,15 @@ export default function IntegrationsPage() {
       widgetToken: "${rawToken}",
       apiBase: "${absoluteApiBase}",
       primaryColor: "${brandColor}",
-      forceNewSession: true
+      forceNewSession: true,
+      autoOpen: true
     };
     setTimeout(() => {
       const widget = document.querySelector('dotstark-booking-widget');
-      if (widget && typeof widget._toggle === 'function') {
+      if (widget && !widget.isOpen && widget._chatBox && typeof widget._toggle === 'function') {
         widget._toggle();
       }
-    }, 1000);
+    }, 2000);
   </script>
   <script src="${absoluteApiRoot}/static/widget/widget.js" defer></script>
 </body>
@@ -781,6 +782,21 @@ export default function IntegrationsPage() {
             </div>
             {(gcState.connected || ocState.connected) && <ChevronRight className="size-4 opacity-50" />}
           </button>
+
+          <button
+            onClick={() => setActiveTab("providers")}
+            className={`w-full flex items-center justify-between px-4 py-3 rounded-lg text-sm font-medium transition-all duration-200 ${
+              activeTab === "providers" 
+              ? "bg-primary text-primary-foreground shadow-md" 
+              : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <Video className="size-4" />
+              Meeting Providers
+            </div>
+            {meetingProviders?.active_meeting_provider && meetingProviders.active_meeting_provider !== "NONE" && <ChevronRight className="size-4 opacity-50" />}
+          </button>
         </div>
 
         <div className="flex-1 max-w-4xl min-h-[500px]">
@@ -810,194 +826,6 @@ export default function IntegrationsPage() {
                       </p>
                     </div>
                   ))}
-                </div>
-              </div>
-
-              <div className="space-y-4 pt-4 border-t border-border/50">
-                <h3 className="text-lg font-semibold tracking-tight">Meeting Providers</h3>
-                <div className="bg-card border border-border rounded-xl p-5 space-y-5">
-                  <p className="text-sm text-muted-foreground">
-                    Manage meeting providers separately from calendar sync. Online confirmations can degrade gracefully when links are unavailable.
-                  </p>
-
-                  {meetingProvidersLoading ? (
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Loader2 className="size-4 animate-spin" />
-                      Loading meeting providers...
-                    </div>
-                  ) : (
-                    <div className="space-y-4">
-                      {[
-                        {
-                          key: "GOOGLE_MEET" as const,
-                          title: "Google Meet",
-                          connected: Boolean(meetingProviders?.google_meet_connected),
-                        },
-                        {
-                          key: "MICROSOFT_TEAMS" as const,
-                          title: "Microsoft Teams",
-                          connected: Boolean(meetingProviders?.microsoft_teams_connected),
-                        },
-                        {
-                          key: "ZOOM" as const,
-                          title: "Zoom",
-                          connected: Boolean(meetingProviders?.zoom_connected),
-                        },
-                      ].map((provider) => {
-                        const isActive = meetingProviders?.active_meeting_provider === provider.key;
-                        const ui = meetingProviderUi[provider.key];
-                        return (
-                          <div key={provider.key} className="border border-border rounded-lg p-4">
-                            <div className="flex items-center justify-between mb-3">
-                        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                                <Video className="size-4 text-primary" />
-                                <p className="text-sm font-semibold">{provider.title}</p>
-                              </div>
-                              <span
-                                className={`text-[11px] px-2 py-1 rounded-full font-semibold ${
-                                  provider.connected
-                                    ? isActive
-                                      ? "bg-green-500/15 text-green-600"
-                                      : "bg-blue-500/10 text-blue-600"
-                                    : "bg-amber-500/10 text-amber-600"
-                                }`}
-                              >
-                                {provider.connected ? (isActive ? "Active" : "Connected") : "Not Connected"}
-                              </span>
-                            </div>
-
-                            <div className="flex flex-wrap gap-2">
-                              {provider.connected ? (
-                                <>
-                                  <button
-                                    onClick={() => handleActivateMeetingProvider(provider.key)}
-                                    disabled={meetingProviderSaving || isActive}
-                                    className="text-sm px-3 py-2 rounded-lg border border-border hover:bg-accent disabled:opacity-50"
-                                  >
-                                    {isActive ? "✓ Active Provider" : "Set Active"}
-                                  </button>
-                                  <button
-                                    onClick={() => handleMeetingProviderDisconnect(provider.key)}
-                                    disabled={ui?.disconnecting}
-                                    className="text-sm px-3 py-2 rounded-lg border border-destructive/20 text-destructive hover:bg-destructive/10 disabled:opacity-50"
-                                  >
-                                    {ui?.disconnecting ? "Disconnecting..." : "Disconnect"}
-                                  </button>
-                                </>
-                              ) : (
-                                <button
-                                  onClick={() => handleMeetingProviderConnect(provider.key)}
-                                  disabled={ui?.connecting}
-                                  className="text-sm px-3 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-                                >
-                                  {ui?.connecting ? "Connecting..." : `Connect ${provider.title}`}
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  <div className="text-xs text-muted-foreground border border-amber-200/40 bg-amber-50/50 dark:bg-amber-950/20 dark:border-amber-900 rounded-lg p-3">
-                    If a provider link is unavailable at confirmation time, customers are informed explicitly and asked to retry or contact support.
-                  </div>
-
-                  {meetingProviders?.active_meeting_provider && meetingProviders.active_meeting_provider !== "NONE" && (
-                    <button
-                      onClick={() => handleActivateMeetingProvider("NONE")}
-                      disabled={meetingProviderSaving}
-                      className="text-sm text-muted-foreground hover:text-foreground"
-                    >
-                      Disable active meeting provider
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="space-y-4 pt-4 border-t border-border/50">
-                <h3 className="text-lg font-semibold tracking-tight">Meeting Policy</h3>
-                <div className="bg-card border border-border rounded-xl p-5 space-y-5">
-                  <p className="text-sm text-muted-foreground">
-                    Control which meeting types are allowed in booking flows. Changes are applied immediately across admin and widget surfaces.
-                  </p>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="text-[13px] font-semibold text-foreground mb-1.5 block">Meeting Mode</label>
-                      <select
-                        title="Meeting mode"
-                        value={meetingMode}
-                        onChange={(e) => applyMeetingMode(e.target.value as "OFFLINE_ONLY" | "ONLINE_ONLY" | "HYBRID")}
-                        className="w-full bg-background border border-border rounded-lg px-4 py-2.5 text-sm"
-                      >
-                        <option value="OFFLINE_ONLY">Offline only</option>
-                        <option value="ONLINE_ONLY">Online only</option>
-                        <option value="HYBRID">Hybrid</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="text-[13px] font-semibold text-foreground mb-1.5 block">Default Online Provider</label>
-                      <select
-                        title="Meeting provider default"
-                        value={meetingProviderDefault}
-                        onChange={(e) => setMeetingProviderDefault(e.target.value as "NONE" | "GOOGLE_MEET" | "MICROSOFT_TEAMS" | "ZOOM")}
-                        className="w-full bg-background border border-border rounded-lg px-4 py-2.5 text-sm"
-                      >
-                        <option value="NONE">None</option>
-                        <option value="GOOGLE_MEET">Google Meet</option>
-                        <option value="MICROSOFT_TEAMS">Microsoft Teams</option>
-                        <option value="ZOOM">Zoom</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between border border-border rounded-lg px-4 py-3">
-                    <div>
-                      <p className="text-sm font-medium">Allow hybrid user selection</p>
-                      <p className="text-xs text-muted-foreground">
-                        When disabled in HYBRID mode, booking flow is restricted to a single deterministic option.
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => setAllowHybridSelection((v) => !v)}
-                      title="Toggle hybrid option selection"
-                      aria-label="Toggle hybrid option selection"
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                        allowHybridSelection ? "bg-green-500" : "bg-muted"
-                      }`}
-                    >
-                      <span
-                        className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
-                          allowHybridSelection ? "translate-x-6" : "translate-x-1"
-                        }`}
-                      />
-                    </button>
-                  </div>
-
-                  <div className="text-xs text-muted-foreground">
-                    Available in widget:{" "}
-                    <span className="font-medium text-foreground">
-                      {meetingMode === "ONLINE_ONLY"
-                        ? "ONLINE"
-                        : meetingMode === "OFFLINE_ONLY"
-                          ? "OFFLINE"
-                          : allowHybridSelection
-                            ? "ONLINE + OFFLINE"
-                            : "OFFLINE"}
-                    </span>
-                  </div>
-
-                  <div className="pt-2 border-t border-border/50 flex justify-end">
-                    <button
-                      onClick={saveMeetingPolicy}
-                      disabled={policySaving}
-                      className="flex items-center gap-2 text-sm font-medium px-6 py-2.5 rounded-xl bg-primary text-primary-foreground hover:bg-primary/90 transition-all shadow-sm"
-                    >
-                      {policySaving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
-                      Save Meeting Policy
-                    </button>
-                  </div>
                 </div>
               </div>
 
@@ -1594,6 +1422,244 @@ export default function IntegrationsPage() {
                   </AlertDialogFooter>
                 </AlertDialogContent>
               </AlertDialog>
+            </div>
+          )}
+
+          {activeTab === "providers" && (
+            <div className="bg-card border border-border rounded-2xl overflow-hidden shadow-sm animate-in fade-in duration-500 slide-in-from-bottom-2">
+              <div className="flex flex-wrap items-center justify-between gap-3 p-4 sm:p-5 bg-secondary/40 border-b border-border/50">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-primary/10 rounded-lg">
+                    <Video className="size-5 text-primary" />
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-base leading-none">Meeting Providers</h3>
+                    <p className="text-xs text-muted-foreground mt-1">Connect online meeting platforms for booking confirmations</p>
+                  </div>
+                </div>
+                {meetingProviders?.active_meeting_provider && meetingProviders.active_meeting_provider !== "NONE" && (
+                  <span className="text-xs font-bold uppercase tracking-wider text-green-500 bg-green-500/10 px-3 py-1 rounded-full flex items-center gap-1.5">
+                    <div className="size-1.5 bg-green-500 rounded-full animate-pulse" />
+                    {meetingProviders.active_meeting_provider.replace("_", " ")} Active
+                  </span>
+                )}
+              </div>
+
+              <div className="p-6 md:p-8 space-y-8">
+                {meetingProvidersLoading ? (
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground py-8">
+                    <Loader2 className="size-4 animate-spin" />
+                    Loading meeting providers...
+                  </div>
+                ) : (
+                  <>
+                    {/* Provider Cards */}
+                    <div className="space-y-4">
+                      {[
+                        {
+                          key: "GOOGLE_MEET" as const,
+                          title: "Google Meet",
+                          description: "Host meetings via Google Meet for online bookings.",
+                          connected: Boolean(meetingProviders?.google_meet_connected),
+                          iconBg: "bg-[#4285F4]",
+                          icon: (
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="white">
+                              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                            </svg>
+                          ),
+                        },
+                        {
+                          key: "MICROSOFT_TEAMS" as const,
+                          title: "Microsoft Teams",
+                          description: "Host meetings via Microsoft Teams for online bookings.",
+                          connected: Boolean(meetingProviders?.microsoft_teams_connected),
+                          iconBg: "bg-[#6264A7]",
+                          icon: (
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="white">
+                              <path d="M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/>
+                            </svg>
+                          ),
+                        },
+                        {
+                          key: "ZOOM" as const,
+                          title: "Zoom",
+                          description: "Host meetings via Zoom for online bookings.",
+                          connected: Boolean(meetingProviders?.zoom_connected),
+                          iconBg: "bg-[#2D8CFF]",
+                          icon: (
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="white">
+                              <path d="M4 3h12a2 2 0 0 1 2 2v7l4-3v8l-4-3v3a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/>
+                            </svg>
+                          ),
+                        },
+                      ].map((provider) => {
+                        const isActive = meetingProviders?.active_meeting_provider === provider.key;
+                        const ui = meetingProviderUi[provider.key];
+                        return (
+                          <div key={provider.key} className="border border-border rounded-xl p-5">
+                            <div className="flex items-center justify-between mb-3">
+                              <div className="flex items-center gap-3">
+                                <div className={`flex items-center justify-center size-10 rounded-xl shadow-sm ${provider.iconBg}`}>
+                                  {provider.icon}
+                                </div>
+                                <div>
+                                  <p className="text-sm font-semibold">{provider.title}</p>
+                                  <p className="text-xs text-muted-foreground">{provider.description}</p>
+                                </div>
+                              </div>
+                              <span
+                                className={`text-[11px] px-2.5 py-1 rounded-full font-semibold ${
+                                  provider.connected
+                                    ? isActive
+                                      ? "bg-green-500/15 text-green-600"
+                                      : "bg-blue-500/10 text-blue-600"
+                                    : "bg-amber-500/10 text-amber-600"
+                                }`}
+                              >
+                                {provider.connected ? (isActive ? "Active" : "Connected") : "Not Connected"}
+                              </span>
+                            </div>
+
+                            <div className="flex flex-wrap gap-2">
+                              {provider.connected ? (
+                                <>
+                                  <button
+                                    onClick={() => handleActivateMeetingProvider(provider.key)}
+                                    disabled={meetingProviderSaving || isActive}
+                                    className={`text-sm font-medium px-4 py-2 rounded-lg transition-colors ${
+                                      isActive
+                                        ? "bg-green-500/20 text-green-600 border border-green-500/30"
+                                        : "bg-secondary border border-border hover:bg-accent disabled:opacity-50"
+                                    }`}
+                                  >
+                                    {isActive ? "✓ Active Provider" : "Set Active"}
+                                  </button>
+                                  <button
+                                    onClick={() => handleMeetingProviderDisconnect(provider.key)}
+                                    disabled={ui?.disconnecting}
+                                    className="text-sm font-medium px-4 py-2 rounded-lg border border-destructive/20 text-destructive hover:bg-destructive/10 disabled:opacity-50"
+                                  >
+                                    {ui?.disconnecting ? "Disconnecting..." : "Disconnect"}
+                                  </button>
+                                </>
+                              ) : (
+                                <button
+                                  onClick={() => handleMeetingProviderConnect(provider.key)}
+                                  disabled={ui?.connecting}
+                                  className="text-sm font-medium px-4 py-2.5 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                                >
+                                  {ui?.connecting ? "Connecting..." : `Connect ${provider.title}`}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="text-xs text-muted-foreground border border-amber-200/40 bg-amber-50/50 dark:bg-amber-950/20 dark:border-amber-900 rounded-lg p-3">
+                      If a provider link is unavailable at confirmation time, customers are informed explicitly and asked to retry or contact support.
+                    </div>
+
+                    {meetingProviders?.active_meeting_provider && meetingProviders.active_meeting_provider !== "NONE" && (
+                      <div className="pt-4 border-t border-border">
+                        <button
+                          onClick={() => handleActivateMeetingProvider("NONE")}
+                          disabled={meetingProviderSaving}
+                          className="text-sm text-muted-foreground hover:text-foreground"
+                        >
+                          Disable active meeting provider
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Meeting Policy */}
+                    <div className="border-t border-border pt-8">
+                      <h4 className="font-semibold text-sm mb-1">Meeting Policy</h4>
+                      <p className="text-xs text-muted-foreground mb-4">
+                        Control which meeting types are allowed in booking flows. Changes are applied immediately across admin and widget surfaces.
+                      </p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                        <div>
+                          <label className="text-[13px] font-semibold text-foreground mb-1.5 block">Meeting Mode</label>
+                          <select
+                            title="Meeting mode"
+                            value={meetingMode}
+                            onChange={(e) => applyMeetingMode(e.target.value as "OFFLINE_ONLY" | "ONLINE_ONLY" | "HYBRID")}
+                            className="w-full bg-background border border-border rounded-lg px-4 py-2.5 text-sm"
+                          >
+                            <option value="OFFLINE_ONLY">Offline only</option>
+                            <option value="ONLINE_ONLY">Online only</option>
+                            <option value="HYBRID">Hybrid</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-[13px] font-semibold text-foreground mb-1.5 block">Default Online Provider</label>
+                          <select
+                            title="Meeting provider default"
+                            value={meetingProviderDefault}
+                            onChange={(e) => setMeetingProviderDefault(e.target.value as "NONE" | "GOOGLE_MEET" | "MICROSOFT_TEAMS" | "ZOOM")}
+                            className="w-full bg-background border border-border rounded-lg px-4 py-2.5 text-sm"
+                          >
+                            <option value="NONE">None</option>
+                            <option value="GOOGLE_MEET">Google Meet</option>
+                            <option value="MICROSOFT_TEAMS">Microsoft Teams</option>
+                            <option value="ZOOM">Zoom</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between border border-border rounded-lg px-4 py-3 mb-4">
+                        <div>
+                          <p className="text-sm font-medium">Allow hybrid user selection</p>
+                          <p className="text-xs text-muted-foreground">
+                            When disabled in HYBRID mode, booking flow is restricted to a single deterministic option.
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => setAllowHybridSelection((v) => !v)}
+                          title="Toggle hybrid option selection"
+                          aria-label="Toggle hybrid option selection"
+                          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                            allowHybridSelection ? "bg-green-500" : "bg-muted"
+                          }`}
+                        >
+                          <span
+                            className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+                              allowHybridSelection ? "translate-x-6" : "translate-x-1"
+                            }`}
+                          />
+                        </button>
+                      </div>
+
+                      <div className="text-xs text-muted-foreground mb-4">
+                        Available in widget:{" "}
+                        <span className="font-medium text-foreground">
+                          {meetingMode === "ONLINE_ONLY"
+                            ? "ONLINE"
+                            : meetingMode === "OFFLINE_ONLY"
+                              ? "OFFLINE"
+                              : allowHybridSelection
+                                ? "ONLINE + OFFLINE"
+                                : "OFFLINE"}
+                        </span>
+                      </div>
+
+                      <div className="flex justify-end">
+                        <button
+                          onClick={saveMeetingPolicy}
+                          disabled={policySaving}
+                          className="flex items-center gap-2 text-sm font-medium px-6 py-2.5 rounded-xl bg-primary text-primary-foreground hover:bg-primary/90 transition-all shadow-sm"
+                        >
+                          {policySaving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+                          Save Meeting Policy
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           )}
 

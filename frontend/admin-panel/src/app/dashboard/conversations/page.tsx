@@ -1,11 +1,13 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Loader2, AlertCircle, ArrowLeft, User, Bot, Globe, MessageCircle, Headset, Bot as BotIcon, Send } from "lucide-react";
+import { Loader2, AlertCircle, ArrowLeft, User, Bot, Globe, MessageCircle, Headset, Bot as BotIcon, Send, Search, ChevronDown, ChevronUp, Calendar, ArrowUpDown } from "lucide-react";
 import { useConversations, useTranscript, takeoverConversation, releaseConversation, sendHumanMessage } from "@/hooks/use-dashboard";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
+import { Pagination } from "@/components/pagination";
 import { toast } from "sonner";
+import { SearchInput, CheckboxFilter, DateFilter, SortableTh } from "@/components/filter-bar";
 
 function statusBadge(status: string) {
   switch (status) {
@@ -54,8 +56,50 @@ function timeAgo(iso: string): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString([], {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function formatDateTime(iso: string): string {
+  return new Date(iso).toLocaleString([], {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+// Build a display identity for a session: prefer collected contact info,
+// fall back to the session ID when nothing was collected yet.
+function customerIdentity(s: {
+  customer_name?: string | null;
+  customer_email?: string | null;
+  customer_phone?: string | null;
+  id: string;
+}): { title: string; subtitle: string | null; hasContact: boolean } {
+  const name = s.customer_name?.trim();
+  const email = s.customer_email?.trim();
+  const phone = s.customer_phone?.trim();
+  const contact = email || phone;
+  if (name && contact) {
+    return { title: name, subtitle: contact, hasContact: true };
+  }
+  if (contact) {
+    return { title: contact, subtitle: name || null, hasContact: true };
+  }
+  if (name) {
+    return { title: name, subtitle: null, hasContact: false };
+  }
+  return { title: s.id.slice(0, 8) + "…", subtitle: "Session", hasContact: false };
 }
 
 function resolveTranscriptText(raw: unknown): string {
@@ -374,20 +418,101 @@ function TranscriptPanel({
 
 // ── Main Page ────────────────────────────────────
 export default function ConversationsPage() {
-  const { data: sessions, loading, error } = useConversations(200);
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState("");
+  const [statusFilters, setStatusFilters] = useState<string[]>([]);
+  const [channelFilters, setChannelFilters] = useState<string[]>([]);
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [sortBy, setSortBy] = useState("updated_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+
+  const { data, loading, error } = useConversations(page, 10, {
+    search,
+    status: statusFilters,
+    channel: channelFilters,
+    fromDate,
+    toDate,
+    sortBy,
+    sortOrder,
+  });
+  const sessions = data?.items ?? [];
+  const total = data?.total ?? 0;
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   if (selectedId) {
     return <TranscriptPanel sessionId={selectedId} onBack={() => setSelectedId(null)} />;
   }
 
+  const STATUS_OPTIONS = [
+    { value: "CONFIRMED", label: "Confirmed" },
+    { value: "CANCELLED", label: "Cancelled" },
+  ];
+  const CHANNEL_OPTIONS = [
+    { value: "web", label: "Web" },
+    { value: "whatsapp", label: "WhatsApp" },
+  ];
+  const SORT_DEFAULTS: Record<string, "asc" | "desc"> = {
+    updated_at: "desc",
+    created_at: "desc",
+    session_status: "asc",
+    current_intent: "asc",
+    channel: "asc",
+  };
+
+  const handleSort = (column: string, order: "asc" | "desc") => {
+    setSortBy(column);
+    setSortOrder(order);
+    setPage(1);
+  };
+
   return (
     <>
-      <div>
+      <div className="mb-6">
+        <div>
           <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">Inbox</h1>
-        <p className="text-muted-foreground text-xs sm:text-sm mt-1">
-          Click any session to view the full chat transcript.
-        </p>
+          <p className="text-muted-foreground text-xs sm:text-sm mt-1">
+            Click any session to view the full chat transcript.
+          </p>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+          <SearchInput
+            value={search}
+            onChange={(v) => {
+              setSearch(v);
+              setPage(1);
+            }}
+            placeholder="Search email, phone, name, session ID…"
+            className="w-64"
+          />
+          <CheckboxFilter
+            label="Status"
+            options={STATUS_OPTIONS}
+            selected={statusFilters}
+            onChange={(v) => {
+              setStatusFilters(v);
+              setPage(1);
+            }}
+          />
+          <CheckboxFilter
+            label="Channel"
+            options={CHANNEL_OPTIONS}
+            selected={channelFilters}
+            onChange={(v) => {
+              setChannelFilters(v);
+              setPage(1);
+            }}
+          />
+          <DateFilter
+            label="Created"
+            fromDate={fromDate}
+            toDate={toDate}
+            onFromChange={setFromDate}
+            onToChange={setToDate}
+          />
+          <span className="text-sm text-muted-foreground">{total} conversations</span>
+        </div>
       </div>
 
       <div className="bg-card border border-border rounded-xl overflow-hidden">
@@ -414,72 +539,120 @@ export default function ConversationsPage() {
           <div className="w-full overflow-x-auto">
             {/* Mobile card view */}
             <div className="md:hidden divide-y divide-border">
-              {sessions.map((s) => (
+              {sessions.map((s) => {
+                const ident = customerIdentity(s);
+                return (
                 <div
                   key={s.id}
                   onClick={() => setSelectedId(s.id)}
                   className="p-4 hover:bg-secondary/50 transition-colors cursor-pointer space-y-2"
                 >
                   <div className="flex items-center justify-between">
-                    <span className="text-[13px] font-mono text-muted-foreground">{s.id.slice(0, 8)}…</span>
+                    <span className="text-[13px] font-medium">
+                      {ident.title}
+                      {ident.subtitle && (
+                        <span className="ml-2 font-mono text-muted-foreground text-[11px]">
+                          {ident.subtitle}
+                        </span>
+                      )}
+                    </span>
                     <ChannelBadge channel={s.channel} />
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">{s.current_intent || "—"}</span>
+                    <span className="text-sm text-muted-foreground text-[11px]">{formatDate(s.created_at)}</span>
                     <span className={`text-[11px] font-semibold uppercase px-2 py-1 rounded ${statusBadge(s.session_status)}`}>
                       {s.session_status}
                     </span>
                   </div>
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-muted-foreground">
-                      {Object.keys(s.collected_data).length > 0
-                        ? Object.keys(s.collected_data).join(", ")
-                        : "—"}
-                    </span>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium">{s.current_intent || "—"}</span>
                     <span className={s.missing_fields.length > 0 ? "text-yellow-500" : "text-green-500"}>
                       {s.missing_fields.length > 0 ? `${s.missing_fields.length} missing` : "Complete"}
                     </span>
                   </div>
-                  <div className="text-[11px] text-muted-foreground">{timeAgo(s.updated_at)}</div>
+                  <div className="text-[11px] text-muted-foreground">
+                      Last active {timeAgo(s.updated_at)} · {formatTime(s.updated_at)}
+                    </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
             {/* Desktop table view */}
             <table className="hidden md:table w-full border-collapse">
               <thead>
                 <tr>
                   <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">
-                    Session ID
+                    Customer
                   </th>
-                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">
+                  <SortableTh
+                    column="channel"
+                    sortBy={sortBy}
+                    sortOrder={sortOrder}
+                    onSort={handleSort}
+                    defaultOrder={SORT_DEFAULTS.channel}
+                    className="border-b border-border"
+                  >
                     Channel
-                  </th>
-                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">
+                  </SortableTh>
+                  <SortableTh
+                    column="current_intent"
+                    sortBy={sortBy}
+                    sortOrder={sortOrder}
+                    onSort={handleSort}
+                    defaultOrder={SORT_DEFAULTS.current_intent}
+                    className="border-b border-border"
+                  >
                     Intent
-                  </th>
-                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">
+                  </SortableTh>
+                  <SortableTh
+                    column="session_status"
+                    sortBy={sortBy}
+                    sortOrder={sortOrder}
+                    onSort={handleSort}
+                    defaultOrder={SORT_DEFAULTS.session_status}
+                    className="border-b border-border"
+                  >
                     Status
-                  </th>
-                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">
-                    Collected
-                  </th>
+                  </SortableTh>
                   <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">
                     Missing
                   </th>
-                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">
-                    Last Activity
-                  </th>
+                  <SortableTh
+                    column="created_at"
+                    sortBy={sortBy}
+                    sortOrder={sortOrder}
+                    onSort={handleSort}
+                    defaultOrder={SORT_DEFAULTS.created_at}
+                    className="border-b border-border"
+                  >
+                    Created
+                  </SortableTh>
+                  <SortableTh
+                    column="updated_at"
+                    sortBy={sortBy}
+                    sortOrder={sortOrder}
+                    onSort={handleSort}
+                    defaultOrder={SORT_DEFAULTS.updated_at}
+                    className="border-b border-border"
+                  >
+                    Last Active
+                  </SortableTh>
                 </tr>
               </thead>
               <tbody>
-                {sessions.map((s) => (
+                {sessions.map((s) => {
+                  const ident = customerIdentity(s);
+                  return (
                   <tr
                     key={s.id}
                     onClick={() => setSelectedId(s.id)}
                     className="hover:bg-secondary/50 transition-colors cursor-pointer"
                   >
-                    <td className="px-4 py-4 text-[13px] border-b border-border font-mono text-muted-foreground">
-                      {s.id.slice(0, 8)}…
+                    <td className="px-4 py-4 border-b border-border">
+                      <span className="text-[13px] font-medium text-foreground">{ident.title}</span>
+                      {ident.subtitle && (
+                        <span className="block text-[11px] text-muted-foreground">{ident.subtitle}</span>
+                      )}
                     </td>
                     <td className="px-4 py-4 border-b border-border">
                       <ChannelBadge channel={s.channel} />
@@ -493,15 +666,6 @@ export default function ConversationsPage() {
                       </span>
                     </td>
                     <td className="px-4 py-4 text-[13px] border-b border-border">
-                      {Object.keys(s.collected_data).length > 0 ? (
-                        <span className="text-[11px] text-muted-foreground">
-                          {Object.keys(s.collected_data).join(", ")}
-                        </span>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
-                    <td className="px-4 py-4 text-[13px] border-b border-border">
                       {s.missing_fields.length > 0 ? (
                         <span className="text-[11px] text-yellow-500">
                           {s.missing_fields.join(", ")}
@@ -511,15 +675,26 @@ export default function ConversationsPage() {
                       )}
                     </td>
                     <td className="px-4 py-4 text-[13px] border-b border-border">
-                      {timeAgo(s.updated_at)}
+                      {formatDate(s.created_at)}
+                    </td>
+                    <td className="px-4 py-4 text-[13px] border-b border-border">
+                      <span className="text-foreground">{timeAgo(s.updated_at)}</span>
+                      <span className="block text-[11px] text-muted-foreground">
+                        {formatTime(s.updated_at)}
+                      </span>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
       </div>
+
+      {total > 0 && (
+        <Pagination page={page} pageSize={10} total={total} onPageChange={setPage} />
+      )}
     </>
   );
 }

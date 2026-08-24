@@ -1,5 +1,5 @@
-from typing import Optional
-from datetime import datetime, timedelta
+from typing import List, Optional
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
@@ -69,9 +69,13 @@ def _masked_booking_rows(rows, can_unmask: bool) -> list:
 @router.get("/orgs", response_model=OrgListResponse)
 async def list_organizations(
     search: Optional[str] = Query(None, max_length=100),
-    is_active: Optional[bool] = Query(None),
+    is_active: Optional[List[bool]] = Query(None),
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    sort_by: str = Query("created_at", pattern="^(created_at|name)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(25, ge=1, le=100),
+    page_size: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_readonly_db),
     _: dict = Depends(require_permission("orgs.view")),
 ):
@@ -83,8 +87,15 @@ async def list_organizations(
         )
         params["search"] = f"%{search}%"
     if is_active is not None:
-        where.append("o.is_active = :is_active")
-        params["is_active"] = is_active
+        placeholders = ", ".join(f":ia{i}" for i in range(len(is_active)))
+        where.append(f"o.is_active IN ({placeholders})")
+        params.update({f"ia{i}": v for i, v in enumerate(is_active)})
+    if from_date:
+        where.append("o.created_at >= :from_date")
+        params["from_date"] = from_date
+    if to_date:
+        where.append("o.created_at <= :to_date")
+        params["to_date"] = to_date
 
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     offset = (page - 1) * page_size
@@ -115,7 +126,7 @@ async def list_organizations(
                 FROM organizations o
                 LEFT JOIN org_configs c ON c.org_id = o.id
                 {where_sql}
-                ORDER BY o.created_at DESC
+                ORDER BY o.{sort_by} {sort_order.upper()}
                 LIMIT :limit OFFSET :offset
                 """
             ),
@@ -304,10 +315,14 @@ async def list_org_sessions(
 async def search_users(
     search: Optional[str] = Query(None, max_length=100),
     org_id: Optional[UUID] = Query(None),
-    is_active: Optional[bool] = Query(None),
+    is_active: Optional[List[bool]] = Query(None),
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    sort_by: str = Query("created_at", pattern="^(created_at|email|full_name)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     unmask: bool = Query(False),
     page: int = Query(1, ge=1),
-    page_size: int = Query(25, ge=1, le=100),
+    page_size: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_readonly_db),
     admin: CurrentAdmin = Depends(require_permission("users.view")),
 ):
@@ -320,8 +335,15 @@ async def search_users(
         where.append("u.org_id = :org_id")
         params["org_id"] = org_id
     if is_active is not None:
-        where.append("u.is_active = :is_active")
-        params["is_active"] = is_active
+        placeholders = ", ".join(f":ia{i}" for i in range(len(is_active)))
+        where.append(f"u.is_active IN ({placeholders})")
+        params.update({f"ia{i}": v for i, v in enumerate(is_active)})
+    if from_date:
+        where.append("u.created_at >= :from_date")
+        params["from_date"] = from_date
+    if to_date:
+        where.append("u.created_at <= :to_date")
+        params["to_date"] = to_date
 
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     offset = (page - 1) * page_size
@@ -340,7 +362,7 @@ async def search_users(
                 FROM users u
                 JOIN organizations o ON o.id = u.org_id
                 {where_sql}
-                ORDER BY u.created_at DESC
+                ORDER BY u.{sort_by} {sort_order.upper()}
                 LIMIT :limit OFFSET :offset
                 """
             ),

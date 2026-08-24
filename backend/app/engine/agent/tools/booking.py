@@ -104,6 +104,18 @@ async def create_booking_record(target_date: str, time: str, config: RunnableCon
         }
         chat_session.collected_data = collected_data
         await update_chat_session(db, session_id, chat_session)
+
+        from app.core.org_notify import notify_org
+
+        await notify_org(
+            org_id=uuid.UUID(org_id_str),
+            kind="booking_created",
+            title="New appointment booked",
+            body=f"{customer_name} booked {normalized_date} at {normalized_time}.",
+            resource_type="booking",
+            resource_id=str(getattr(booking, "id", "")),
+        )
+
         return _build_success_message(normalized_date, normalized_time)
     except Exception as error:
         logger.error("Booking error: %s", error)

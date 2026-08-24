@@ -4,8 +4,8 @@ Workflow: draft -> reviewed -> sent (or cancelled). Audience is resolved
 when the broadcast is sent: all orgs, a selected list of orgs, or platform
 staff. Every transition is audited.
 """
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import date, datetime, timezone
+from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -86,22 +86,41 @@ def _validate_audience(payload) -> None:
 
 @router.get("")
 async def list_broadcasts(
-    status: Optional[str] = Query(None),
-    audience: Optional[str] = Query(None),
+    status: Optional[List[str]] = Query(None),
+    audience: Optional[List[str]] = Query(None),
+    search: Optional[str] = Query(None, max_length=100),
+    from_date: Optional[date] = Query(None, description="ISO date, e.g. 2026-01-01"),
+    to_date: Optional[date] = Query(None, description="ISO date, e.g. 2026-12-31"),
+    sort_by: str = Query("created_at", pattern="^(created_at|updated_at|sent_at|reviewed_at)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(25, ge=1, le=100),
+    page_size: int = Query(10, ge=1, le=100),
     _: CurrentAdmin = Depends(require_permission("notifications.view")),
     db: AsyncSession = Depends(get_db),
 ):
     where = []
     params: dict = {}
+    if search:
+        where.append("(title ILIKE :search OR body ILIKE :search)")
+        params["search"] = f"%{search}%"
     if status:
-        where.append("status = :status")
-        params["status"] = status
+        placeholders = ", ".join(f":st{i}" for i in range(len(status)))
+        where.append(f"status IN ({placeholders})")
+        params.update({f"st{i}": s for i, s in enumerate(status)})
     if audience:
-        where.append("audience = :audience")
-        params["audience"] = audience
+        placeholders = ", ".join(f":au{i}" for i in range(len(audience)))
+        where.append(f"audience IN ({placeholders})")
+        params.update({f"au{i}": a for i, a in enumerate(audience)})
+    if from_date:
+        where.append("created_at >= :from_date")
+        params["from_date"] = from_date
+    if to_date:
+        where.append("created_at <= :to_date")
+        params["to_date"] = to_date
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    allowed_sort = {"created_at", "updated_at", "sent_at", "reviewed_at"}
+    sort_col = sort_by if sort_by in allowed_sort else "created_at"
+    sort_dir = sort_order.upper() if sort_order in ("asc", "desc") else "DESC"
     offset = (page - 1) * page_size
     total = (
         await db.execute(
@@ -118,7 +137,7 @@ async def list_broadcasts(
                 SELECT {BROADCAST_FIELDS}
                 FROM super_admin.broadcast_notifications
                 {where_sql}
-                ORDER BY created_at DESC
+                ORDER BY {sort_col} {sort_dir}
                 LIMIT :limit OFFSET :offset
                 """
             ),

@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { Bell, Megaphone, X } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Bell, CalendarCheck2, CalendarX2, Megaphone, X } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -14,6 +15,18 @@ type BroadcastItem = {
   read: boolean;
 };
 
+type InboxItem = {
+  id: string;
+  kind: string;
+  title: string;
+  body: string | null;
+  resource_type: string | null;
+  resource_id: string | null;
+  is_read: boolean;
+  created_at: string | null;
+  read_at: string | null;
+};
+
 const POLL_MS = 30000;
 
 const fmtTime = (s: string | null) => {
@@ -23,10 +36,12 @@ const fmtTime = (s: string | null) => {
   if (diff < 60_000) return "just now";
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d ago`;
   return d.toLocaleString();
 };
 
 export function AnnouncementBell() {
+  const router = useRouter();
   const [unread, setUnread] = React.useState(0);
   const [open, setOpen] = React.useState(false);
   const [items, setItems] = React.useState<BroadcastItem[]>([]);
@@ -34,14 +49,25 @@ export function AnnouncementBell() {
   const [selected, setSelected] = React.useState<BroadcastItem | null>(null);
   const panelRef = React.useRef<HTMLDivElement>(null);
 
+  // Booking activity notifications
+  const [tab, setTab] = React.useState<"announcements" | "bookings">("announcements");
+  const [bookingItems, setBookingItems] = React.useState<InboxItem[]>([]);
+  const [bookingUnread, setBookingUnread] = React.useState(0);
+
   const loadCount = React.useCallback(async () => {
     try {
       const r = await api.get<{ unread_count: number }>("/broadcasts/unread-count");
       setUnread(r.unread_count);
     } catch (err) {
-      // Never swallow badge-poll failures silently — surface them so wiring
-      // bugs (missing import, wrong endpoint) are visible.
       console.error("[announcement-bell] failed to load unread count", err);
+    }
+    try {
+      const r = await api.get<{ unread: number }>(
+        "/dashboard/notifications/unread-count"
+      );
+      setBookingUnread(r.unread);
+    } catch (err) {
+      console.error("[announcement-bell] failed to load booking unread count", err);
     }
   }, []);
 
@@ -52,11 +78,17 @@ export function AnnouncementBell() {
       setItems(r.items);
       setUnread(r.unread_count ?? 0);
     } catch (err) {
-      // Never swallow badge-poll failures silently — surface them so wiring
-      // bugs (missing import, wrong endpoint) are visible.
       console.error("[announcement-bell] failed to load announcements", err);
     } finally {
       setLoading(false);
+    }
+    try {
+      const r = await api.get<{ items: InboxItem[] }>(
+        "/dashboard/notifications?limit=20"
+      );
+      setBookingItems(r.items);
+    } catch (err) {
+      console.error("[announcement-bell] failed to load booking notifications", err);
     }
   }, []);
 
@@ -123,77 +155,217 @@ export function AnnouncementBell() {
     }
   };
 
+  const openBookingItem = async (item: InboxItem) => {
+    setOpen(false);
+    if (!item.is_read) {
+      await api
+        .post(`/dashboard/notifications/${item.id}/read`)
+        .catch((err) =>
+          console.error("[announcement-bell] booking mark read failed", err)
+        );
+      setBookingItems((prev) =>
+        prev.map((i) => (i.id === item.id ? { ...i, is_read: true } : i))
+      );
+      setBookingUnread((prev) => Math.max(0, prev - 1));
+    }
+    if (item.kind === "booking_cancelled") {
+      router.push("/dashboard/bookings/cancelled");
+    } else {
+      router.push("/dashboard/bookings");
+    }
+  };
+
+  const markAllBookings = async () => {
+    try {
+      await api.post("/dashboard/notifications/read-all");
+      setBookingUnread(0);
+      setBookingItems((prev) => prev.map((i) => ({ ...i, is_read: true })));
+    } catch (err) {
+      console.error("[announcement-bell] booking mark all read failed", err);
+    }
+  };
+
+  const totalUnread = unread + bookingUnread;
+
   return (
     <div className="relative" ref={panelRef}>
       <Button
         variant="ghost"
         size="icon"
         onClick={() => setOpen((prev) => !prev)}
-        aria-label={`Announcements (${unread} unread)`}
+        aria-label={`Notifications (${totalUnread} unread)`}
         className="relative text-muted-foreground hover:text-foreground"
       >
         <Bell className="size-5" />
-        {unread > 0 && (
+        {totalUnread > 0 && (
           <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold text-white">
-            {unread > 99 ? "99+" : unread}
+            {totalUnread > 99 ? "99+" : totalUnread}
           </span>
         )}
       </Button>
 
       {open && (
         <div className="absolute right-0 top-11 z-50 w-80 rounded-lg border border-border bg-background shadow-xl">
-          <div className="flex items-center justify-between border-b border-border px-3 py-2">
-            <span className="text-sm font-semibold">Announcements</span>
-            {items.some((i) => !i.read) && (
-              <button
-                onClick={markAll}
-                className="text-xs text-primary hover:opacity-80"
-              >
-                Mark all read
-              </button>
-            )}
+          <div className="flex items-center border-b border-border px-1.5 pt-1.5">
+            <button
+              onClick={() => setTab("announcements")}
+              className={`flex flex-1 items-center justify-center gap-1.5 rounded-t-md px-3 py-2 text-xs font-medium transition-colors ${
+                tab === "announcements"
+                  ? "border-b-2 border-primary text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Megaphone className="size-3.5" />
+              Announcements
+              {unread > 0 && (
+                <span className="rounded-full bg-red-600 px-1.5 text-[10px] font-bold text-white">
+                  {unread}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => setTab("bookings")}
+              className={`flex flex-1 items-center justify-center gap-1.5 rounded-t-md px-3 py-2 text-xs font-medium transition-colors ${
+                tab === "bookings"
+                  ? "border-b-2 border-primary text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <CalendarCheck2 className="size-3.5" />
+              Bookings
+              {bookingUnread > 0 && (
+                <span className="rounded-full bg-red-600 px-1.5 text-[10px] font-bold text-white">
+                  {bookingUnread}
+                </span>
+              )}
+            </button>
           </div>
-          <div className="max-h-80 overflow-y-auto">
-            {loading && items.length === 0 && (
-              <p className="px-3 py-6 text-center text-sm text-muted-foreground">
-                Loading…
-              </p>
-            )}
-            {!loading && items.length === 0 && (
-              <p className="px-3 py-6 text-center text-sm text-muted-foreground">
-                No announcements yet
-              </p>
-            )}
-            {items.map((item) => (
-              <button
-                key={item.id}
-                onClick={() => void openItem(item)}
-                className={`block w-full border-b border-border px-3 py-2.5 text-left hover:bg-accent ${
-                  item.read ? "opacity-70" : ""
-                }`}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <span className="flex items-center gap-1.5 text-sm font-medium">
-                    <Megaphone className="size-3.5 shrink-0 text-primary" />
-                    {item.title}
-                  </span>
-                  {!item.read && (
-                    <Badge variant="destructive" className="px-1.5 text-[10px]">
-                      New
-                    </Badge>
-                  )}
-                </div>
-                {item.body && (
-                  <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-                    {item.body}
+
+          {tab === "announcements" && (
+            <>
+              <div className="max-h-80 overflow-y-auto">
+                {loading && items.length === 0 && (
+                  <p className="px-3 py-6 text-center text-sm text-muted-foreground">
+                    Loading…
                   </p>
                 )}
-                <p className="mt-1 text-[10px] uppercase tracking-wide text-muted-foreground/70">
-                  {fmtTime(item.sent_at)}
-                </p>
-              </button>
-            ))}
-          </div>
+                {!loading && items.length === 0 && (
+                  <p className="px-3 py-6 text-center text-sm text-muted-foreground">
+                    No announcements yet
+                  </p>
+                )}
+                {items.map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => void openItem(item)}
+                    className={`block w-full border-b border-border px-3 py-2.5 text-left hover:bg-accent ${
+                      item.read ? "opacity-70" : ""
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="flex items-center gap-1.5 text-sm font-medium">
+                        <Megaphone className="size-3.5 shrink-0 text-primary" />
+                        {item.title}
+                      </span>
+                      {!item.read && (
+                        <Badge variant="destructive" className="px-1.5 text-[10px]">
+                          New
+                        </Badge>
+                      )}
+                    </div>
+                    {item.body && (
+                      <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+                        {item.body}
+                      </p>
+                    )}
+                    <p className="mt-1 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                      {fmtTime(item.sent_at)}
+                    </p>
+                  </button>
+                ))}
+              </div>
+              {items.some((i) => !i.read) && (
+                <div className="border-t border-border px-3 py-2">
+                  <button
+                    onClick={markAll}
+                    className="text-xs text-primary hover:opacity-80"
+                  >
+                    Mark all read
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+
+          {tab === "bookings" && (
+            <>
+              <div className="max-h-80 overflow-y-auto scrollbar-thin">
+                {loading && bookingItems.length === 0 && (
+                  <p className="px-3 py-6 text-center text-sm text-muted-foreground">
+                    Loading…
+                  </p>
+                )}
+                {!loading && bookingItems.length === 0 && (
+                  <p className="px-3 py-6 text-center text-sm text-muted-foreground">
+                    No booking activity yet
+                  </p>
+                )}
+                {bookingItems.map((item) => {
+                  const Icon =
+                    item.kind === "booking_cancelled" ? CalendarX2 : CalendarCheck2;
+                  const iconCls =
+                    item.kind === "booking_cancelled"
+                      ? "bg-red-500/10 text-red-500"
+                      : "bg-green-500/10 text-green-500";
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => void openBookingItem(item)}
+                      className={`flex w-full items-start gap-2.5 border-b border-border px-3 py-2.5 text-left hover:bg-accent ${
+                        item.is_read ? "opacity-60" : ""
+                      }`}
+                    >
+                      <span
+                        className={`mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg ${iconCls}`}
+                      >
+                        <Icon className="size-3.5" />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center justify-between gap-2">
+                          <span className="truncate text-sm font-medium">
+                            {item.title}
+                          </span>
+                          {!item.is_read && (
+                            <Badge variant="destructive" className="px-1.5 text-[10px]">
+                              New
+                            </Badge>
+                          )}
+                        </span>
+                        {item.body && (
+                          <span className="mt-0.5 line-clamp-2 block text-xs text-muted-foreground">
+                            {item.body}
+                          </span>
+                        )}
+                        <span className="mt-1 block text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                          {fmtTime(item.created_at)}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              {bookingItems.some((i) => !i.is_read) && (
+                <div className="border-t border-border px-3 py-2">
+                  <button
+                    onClick={markAllBookings}
+                    className="text-xs text-primary hover:opacity-80"
+                  >
+                    Mark all read
+                  </button>
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
 

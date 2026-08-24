@@ -9,8 +9,8 @@ presenting the shared service key, and super admins triage the queue.
 """
 import json
 import secrets
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -1087,43 +1087,49 @@ async def create_ticket(
 @router.get("/tickets", dependencies=[Depends(_require_service_key)])
 async def list_org_tickets(
     org_id: UUID = Query(...),
+    status: Optional[List[str]] = Query(None),
+    priority: Optional[List[str]] = Query(None),
+    search: Optional[str] = Query(None, max_length=100),
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    sort_by: str = Query("created_at", pattern="^(created_at|updated_at|replied_at|resolved_at)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ):
     """Internal — the tenant backend lists tickets for ONE authenticated org."""
-    rows = (
-        await db.execute(
-            text(
-                f"""
-                SELECT {TICKET_COLUMNS}
-                FROM super_admin.support_tickets
-                WHERE org_id = :org_id
-                ORDER BY created_at DESC
-                """
-            ),
-            {"org_id": org_id},
-        )
-    ).mappings().all()
-    return {"items": [_ticket_dict(r) for r in rows]}
-
-
-@router.get("/queue")
-async def list_ticket_queue(
-    status: Optional[str] = Query(None),
-    priority: Optional[str] = Query(None),
-    limit: int = Query(100, ge=1, le=500),
-    db: AsyncSession = Depends(get_db),
-    admin: CurrentAdmin = Depends(require_permission("support.tickets.view")),
-):
-    """Super admin queue — every org's tickets in one place."""
-    clauses = []
-    params: dict = {"limit": limit}
+    clauses = ["org_id = :org_id"]
+    params: dict = {"org_id": org_id}
     if status:
-        clauses.append("status = :status")
-        params["status"] = status
+        placeholders = ", ".join(f":st{i}" for i in range(len(status)))
+        clauses.append(f"status IN ({placeholders})")
+        params.update({f"st{i}": s for i, s in enumerate(status)})
     if priority:
-        clauses.append("priority = :priority")
-        params["priority"] = priority
-    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        placeholders = ", ".join(f":pr{i}" for i in range(len(priority)))
+        clauses.append(f"priority IN ({placeholders})")
+        params.update({f"pr{i}": p for i, p in enumerate(priority)})
+    if search:
+        clauses.append("(subject ILIKE :search OR detail ILIKE :search)")
+        params["search"] = f"%{search}%"
+    if from_date:
+        clauses.append("created_at >= :from_date")
+        params["from_date"] = from_date
+    if to_date:
+        clauses.append("created_at <= :to_date")
+        params["to_date"] = to_date
+    where = " WHERE " + " AND ".join(clauses)
+    allowed_sort = {"created_at", "updated_at", "replied_at", "resolved_at"}
+    sort_col = sort_by if sort_by in allowed_sort else "created_at"
+    sort_dir = sort_order.upper() if sort_order in ("asc", "desc") else "DESC"
+
+    total = (
+        await db.execute(
+            text(f"SELECT COUNT(*) FROM super_admin.support_tickets {where}"),
+            params,
+        )
+    ).scalar_one()
+
     rows = (
         await db.execute(
             text(
@@ -1131,14 +1137,90 @@ async def list_ticket_queue(
                 SELECT {TICKET_COLUMNS}
                 FROM super_admin.support_tickets
                 {where}
-                ORDER BY created_at DESC
-                LIMIT :limit
+                ORDER BY {sort_col} {sort_dir}
+                LIMIT :limit OFFSET :offset
                 """
             ),
-            params,
+            {**params, "limit": page_size, "offset": (page - 1) * page_size},
         )
     ).mappings().all()
-    return {"items": [_ticket_dict(r) for r in rows]}
+    return {
+        "items": [_ticket_dict(r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@router.get("/queue")
+async def list_ticket_queue(
+    status: Optional[List[str]] = Query(None),
+    priority: Optional[List[str]] = Query(None),
+    search: Optional[str] = Query(None, max_length=100),
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    sort_by: str = Query("created_at", pattern="^(created_at|updated_at|replied_at|resolved_at)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    admin: CurrentAdmin = Depends(require_permission("support.tickets.view")),
+):
+    """Super admin queue — every org's tickets in one place."""
+    clauses = []
+    params: dict = {}
+    if status:
+        placeholders = ", ".join(f":st{i}" for i in range(len(status)))
+        clauses.append(f"status IN ({placeholders})")
+        params.update({f"st{i}": s for i, s in enumerate(status)})
+    if priority:
+        placeholders = ", ".join(f":pr{i}" for i in range(len(priority)))
+        clauses.append(f"priority IN ({placeholders})")
+        params.update({f"pr{i}": p for i, p in enumerate(priority)})
+    if search:
+        clauses.append(
+            "(subject ILIKE :search OR detail ILIKE :search OR org_name ILIKE :search)"
+        )
+        params["search"] = f"%{search}%"
+    if from_date:
+        clauses.append("created_at >= :from_date")
+        params["from_date"] = from_date
+    if to_date:
+        clauses.append("created_at <= :to_date")
+        params["to_date"] = to_date
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    allowed_sort = {"created_at", "updated_at", "replied_at", "resolved_at"}
+    sort_col = sort_by if sort_by in allowed_sort else "created_at"
+    sort_dir = sort_order.upper() if sort_order in ("asc", "desc") else "DESC"
+    offset = (page - 1) * page_size
+
+    total = (
+        await db.execute(
+            text(f"SELECT COUNT(*) FROM super_admin.support_tickets {where}"),
+            params,
+        )
+    ).scalar_one()
+
+    rows = (
+        await db.execute(
+            text(
+                f"""
+                SELECT {TICKET_COLUMNS}
+                FROM super_admin.support_tickets
+                {where}
+                ORDER BY {sort_col} {sort_dir}
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            {**params, "limit": page_size, "offset": offset},
+        )
+    ).mappings().all()
+    return {
+        "items": [_ticket_dict(r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.get("/tickets/{ticket_id}")

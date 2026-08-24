@@ -4,7 +4,6 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
-import PasswordInput from "@/components/password-input";
 
 type LoginResponse = {
   mfa: { required: boolean; enrolled: boolean };
@@ -60,8 +59,10 @@ export default function LoginPage() {
             <label htmlFor="password" className="block text-sm font-medium text-slate-300">
               Password
             </label>
-            <PasswordInput
+            <input
               id="password"
+              type="password"
+              required
               autoComplete="current-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}

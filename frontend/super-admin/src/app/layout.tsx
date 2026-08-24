@@ -12,15 +12,15 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" data-ui="classic">
+    <html lang="en" suppressHydrationWarning>
       <head>
         <script
           dangerouslySetInnerHTML={{
-            __html: `try{var m=localStorage.getItem("super_admin_ui_mode");if(m==="admin"){document.documentElement.setAttribute("data-ui","admin")}}catch(e){}`,
+            __html: `try{var t=localStorage.getItem("super_admin_theme");if(t==="light"){document.documentElement.setAttribute("data-theme","light")}else{document.documentElement.removeAttribute("data-theme")}}catch(e){}`,
           }}
         />
       </head>
-      <body className="min-h-screen bg-slate-950 text-slate-100 antialiased">
+      <body className="min-h-screen antialiased">
         {children}
       </body>
     </html>

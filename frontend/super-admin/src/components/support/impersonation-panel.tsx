@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useToast } from "@/components/toast";
 import { Modal } from "@/components/modal";
+import { OrgCombobox } from "@/components/org-combobox";
 
 type OrgRow = { id: string; name: string; business_name: string | null };
 type UserRow = { id: string; email: string; full_name: string | null; is_active: boolean };
@@ -54,8 +55,6 @@ export default function ImpersonationPanel({
   const canUnmask = can("pii.unmask");
 
   // Impersonation
-  const [orgSearch, setOrgSearch] = useState("");
-  const [orgOptions, setOrgOptions] = useState<OrgRow[]>([]);
   const [selectedOrg, setSelectedOrg] = useState<OrgRow | null>(null);
   const [users, setUsers] = useState<UserRow[] | null>(null);
   const [selectedUser, setSelectedUser] = useState<UserRow | null>(null);
@@ -87,8 +86,6 @@ export default function ImpersonationPanel({
 
   // Peek
   const [peekOrg, setPeekOrg] = useState<OrgRow | null>(null);
-  const [peekSearch, setPeekSearch] = useState("");
-  const [peekOrgOptions, setPeekOrgOptions] = useState<OrgRow[]>([]);
   const [conversations, setConversations] = useState<Conversation[] | null>(null);
   const [conversationsLoading, setConversationsLoading] = useState(false);
   const [peekOpen, setPeekOpen] = useState(false);
@@ -162,17 +159,6 @@ export default function ImpersonationPanel({
       cancelled = true;
     };
   }, [canImpersonate]);
-
-  const searchOrgs = async () => {
-    try {
-      const res = await api.get<{ items: OrgRow[] }>(
-        `/tenants/orgs?search=${encodeURIComponent(orgSearch)}&page_size=20`
-      );
-      setOrgOptions(res.items);
-    } catch (e) {
-      toast("error", e instanceof Error ? e.message : "Organization search failed");
-    }
-  };
 
   const pickOrg = async (org: OrgRow) => {
     setSelectedOrg(org);
@@ -412,17 +398,6 @@ export default function ImpersonationPanel({
       toast("error", e instanceof Error ? e.message : "Stop failed");
     } finally {
       setStoppingId(null);
-    }
-  };
-
-  const searchPeekOrgs = async () => {
-    try {
-      const res = await api.get<{ items: OrgRow[] }>(
-        `/tenants/orgs?search=${encodeURIComponent(peekSearch)}&page_size=20`
-      );
-      setPeekOrgOptions(res.items);
-    } catch (e) {
-      toast("error", e instanceof Error ? e.message : "Organization search failed");
     }
   };
 
@@ -689,48 +664,20 @@ export default function ImpersonationPanel({
             new session ends any active one.
           </p>
 
-          <div className="mt-4 flex items-end gap-3">
-            <div className="flex-1">
-              <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
-                Search organization
-              </label>
-              <div className="flex gap-2">
-                <input
-                  value={orgSearch}
-                  onChange={(e) => setOrgSearch(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && void searchOrgs()}
-                  placeholder="org name…"
-                  className="flex-1 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 outline-none focus:border-indigo-500"
-                />
-                <button
-                  onClick={searchOrgs}
-                  className="rounded-md border border-slate-700 px-3 py-2 text-slate-300 hover:bg-slate-800"
-                >
-                  Search
-                </button>
-              </div>
-            </div>
-            <div className="w-72">
-              <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
-                Pick org
-              </label>
-              <select
-                aria-label="Organization to impersonate"
-                value={selectedOrg?.id ?? ""}
-                onChange={(e) => {
-                  const org = orgOptions.find((o) => o.id === e.target.value);
-                  if (org) void pickOrg(org);
-                }}
-                className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 outline-none focus:border-indigo-500"
-              >
-                <option value="">Select…</option>
-                {orgOptions.map((o) => (
-                  <option key={o.id} value={o.id}>
-                    {o.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+          <div className="mt-4 max-w-md">
+            <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
+              Search organization
+            </label>
+            <OrgCombobox
+              value={selectedOrg?.id ?? ""}
+              onSelect={(org) => void pickOrg(org)}
+              onRemove={() => {
+                setSelectedOrg(null);
+                setSelectedUser(null);
+                setUsers(null);
+              }}
+              placeholder="Type to search — e.g. Acme…"
+            />
           </div>
 
           {selectedOrg && (
@@ -902,50 +849,19 @@ export default function ImpersonationPanel({
             </div>
           </div>
 
-          <div className="mt-4 flex items-end gap-3">
-            <div className="flex-1">
-              <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
-                Search organization
-              </label>
-              <div className="flex gap-2">
-                <input
-                  value={peekSearch}
-                  onChange={(e) => setPeekSearch(e.target.value)}
-                  onKeyDown={(e) =>
-                    e.key === "Enter" && void searchPeekOrgs()
-                  }
-                  placeholder="org name…"
-                  className="flex-1 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 outline-none focus:border-indigo-500"
-                />
-                <button
-                  onClick={searchPeekOrgs}
-                  className="rounded-md border border-slate-700 px-3 py-2 text-slate-300 hover:bg-slate-800"
-                >
-                  Search
-                </button>
-              </div>
-            </div>
-            <div className="w-72">
-              <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
-                Pick org
-              </label>
-              <select
-                aria-label="Organization to view conversations"
-                value={peekOrg?.id ?? ""}
-                onChange={(e) => {
-                  const org = peekOrgOptions.find((o) => o.id === e.target.value);
-                  if (org) void loadConversations(org);
-                }}
-                className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 outline-none focus:border-indigo-500"
-              >
-                <option value="">Select…</option>
-                {peekOrgOptions.map((o) => (
-                  <option key={o.id} value={o.id}>
-                    {o.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+          <div className="mt-4 max-w-md">
+            <label className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
+              Search organization
+            </label>
+            <OrgCombobox
+              value={peekOrg?.id ?? ""}
+              onSelect={(org) => void loadConversations(org)}
+              onRemove={() => {
+                setPeekOrg(null);
+                setConversations(null);
+              }}
+              placeholder="Type to search — e.g. Acme…"
+            />
           </div>
 
           {peekOrg && (

@@ -129,6 +129,8 @@ def _build_config_response(org: Organization, config: Optional[OrgConfig]) -> di
         "agent_name": agent_name,
         "greeting_message": greeting,
         "brand_color": brand_color,
+        "business_name": custom.get("business_name") or None,
+        "business_tagline": custom.get("business_tagline") or None,
         "required_fields": required_fields,
         "field_definitions": field_definitions,
         "meeting_mode": meeting_mode.value
@@ -146,6 +148,8 @@ class WidgetConfigResponse(BaseModel):
     agent_name: str
     greeting_message: str
     brand_color: str
+    business_name: Optional[str] = None
+    business_tagline: Optional[str] = None
     required_fields: list
     field_definitions: Optional[list] = None
     meeting_mode: str
