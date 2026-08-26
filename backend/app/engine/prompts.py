@@ -165,10 +165,14 @@ Output:"""
         # Build RAG context block from retrieved+reranked chunks (vectorless).
         rag_block = ""
         if rag_context:
+            from app.engine.knowledge_profile import format_source_context_line
             chunk_lines = []
             for i, ch in enumerate(rag_context, 1):
                 content = (ch.get("content") or "").strip()
                 source = ch.get("source_type") or "document"
+                ctx_label = format_source_context_line(ch.get("metadata"))
+                if ctx_label:
+                    source += f" — {ctx_label}"
                 if ch.get("source_url"):
                     source += f" ({ch['source_url']})"
                 snippet = content[:800]

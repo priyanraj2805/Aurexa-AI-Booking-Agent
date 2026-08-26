@@ -3,14 +3,15 @@
 import { useState, useEffect, useRef } from "react";
 import {
   Loader2, AlertCircle, FileText, Trash2, Upload,
-  Globe, RefreshCw, X, FileUp,
+  Globe, RefreshCw, X, FileUp, ChevronDown,
 } from "lucide-react";
 import {
   useDocuments, useCrawlStatus, useAgentConfig,
-  uploadPdfDocument, deletePdfDocument, startWebsiteCrawl,
+  deletePdfDocument,
   MAX_DOCS_PER_ORG,
   type DocumentListItem,
 } from "@/hooks/use-dashboard";
+import { AddKnowledgeModal } from "./add-knowledge-modal";
 
 // ─── Small toast helper (inline) ────────────────────────────────────────
 
@@ -75,51 +76,61 @@ function DocumentCard({
   );
 }
 
-// ─── Document uploader + list ───────────────────────────────────────────
+// ─── Knowledge Base section ────────────────────────────────────────────
 
-function DocumentsSection({ push }: { push: (m: string, k?: Toast["kind"]) => void }) {
-  const { data: docs, loading, error, refetch } = useDocuments();
-  const [uploading, setUploading] = useState(false);
+// Poll every 30s: Firecrawl's default plan rate limit is 6 req/min, so a
+// faster cadence exhausts the quota (each poll is one API call).
+const CRAWL_POLL_MS = 30000;
+
+export function KnowledgeBaseSection() {
+  const { toasts, push } = useToasts();
+  const { data: docs, loading: docsLoading, error: docsError, refetch: refetchDocs } = useDocuments();
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Dropdown state
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Modal state
+  const [modalMode, setModalMode] = useState<"upload" | "crawl" | null>(null);
+
+  // Crawl state
+  const [crawlId, setCrawlId] = useState<string | null>(null);
+  const { data: crawlStatus, refetch: refetchCrawl } = useCrawlStatus(crawlId);
+  const { data: agentConfig } = useAgentConfig();
 
   const docList = docs ?? [];
   const atLimit = docList.length >= MAX_DOCS_PER_ORG;
 
-const SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md"];
-const ACCEPT_TYPES = SUPPORTED_EXTENSIONS.join(",");
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setDropdownOpen(false);
+      }
+    };
+    if (dropdownOpen) document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [dropdownOpen]);
 
-  const onPickFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    e.target.value = "";
+  // Restore in-progress crawl state after page refresh.
+  useEffect(() => {
+    if (!agentConfig) return;
+    const terminal = ["completed", "failed", "cancelled"];
+    const storedStatus = (agentConfig.crawl_status || "").toLowerCase();
+    if (agentConfig.crawl_id && !crawlId && !terminal.includes(storedStatus)) {
+      setCrawlId(agentConfig.crawl_id);
+    }
+  }, [agentConfig]);
 
-    const ext = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
-    if (!SUPPORTED_EXTENSIONS.includes(ext)) {
-      push("Unsupported file type. Supported: PDF, DOCX, XLSX, CSV, TXT, MD", "error");
-      return;
-    }
-    if (file.size > 25 * 1024 * 1024) {
-      push("File exceeds 25MB limit.", "error");
-      return;
-    }
-    if (atLimit) {
-      push(`Maximum of ${MAX_DOCS_PER_ORG} documents reached.`, "error");
-      return;
-    }
-
-    setUploading(true);
-    try {
-      const res = await uploadPdfDocument(file);
-      push(`Uploaded "${res.filename}" (${res.pages} ${res.pages === 1 ? "page" : "pages"}).`);
-      await refetch();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Upload failed";
-      push(msg, "error");
-    } finally {
-      setUploading(false);
-    }
-  };
+  // Poll while crawl is active
+  useEffect(() => {
+    if (!crawlId) return;
+    const isDone = (crawlStatus?.status || "").toLowerCase();
+    if (isDone === "completed" || isDone === "failed" || isDone === "cancelled") return;
+    const t = setInterval(() => { refetchCrawl(); }, CRAWL_POLL_MS);
+    return () => clearInterval(t);
+  }, [crawlId, crawlStatus, refetchCrawl]);
 
   const onDelete = async (doc: DocumentListItem) => {
     if (!confirm(`Delete "${doc.filename}"? This removes it from the agent's knowledge base.`)) return;
@@ -127,7 +138,7 @@ const ACCEPT_TYPES = SUPPORTED_EXTENSIONS.join(",");
     try {
       await deletePdfDocument(doc.id);
       push(`Deleted "${doc.filename}".`);
-      await refetch();
+      await refetchDocs();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Delete failed";
       push(msg, "error");
@@ -136,227 +147,14 @@ const ACCEPT_TYPES = SUPPORTED_EXTENSIONS.join(",");
     }
   };
 
-  return (
-    <div className="bg-card border border-border rounded-xl p-4 sm:p-6">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center justify-center size-9 rounded-lg bg-primary/10 text-primary">
-            <FileUp className="size-5" />
-          </div>
-          <div>
-            <h3 className="text-base font-semibold">Document Knowledge Base</h3>
-            <p className="text-[13px] text-muted-foreground">
-              Upload up to {MAX_DOCS_PER_ORG} documents (PDF, DOCX, XLSX, CSV, TXT, MD). The agent answers questions from this content.
-            </p>
-          </div>
-        </div>
-        <button
-          onClick={() => inputRef.current?.click()}
-          disabled={uploading || atLimit}
-          className="text-[13px] font-medium px-3 py-2 rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-opacity flex items-center gap-1.5 disabled:opacity-50"
-        >
-          {uploading ? (
-            <Loader2 className="size-4 animate-spin" />
-          ) : (
-            <Upload className="size-4" />
-          )}
-          Upload Document
-        </button>
-        <input
-          ref={inputRef}
-          type="file"
-          accept={ACCEPT_TYPES}
-          className="hidden"
-          onChange={onPickFile}
-        />
-      </div>
-
-      <div className="flex items-center justify-between text-[12px] mb-3">
-        <span className="text-muted-foreground">
-          {docList.length} / {MAX_DOCS_PER_ORG} documents
-        </span>
-        {atLimit && (
-          <span className="text-amber-500 font-medium">
-            ⚠ Max reached — delete a document to upload another.
-          </span>
-        )}
-      </div>
-
-      {loading ? (
-        <div className="flex items-center gap-2 text-muted-foreground text-sm py-6">
-          <Loader2 className="size-4 animate-spin" /> Loading documents…
-        </div>
-      ) : error ? (
-        <div className="flex items-center gap-2 text-red-500 text-sm py-6">
-          <AlertCircle className="size-4" /> {error}
-        </div>
-      ) : docList.length === 0 ? (
-        <div className="text-center py-8 border border-dashed border-border rounded-lg">
-          <p className="text-muted-foreground text-sm">No documents uploaded yet.</p>
-          <p className="text-muted-foreground/60 text-xs mt-1">
-            Click &ldquo;Upload Document&rdquo; to feed the agent new knowledge.
-          </p>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {docList.map((doc) => (
-            <DocumentCard
-              key={doc.id}
-              doc={doc}
-              deleting={pendingDelete === doc.id}
-              onDelete={() => onDelete(doc)}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Website crawler section ─────────────────────────────────────────────
-
-// Poll every 30s: Firecrawl's default plan rate limit is 6 req/min, so a
-// faster cadence exhausts the quota (each poll is one API call).
-const CRAWL_POLL_MS = 30000;
-
-function WebsiteCrawlerSection({ push, onCrawlId }: {
-  push: (m: string, k?: Toast["kind"]) => void;
-  onCrawlId: (id: string | null) => void;
-}) {
-  const [url, setUrl] = useState("");
-  const [starting, setStarting] = useState(false);
-  const [crawlId, setCrawlId] = useState<string | null>(null);
-  const { data: status, refetch } = useCrawlStatus(crawlId);
-  const { data: agentConfig } = useAgentConfig();
-
-  // Restore in-progress crawl state after page refresh.
-  // Skip terminal states (completed/failed/cancelled) so an expired
-  // Firecrawl job does not get resurrected and polled forever.
-  useEffect(() => {
-    if (!agentConfig) return;
-    if (agentConfig.website_url && !crawlId) {
-      setUrl(agentConfig.website_url);
-    }
-    const terminal = ["completed", "failed", "cancelled"];
-    const storedStatus = (agentConfig.crawl_status || "").toLowerCase();
-    if (agentConfig.crawl_id && !crawlId && !terminal.includes(storedStatus)) {
-      setCrawlId(agentConfig.crawl_id);
-    }
-  }, [agentConfig]);
-
-  useEffect(() => {
-    onCrawlId(crawlId);
-  }, [crawlId, onCrawlId]);
-
-  // Poll while crawl is active
-  useEffect(() => {
-    if (!crawlId) return;
-    const isDone = (status?.status || "").toLowerCase();
-    if (isDone === "completed" || isDone === "failed" || isDone === "cancelled") return;
-    const t = setInterval(() => { refetch(); }, CRAWL_POLL_MS);
-    return () => clearInterval(t);
-  }, [crawlId, status, refetch]);
-
-  const onCrawl = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!url.trim()) return;
-    setStarting(true);
-    try {
-      const res = await startWebsiteCrawl(url.trim());
-      setCrawlId(res.crawl_id);
-      push(`Crawl started for ${url.trim()}.`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Crawl failed to start";
-      push(msg, "error");
-    } finally {
-      setStarting(false);
-    }
-  };
-
-  const statusText = status?.status || (crawlId ? "starting" : "idle");
-  const statusBadgeColor =
-    statusText.toLowerCase() === "completed"
+  const crawlStatusText = crawlStatus?.status || (crawlId ? "starting" : "idle");
+  const crawlStatusColor =
+    crawlStatusText.toLowerCase() === "completed"
       ? "text-green-500 bg-green-500/10"
-      : statusText.toLowerCase() === "failed"
+      : crawlStatusText.toLowerCase() === "failed"
       ? "text-red-500 bg-red-500/10"
       : "text-blue-500 bg-blue-500/10";
 
-  return (
-    <div className="bg-card border border-border rounded-xl p-4 sm:p-6">
-      <div className="flex items-center gap-3 mb-4">
-        <div className="flex items-center justify-center size-9 rounded-lg bg-primary/10 text-primary">
-          <Globe className="size-5" />
-        </div>
-        <div>
-          <h3 className="text-base font-semibold">Website Knowledge Base</h3>
-          <p className="text-[13px] text-muted-foreground">
-            Crawl your website. The agent will use crawled pages to answer questions.
-          </p>
-        </div>
-      </div>
-
-      <form onSubmit={onCrawl} className="flex flex-col sm:flex-row gap-2">
-        <input
-          type="text"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          placeholder="https://your-website.com"
-          required
-          disabled={starting}
-          className="flex-1 bg-background border border-border text-foreground px-3.5 py-2.5 rounded-md text-[13px] font-sans focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
-        />
-        <button
-          type="submit"
-          disabled={starting || !url.trim()}
-          className="text-[13px] font-medium px-4 py-2.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-opacity flex items-center justify-center gap-1.5 disabled:opacity-50"
-        >
-          {starting ? (
-            <Loader2 className="size-4 animate-spin" />
-          ) : (
-            <RefreshCw className="size-4" />
-          )}
-          Start Crawl
-        </button>
-      </form>
-
-      {crawlId && (
-        <div className="mt-4 border border-border rounded-lg p-3 bg-background space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Crawl ID</p>
-              <p className="text-[12px] font-mono truncate text-foreground">{crawlId}</p>
-            </div>
-            <span
-              className={`text-[11px] font-medium px-2.5 py-1 rounded-full ${statusBadgeColor} capitalize`}
-            >
-              {statusText}
-            </span>
-          </div>
-          {status?.pages_crawled != null && (
-            <p className="text-[12px] text-muted-foreground">
-              Pages crawled so far: <span className="font-medium text-foreground">{status.pages_crawled}</span>
-            </p>
-          )}
-          {(status?.status || "").toLowerCase() === "completed" && (
-            <p className="text-[12px] text-green-500">
-              ✓ Crawl complete — content is now searchable by the agent.
-            </p>
-          )}
-          {(status?.status || "").toLowerCase() === "failed" && (
-            <p className="text-[12px] text-red-500">
-              ✗ Crawl failed. Check the URL and try again.
-            </p>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Top-level section used by agent page ────────────────────────────────
-
-export function KnowledgeBaseSection() {
-  const { toasts, push } = useToasts();
   return (
     <>
       {/* Toasts */}
@@ -382,8 +180,166 @@ export function KnowledgeBaseSection() {
         ))}
       </div>
 
-      <DocumentsSection push={push} />
-      <WebsiteCrawlerSection push={push} onCrawlId={() => {}} />
+      <div className="bg-card border border-border rounded-xl p-4 sm:p-6">
+        {/* Header with dropdown button */}
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center size-9 rounded-lg bg-primary/10 text-primary">
+              <FileUp className="size-5" />
+            </div>
+            <div>
+              <h3 className="text-base font-semibold">Knowledge Base</h3>
+              <p className="text-[13px] text-muted-foreground">
+                Upload documents or crawl your website. The agent uses this content to answer questions.
+              </p>
+            </div>
+          </div>
+          <div className="relative" ref={dropdownRef}>
+            <button
+              onClick={() => {
+                if (atLimit && !crawlId) {
+                  push(`Maximum of ${MAX_DOCS_PER_ORG} documents reached.`, "error");
+                  return;
+                }
+                setDropdownOpen(!dropdownOpen);
+              }}
+              className="text-[13px] font-medium px-3 py-2 rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-opacity flex items-center gap-1.5 disabled:opacity-50"
+            >
+              <Upload className="size-4" />
+              Add Knowledge
+              <ChevronDown className={`size-3.5 transition-transform ${dropdownOpen ? "rotate-180" : ""}`} />
+            </button>
+            {dropdownOpen && (
+              <div className="absolute right-0 mt-1.5 w-52 bg-card border border-border rounded-xl shadow-lg overflow-hidden z-50 animate-in fade-in slide-in-from-top-2 duration-150">
+                <button
+                  onClick={() => {
+                    setDropdownOpen(false);
+                    setModalMode("upload");
+                  }}
+                  disabled={atLimit}
+                  className="w-full flex items-center gap-3 px-3.5 py-2.5 text-left hover:bg-secondary/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <div className="flex items-center justify-center size-8 rounded-lg bg-red-500/10 text-red-500 shrink-0">
+                    <FileUp className="size-4" />
+                  </div>
+                  <div>
+                    <div className="text-[13px] font-medium">Upload Document</div>
+                    <div className="text-[11px] text-muted-foreground">PDF, DOCX, XLSX, CSV, TXT, MD</div>
+                  </div>
+                </button>
+                <div className="h-px bg-border mx-3" />
+                <button
+                  onClick={() => {
+                    setDropdownOpen(false);
+                    setModalMode("crawl");
+                  }}
+                  className="w-full flex items-center gap-3 px-3.5 py-2.5 text-left hover:bg-secondary/50 transition-colors"
+                >
+                  <div className="flex items-center justify-center size-8 rounded-lg bg-blue-500/10 text-blue-500 shrink-0">
+                    <Globe className="size-4" />
+                  </div>
+                  <div>
+                    <div className="text-[13px] font-medium">Crawl Website</div>
+                    <div className="text-[11px] text-muted-foreground">Extract pages from your site</div>
+                  </div>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Doc count */}
+        <div className="flex items-center justify-between text-[12px] mb-3">
+          <span className="text-muted-foreground">
+            {docList.length} / {MAX_DOCS_PER_ORG} documents
+          </span>
+          {atLimit && (
+            <span className="text-amber-500 font-medium">
+              ⚠ Max reached — delete a document to upload another.
+            </span>
+          )}
+        </div>
+
+        {/* Document list */}
+        {docsLoading ? (
+          <div className="flex items-center gap-2 text-muted-foreground text-sm py-6">
+            <Loader2 className="size-4 animate-spin" /> Loading documents…
+          </div>
+        ) : docsError ? (
+          <div className="flex items-center gap-2 text-red-500 text-sm py-6">
+            <AlertCircle className="size-4" /> {docsError}
+          </div>
+        ) : docList.length === 0 ? (
+          <div className="text-center py-8 border border-dashed border-border rounded-lg">
+            <p className="text-muted-foreground text-sm">No knowledge sources yet.</p>
+            <p className="text-muted-foreground/60 text-xs mt-1">
+              Click &ldquo;Add Knowledge&rdquo; to upload a document or crawl your website.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {docList.map((doc) => (
+              <DocumentCard
+                key={doc.id}
+                doc={doc}
+                deleting={pendingDelete === doc.id}
+                onDelete={() => onDelete(doc)}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Crawl status */}
+        {crawlId && (
+          <div className="mt-4 border border-border rounded-lg p-3 bg-background space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Crawl ID</p>
+                <p className="text-[12px] font-mono truncate text-foreground">{crawlId}</p>
+              </div>
+              <span
+                className={`text-[11px] font-medium px-2.5 py-1 rounded-full ${crawlStatusColor} capitalize`}
+              >
+                {crawlStatusText}
+              </span>
+            </div>
+            {crawlStatus?.pages_crawled != null && (
+              <p className="text-[12px] text-muted-foreground">
+                Pages crawled so far: <span className="font-medium text-foreground">{crawlStatus.pages_crawled}</span>
+              </p>
+            )}
+            {crawlStatusText.toLowerCase() === "completed" && (
+              <p className="text-[12px] text-green-500">
+                ✓ Crawl complete — content is now searchable by the agent.
+              </p>
+            )}
+            {crawlStatusText.toLowerCase() === "failed" && (
+              <p className="text-[12px] text-red-500">
+                ✗ Crawl failed. Check the URL and try again.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Modal */}
+      {modalMode && (
+        <AddKnowledgeModal
+          mode={modalMode}
+          docCount={docList.length}
+          onClose={() => setModalMode(null)}
+          onUploadDone={async (filename, pages) => {
+            push(`Uploaded "${filename}" (${pages} ${pages === 1 ? "page" : "pages"}).`);
+            setModalMode(null);
+            await refetchDocs();
+          }}
+          onCrawlStarted={(id, url) => {
+            setCrawlId(id);
+            push(`Crawl started for ${url}.`);
+            setModalMode(null);
+          }}
+        />
+      )}
     </>
   );
 }

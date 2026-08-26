@@ -309,8 +309,7 @@ export default function BillingPage() {
             <AlertDialogDescription>
               {selectedPlan?.monthly_price_cents ?? 0 > (data?.plan?.monthly_price_cents ?? 0)
                 ? "Your new plan takes effect immediately."
-                : "You'll be downgraded immediately. Limits from your new plan apply right away."}{" "}
-              This action is recorded in your organization&apos;s audit log.
+                : "You'll be downgraded immediately. Limits from your new plan apply right away."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

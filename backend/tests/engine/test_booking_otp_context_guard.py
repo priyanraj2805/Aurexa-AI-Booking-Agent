@@ -46,7 +46,7 @@ def test_looks_like_confirmation_claim(message: str, expected: bool):
         ("10:00", True),
         ("10:00am", True),
         ("7:30 pm", True),
-        ("August 7th 2026", True),
+        ("August 7th 2026", False),
         ("2026-08-07", True),
         ("08/07/2026", True),
         ("07-08-2026", True),
@@ -58,9 +58,9 @@ def test_looks_like_confirmation_claim(message: str, expected: bool):
         ("yes, please confirm", True),
         ("go ahead and book it", True),
         ("Sure", True),
-        ("I want to book an appointment", True),
-        ("My name is Priyanshu", True),
-        ("I'd like to cancel my appointment", True),
+        ("I want to book an appointment", False),
+        ("My name is Priyanshu", False),
+        ("I'd like to cancel my appointment", False),
         ("What are your business hours?", False),
         ("Do you offer weekend appointments?", False),
         ("Tell me about your services", False),
@@ -70,7 +70,30 @@ def test_looks_like_confirmation_claim(message: str, expected: bool):
     ],
 )
 def test_should_skip_rag(message: str, expected: bool):
+    """Full RAG skip = field values / confirmations only.
+
+    Booking statements and bare topics now take the cheap bm25_only path
+    instead of being starved of knowledge entirely (regression fix), but
+    they must NEVER pay for the LLM rerank round-trip (see test below).
+    """
     assert booking_graph._should_skip_rag(message) is expected
+
+
+@parametrize(
+    "message",
+    [
+        ("August 7th 2026"),
+        ("I want to book an appointment"),
+        ("My name is Priyanshu"),
+        ("I'd like to cancel my appointment"),
+        ("10:00 AM"),
+        ("5550100999"),
+        ("Yes"),
+    ],
+)
+def test_booking_turns_never_pay_llm_rerank(message: str):
+    """Latency guarantee (C4): non-knowledge turns never trigger rerank."""
+    assert booking_graph._rag_tier(message) != "rerank"
 
 
 @parametrize(

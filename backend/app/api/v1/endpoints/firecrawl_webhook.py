@@ -21,7 +21,7 @@ from sqlalchemy import text
 import logging
 
 from app.db.database import AsyncSessionLocal
-from app.services.retrieval_service import store_document_chunks
+from app.services.retrieval_service import store_document_chunks, get_stored_source_context
 from app.services.pdf_processor import chunk_text
 
 router = APIRouter(tags=["Firecrawl Webhook"])
@@ -115,6 +115,10 @@ async def firecrawl_webhook(request: Request):
 
         if all_chunks:
             async with AsyncSessionLocal() as db:
+                # Re-attach admin-collected context to every ingested chunk.
+                website_ctx = await get_stored_source_context(db, str(org_id), "website")
+                for chunk in all_chunks:
+                    chunk["metadata"] = {**website_ctx, **(chunk.get("metadata") or {})}
                 doc_id = await store_document_chunks(
                     db,
                     org_id=str(org_id),

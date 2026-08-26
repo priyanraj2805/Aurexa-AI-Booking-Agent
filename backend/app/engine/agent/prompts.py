@@ -9,6 +9,8 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
+from app.engine.knowledge_profile import format_business_profile
+
 
 def build_system_prompt(
     widget_config: Dict[str, Any],
@@ -61,8 +63,12 @@ def build_system_prompt(
 
     guidance_str = "\n".join(field_guidance) if field_guidance else ""
 
-    return f"""You are {agent_name}, a {tone} booking assistant for {business_name}.
+    business_block = format_business_profile(widget_config.get("knowledge_context"))
+    if business_block:
+        business_block = f"\n{business_block}\n"
 
+    return f"""You are {agent_name}, a {tone} booking assistant for {business_name}.
+{business_block}
 ## DATE CONTEXT (timezone: {tz_name})
 TODAY is {today_weekday}, {today_iso}. Tomorrow is {tomorrow_iso}.
 When the user gives a relative date (e.g. "today", "tomorrow", "next monday",

@@ -716,6 +716,20 @@ async def process_message(
     persona = (
         org_config.custom_prompts if isinstance(org_config.custom_prompts, dict) else {}
     )
+    # Inject the admin-collected business profile into a shallow copy of the
+    # persona so the legacy pipeline is grounded the same way as the LangGraph
+    # runtime (never mutate org_config.custom_prompts in place).
+    _knowledge_ctx = getattr(org_config, "knowledge_context", None)
+    if isinstance(_knowledge_ctx, dict):
+        from app.engine.knowledge_profile import format_business_profile
+        _biz_block = format_business_profile(_knowledge_ctx)
+        if _biz_block:
+            persona = dict(persona)
+            persona["custom_instructions"] = (
+                str(persona.get("custom_instructions") or "").rstrip()
+                + ("\n" if persona.get("custom_instructions") else "")
+                + _biz_block.replace("## ABOUT THE BUSINESS", "ABOUT THE BUSINESS")
+            ).strip()
     org_timezone = str(org_config.timezone) if org_config.timezone else "UTC"
     require_otp = getattr(org_config, "require_otp", True)
     max_booking_days = getattr(org_config, "max_booking_days_ahead", 90)

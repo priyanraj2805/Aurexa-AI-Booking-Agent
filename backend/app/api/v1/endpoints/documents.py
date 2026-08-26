@@ -5,12 +5,13 @@ All org isolation is enforced by deriving ``org_id`` from the authenticated user
 same as every other dashboard endpoint.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text, select
 from typing import List, Optional
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, HttpUrl, Field, ValidationError
 import logging
+import json as _json
 import os
 import uuid as _uuid
 from pathlib import Path
@@ -26,7 +27,17 @@ from app.services.document_processor import (
     compute_content_hash,
 )
 from app.services.firecrawl_service import get_firecrawl_service
-from app.services.retrieval_service import store_document_chunks, delete_document_chunks, delete_website_chunks
+from app.services.retrieval_service import (
+    store_document_chunks,
+    delete_document_chunks,
+    delete_website_chunks,
+    save_business_profile,
+    get_business_profile,
+    upsert_source_context,
+    get_stored_source_context,
+    delete_source_context_entry,
+)
+from app.engine.knowledge_profile import sanitize_source_context
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +67,12 @@ class DocumentListItem(BaseModel):
 
 class CrawlRequest(BaseModel):
     url: str
+    # Optional context collected from the admin before starting the crawl.
+    source_description: Optional[str] = Field(default=None, max_length=2000)
+    source_category: Optional[str] = Field(default=None, max_length=100)
+    pages_that_matter: Optional[str] = Field(default=None, max_length=2000)
+    not_covered: Optional[str] = Field(default=None, max_length=2000)
+    questions_to_answer: Optional[List[str]] = None
 
 
 class CrawlResponse(BaseModel):
@@ -71,6 +88,27 @@ class CrawlStatusResponse(BaseModel):
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────
+
+
+class BusinessProfilePayload(BaseModel):
+    """Admin-collected 'About your business' context (knowledge wizard step 1)."""
+
+    business_name: Optional[str] = Field(default=None, max_length=255)
+    business_description: str = Field(min_length=1, max_length=2000)
+    products_services: Optional[str] = Field(default=None, max_length=2000)
+    target_customers: Optional[str] = Field(default=None, max_length=1000)
+    key_policies: Optional[str] = Field(default=None, max_length=2000)
+    answer_language_tone: Optional[str] = Field(default=None, max_length=300)
+
+
+class BusinessProfileResponse(BaseModel):
+    business_name: Optional[str] = None
+    business_description: Optional[str] = None
+    products_services: Optional[str] = None
+    target_customers: Optional[str] = None
+    key_policies: Optional[str] = None
+    answer_language_tone: Optional[str] = None
+    configured: bool = False
 
 
 async def _count_uploaded_documents(db: AsyncSession, org_id) -> int:
@@ -90,6 +128,14 @@ async def _count_uploaded_documents(db: AsyncSession, org_id) -> int:
 @router.post("/documents/upload", response_model=DocumentUploadResponse)
 async def upload_document(
     file: UploadFile = File(...),
+    source_context: Optional[str] = Form(
+        default=None,
+        description=(
+            'Optional JSON object of admin-collected context, e.g. '
+            '{"source_description": "...", "source_category": "...", '
+            '"questions_to_answer": ["..."]}'
+        ),
+    ),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
     _: None = Depends(deny_impersonation),
@@ -150,6 +196,28 @@ async def upload_document(
     if not chunks:
         raise HTTPException(status_code=422, detail="No extractable text found in document")
 
+    # Parse + sanitize the optional admin-collected source context.
+    context_error = HTTPException(
+        status_code=400,
+        detail="Invalid source_context: expected a JSON object with string fields",
+    )
+    source_ctx: dict = {}
+    if source_context:
+        try:
+            parsed = _json.loads(source_context)
+        except (TypeError, ValueError):
+            raise context_error
+        questions = parsed.get("questions_to_answer") if isinstance(parsed, dict) else None
+        if not isinstance(parsed, dict) or (
+            questions is not None and not isinstance(questions, list)
+        ):
+            raise context_error
+        source_ctx = sanitize_source_context(
+            description=parsed.get("source_description"),
+            category=parsed.get("source_category"),
+            questions_to_answer=questions,
+        )
+
     source_type = str(chunks[0].get("source_type") or "pdf")
     page_count = len({c.get("page_number") for c in chunks if c.get("page_number")})
 
@@ -162,20 +230,24 @@ async def upload_document(
         doc_id=None,
     )
 
-    # Stash filename + content_hash on every chunk's metadata for listing/dedup
+    # Stamp filename + content_hash (+ admin-collected context) on every
+    # chunk's metadata for listing/dedup and RAG source labeling.
+    metadata_update: dict = {
+        "filename": filename,
+        "content_hash": content_hash,
+    }
+    metadata_update.update(source_ctx)
     await db.execute(
         text(
             "UPDATE document_chunks "
             "SET metadata = COALESCE(metadata, '{}'::jsonb) || "
-            "  jsonb_build_object('filename', CAST(:filename AS text), "
-            "                       'content_hash', CAST(:h AS text)) "
+            "  CAST(:meta AS JSONB) "
             "WHERE org_id = :org_id AND doc_id = :doc_id"
         ),
         {
             "org_id": str(org_id),
             "doc_id": doc_id,
-            "filename": filename,
-            "h": content_hash,
+            "meta": _json.dumps(metadata_update),
         },
     )
 
@@ -183,6 +255,12 @@ async def upload_document(
 
     # Persist doc reference on org_configs.uploaded_docs (JSONB array) for the admin UI
     await _append_doc_to_org_config(db, org_id, doc_id, filename, page_count)
+
+    # Remember the admin-collected context keyed by doc id so it survives
+    # listing/restarts and can be re-stamped onto future ingests.
+    if source_ctx:
+        await upsert_source_context(db, str(org_id), str(doc_id), source_ctx)
+        await db.commit()
 
     return DocumentUploadResponse(
         id=str(doc_id),
@@ -243,6 +321,7 @@ async def delete_document(
         raise HTTPException(status_code=404, detail="Document not found")
 
     await _remove_doc_from_org_config(db, org_id, doc_id)
+    await delete_source_context_entry(db, str(org_id), doc_id)
     await db.commit()
     return {"success": True, "deleted_chunks": deleted, "doc_id": doc_id}
 
@@ -257,7 +336,7 @@ async def delete_website_data(
     org_id = user.org_id
 
     deleted = await delete_website_chunks(db, str(org_id))
-    
+
     # Clear website-related fields on org_config
     await db.execute(
         text(
@@ -267,8 +346,70 @@ async def delete_website_data(
         ),
         {"org_id": str(org_id)},
     )
+    await delete_source_context_entry(db, str(org_id), "website")
     await db.commit()
     return {"success": True, "deleted_chunks": deleted}
+
+
+# ─── Business Profile (knowledge wizard step 1) ────────────────────────────
+
+
+@router.get("/business-profile", response_model=BusinessProfileResponse)
+async def get_business_profile_endpoint(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Return the admin-collected business profile for prefilling the wizard."""
+    profile = await get_business_profile(db, str(user.org_id))
+    return BusinessProfileResponse(
+        business_name=profile.get("business_name"),
+        business_description=profile.get("business_description"),
+        products_services=profile.get("products_services"),
+        target_customers=profile.get("target_customers"),
+        key_policies=profile.get("key_policies"),
+        answer_language_tone=profile.get("answer_language_tone"),
+        configured=bool(profile),
+    )
+
+
+@router.put("/business-profile", response_model=BusinessProfileResponse)
+async def save_business_profile_endpoint(
+    payload: BusinessProfilePayload,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+):
+    """Persist the 'About your business' context collected by the wizard.
+
+    Stored on org_configs.knowledge_context.business_profile and injected
+    into the agent system prompt for every conversation turn.
+    """
+    org_id = str(user.org_id)
+
+    # Fall back to the org's existing business name when not supplied.
+    profile_data = payload.model_dump(exclude_none=True)
+    if not profile_data.get("business_name"):
+        result = await db.execute(
+            text("SELECT business_name FROM org_configs WHERE org_id = :org_id"),
+            {"org_id": org_id},
+        )
+        row = result.mappings().first()
+        stored_name = str(row["business_name"]).strip() if row and row["business_name"] else None
+        if stored_name:
+            profile_data["business_name"] = stored_name[:255]
+
+    await save_business_profile(db, org_id, profile_data)
+    await db.commit()
+
+    return BusinessProfileResponse(
+        business_name=profile_data.get("business_name"),
+        business_description=profile_data.get("business_description"),
+        products_services=profile_data.get("products_services"),
+        target_customers=profile_data.get("target_customers"),
+        key_policies=profile_data.get("key_policies"),
+        answer_language_tone=profile_data.get("answer_language_tone"),
+        configured=True,
+    )
 
 
 # ─── Website Crawl Endpoints ───────────────────────────────────────────────
@@ -323,6 +464,19 @@ async def crawl_website(
             db, str(org_id), url=raw_url,
             crawl_id=crawl_id, status="started",
         )
+        # Store the admin-collected context so both ingest paths (webhook +
+        # status polling) can stamp it onto chunk metadata.
+        crawl_ctx = sanitize_source_context(
+            description=payload.source_description,
+            category=payload.source_category,
+            questions_to_answer=payload.questions_to_answer,
+            extra={
+                "pages_that_matter": payload.pages_that_matter or "",
+                "not_covered": payload.not_covered or "",
+            },
+        )
+        if crawl_ctx:
+            await upsert_source_context(db, str(org_id), "website", crawl_ctx)
         await db.commit()
         msg = (
             "Crawl started; results will be ingested automatically via webhook."
@@ -371,6 +525,9 @@ async def get_crawl_status(
         # If the crawl completed and we have data, ingest it
         if status_str == "completed" and pages_data and db:
             from app.services.document_processor import chunk_text
+
+            # Re-attach admin-collected context to every ingested chunk.
+            website_ctx = await get_stored_source_context(db, str(user.org_id), "website")
             all_chunks = []
             for page in pages_data:
                 if not isinstance(page, dict):
@@ -389,6 +546,7 @@ async def get_crawl_status(
                         "source_type": "website",
                         "source_url": url,
                         "metadata": {
+                            **website_ctx,
                             "title": title,
                             "crawl_id": crawl_id,
                         },

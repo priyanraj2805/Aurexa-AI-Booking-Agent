@@ -7,6 +7,7 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { Toaster } from "sonner";
 import { ImpersonationBanner } from "@/components/impersonation-banner";
 import { AnnouncementBell } from "@/components/announcement-bell";
+import { CommandPalette } from "@/components/command-palette";
 import { LoaderPulseSquare } from "@/components/ui/loaders";
 import {
   SidebarInset,
@@ -28,7 +29,6 @@ function getBreadcrumb(pathname: string) {
   if (pathname.includes("/conversations")) return { category: "App", page: "Inbox" };
   if (pathname.includes("/bookings/cancelled")) return { category: "App", page: "Cancelled Bookings" };
   if (pathname.includes("/bookings")) return { category: "App", page: "Bookings" };
-  if (pathname.includes("/audit")) return { category: "App", page: "Audit Log" };
   if (pathname.includes("/calendar")) return { category: "App", page: "Calendar" };
   if (pathname.includes("/agent")) return { category: "Settings", page: "Agent Personalisation" };
   if (pathname.includes("/business-hours")) return { category: "Settings", page: "Business Hours" };
@@ -90,6 +90,7 @@ export default function DashboardLayout({
             </span>
           </div>
           <div className="flex items-center gap-2 sm:gap-3">
+            <CommandPalette />
             <span className="hidden sm:inline text-[11px] font-semibold uppercase px-2 py-1 rounded bg-primary/10 text-primary">
               Agent Online
             </span>

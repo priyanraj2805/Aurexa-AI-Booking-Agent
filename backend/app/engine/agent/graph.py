@@ -56,7 +56,8 @@ _CONFIRMATION_STARTER_RE = re.compile(
 _KNOWLEDGE_QUERY_TOKEN_RE = re.compile(
     r"\b(what|which|when|where|who|whom|whose|why|how|can|could|would|should|will|"
     r"do|does|did|tell me|explain|offer|offers|services|service|hours|pricing|price|"
-    r"cost|available|open|policy|policies)\b",
+    r"cost|available|open|policy|policies|summary|summarize|summarise|detail|details|"
+    r"information|info|about|know|list|features|benefits|overview|introduce)\b",
     flags=re.IGNORECASE,
 )
 
@@ -83,21 +84,49 @@ def _is_potential_knowledge_question(message_text: str) -> bool:
     """True when a turn plausibly asks for company/business knowledge.
 
     Booking statements ("I want to book an appointment"), field values and
-    confirmations are never knowledge questions; running the RAG pipeline
-    on them wastes an LLM rerank call per turn (C4).
+    confirmations are never knowledge questions; running the LLM rerank on
+    them wastes seconds per turn (C4).
     """
     text = str(message_text or "").strip()
     if not text:
         return False
     if text.endswith("?"):
         return True
+    # Non-ASCII letters (Devanagari, Arabic, CJK, ...) — the English
+    # question-token regex below cannot see them, so treat any such
+    # message as a potential knowledge question.
+    if any(ch.isalpha() and ord(ch) > 127 for ch in text):
+        return True
     return bool(_KNOWLEDGE_QUERY_TOKEN_RE.search(text))
 
 
+def _rag_tier(message_text: str) -> str:
+    """Decide how much RAG work this turn deserves.
+
+    Returns one of:
+      - "skip":     definitely a booking field value / confirmation — no RAG.
+      - "rerank":   clear knowledge question — BM25 + LLM rerank (accurate,
+                    costs seconds).
+      - "bm25_only": everything else (short noun phrases like a book title,
+                    imperative requests, ambiguous turns) — run the cheap
+                    indexed BM25 lookup and inject the top few chunks
+                    directly, with no LLM rerank round-trip.
+
+    The old binary gate silently starved RAG for messages like
+    "summary of this" or a bare topic name, which ARE knowledge requests;
+    BM25 alone is milliseconds, so the safe default is to run it.
+    """
+    text = str(message_text or "").strip()
+    if not text or _looks_like_booking_field_value(text):
+        return "skip"
+    if _is_potential_knowledge_question(text):
+        return "rerank"
+    return "bm25_only"
+
+
+# Backwards-compatible alias used by older call sites/tests.
 def _should_skip_rag(message_text: str) -> bool:
-    return _looks_like_booking_field_value(message_text) or not _is_potential_knowledge_question(
-        message_text
-    )
+    return _rag_tier(message_text) == "skip"
 
 
 def _normalize_llm_base_url(raw_url: str) -> str:
@@ -304,37 +333,185 @@ async def call_model(
         context_block = f"{context_block}\n\nConversation summary:\n{active_summary}"
 
     # 3b. Retrieve relevant knowledge from uploaded documents and crawled websites.
-    # Only for knowledge-question turns: booking statements, field values and
-    # confirmations never need RAG, and the rerank call costs seconds (C4).
-    if (
-        latest_user_message
-        and db
-        and not _should_skip_rag(latest_user_message)
-    ):
+    # Tiered: booking field values/confirmations skip entirely ("skip");
+    # clear knowledge questions get BM25 + LLM rerank ("rerank"); anything
+    # else (bare topics, imperatives) still runs the cheap indexed BM25
+    # lookup and injects the top few chunks without an LLM rerank call
+    # ("bm25_only") so short requests like a book title are never starved.
+    rag_tier = _rag_tier(latest_user_message) if latest_user_message else "skip"
+
+    # Conversation-aware retrieval query: short follow-ups ("author?",
+    # "what about the ending?") carry no topic on their own, so blend in
+    # the user's recent turns to give keyword search real context.
+    prior_user_texts = []
+    for _m in active_messages[:-1]:
+        if isinstance(_m, HumanMessage):
+            _t = _message_content(_m).strip()
+            if _t:
+                prior_user_texts.append(_t[:200])
+    retrieval_query = " ".join(
+        prior_user_texts[-2:] + ([latest_user_message] if latest_user_message else [])
+    ).strip() or (latest_user_message or "")
+
+    logger.info(
+        f"RAG_DEBUG tier={rag_tier} has_db={db is not None}"
+    )
+    from app.services.retrieval_service import references_uploaded_source
+    if latest_user_message and db and rag_tier != "skip":
         try:
-            from app.services.retrieval_service import retrieve_and_rerank
-            rag_chunks = await retrieve_and_rerank(
-                db=db,
-                org_id=str(state.get("org_id", "")),
-                query=latest_user_message,
-                top_k=5,
-                candidate_k=30,
-            )
+            if rag_tier == "rerank":
+                from app.services.retrieval_service import retrieve_and_rerank
+                rag_chunks = await retrieve_and_rerank(
+                    db=db,
+                    org_id=str(state.get("org_id", "")),
+                    query=retrieval_query,
+                    top_k=5,
+                    candidate_k=30,
+                )
+            else:
+                from app.services.retrieval_service import retrieve_chunks
+                rag_chunks = await retrieve_chunks(
+                    db=db,
+                    org_id=str(state.get("org_id", "")),
+                    query=retrieval_query,
+                    k=3,
+                )
+
+            # Whole-document requests ("summarize the pdf", "this book")
+            # must be answered from the DOCUMENT itself, not keyword hits:
+            # generic words ("summary", "book") match unrelated website
+            # pages and crowd out the real content. When the user names a
+            # source — in this turn OR the recent conversation — lead with
+            # its opening pages and keep only document-type keyword hits
+            # alongside them.
+            overview_mode = False
+            # Source-reference detection, extended: the user may name the
+            # document by its TITLE rather than the word "pdf"/"book"
+            # ("the boy who never spoke", "who is the author"). If enough
+            # filename words appear in the conversation query, treat it as
+            # a source reference too.
+            _source_ref = references_uploaded_source(retrieval_query)
+            if not _source_ref:
+                from app.services.retrieval_service import newest_doc_filename
+                _fname = await newest_doc_filename(db, str(state.get("org_id", "")))
+                if _fname:
+                    import re as _re
+
+                    def _sig_tokens(s: str) -> set:
+                        return {
+                            t.lower() for t in _re.findall(r"[^\W\d_]{4,}", s)
+                        }
+
+                    _title_toks = _sig_tokens(_fname.rsplit(".", 1)[0])
+                    if len(_title_toks & _sig_tokens(retrieval_query)) >= 2:
+                        _source_ref = True
+            if _source_ref:
+                from app.services.retrieval_service import (
+                    get_document_overview,
+                    list_knowledge_sources,
+                )
+                overview = await get_document_overview(
+                    db, str(state.get("org_id", ""))
+                )
+                doc_keyword_hits = [
+                    c
+                    for c in (rag_chunks or [])
+                    if (c.get("source_type") or "") != "website"
+                ]
+                seen_ids = {c.get("id") for c in overview}
+                merged = overview + [
+                    c for c in doc_keyword_hits if c.get("id") not in seen_ids
+                ]
+                if merged:
+                    rag_chunks = merged[:5]
+                    overview_mode = True
+                else:
+                    # No documents at all — tell the agent what exists.
+                    sources = await list_knowledge_sources(
+                        db, str(state.get("org_id", ""))
+                    )
+                    if sources:
+                        context_block = (
+                            f"{context_block}\n\n"
+                            f"## AVAILABLE KNOWLEDGE SOURCES\n"
+                            f"The business has added these knowledge sources. "
+                            f"Answer from them when relevant:\n"
+                            + "\n".join(sources)
+                        )
+            elif not rag_chunks:
+                # Keyword search found nothing. Questions like "who is the
+                # author" or "when was it published" target document
+                # METADATA that lives on the opening pages (title/copyright),
+                # not in body keywords — so inject the overview pages plus
+                # the sources list, and demand honest grounding.
+                from app.services.retrieval_service import (
+                    get_document_overview,
+                    list_knowledge_sources,
+                )
+                overview = await get_document_overview(db, str(state.get("org_id", "")))
+                sources = await list_knowledge_sources(db, str(state.get("org_id", "")))
+                if overview:
+                    rag_chunks = overview
+                    overview_mode = True
+                if sources:
+                    context_block = (
+                        f"{context_block}\n\n"
+                        f"## AVAILABLE KNOWLEDGE SOURCES\n"
+                        + "\n".join(sources)
+                        + ("\n\nIMPORTANT: If the answer to the user's question is "
+                           "not contained in the materials above, say plainly that "
+                           "you don't have that information and offer to help "
+                           "differently. NEVER guess or invent names, authors, "
+                           "dates or facts."
+                            if sources and not overview
+                            else ""
+                        )
+                    )
+
             if rag_chunks:
+                from app.engine.knowledge_profile import format_source_context_line
+                logger.info(
+                    f"RAG_DEBUG injecting chunks={len(rag_chunks)} overview={overview_mode}"
+                )
                 knowledge_lines = []
                 for i, ch in enumerate(rag_chunks, 1):
                     content = (ch.get("content") or "").strip()
                     source = ch.get("source_type") or "document"
+                    ctx_label = format_source_context_line(ch.get("metadata"))
+                    if ctx_label:
+                        source += f" — {ctx_label}"
                     if ch.get("source_url"):
                         source += f" ({ch['source_url']})"
                     snippet = content[:1000]
                     knowledge_lines.append(f"[{i}] (source: {source})\n{snippet}")
                 knowledge = "\n\n".join(knowledge_lines)
+                grounding = (
+                    " If the answer is NOT contained in these materials, say "
+                    "plainly that you don't have that information — NEVER guess "
+                    "or invent names, authors, dates or facts."
+                )
+                if overview_mode:
+                    header = (
+                        "The following are the OPENING PAGES of the business's document. "
+                        "Use them to answer questions about the document itself "
+                        "(summaries, topic, title, author)." + grounding
+                    )
+                elif rag_tier == "bm25_only":
+                    header = (
+                        "The user's message may be referring to one of the business's "
+                        "materials below (for example a document title or topic) rather "
+                        "than expressing feelings. Use them to respond helpfully."
+                        + grounding
+                    )
+                else:
+                    header = (
+                        "The following information is from the company's business documents "
+                        "and website. Use it to answer the user's question if relevant."
+                        + grounding
+                    )
                 context_block = (
                     f"{context_block}\n\n"
-                    f"## COMPANY KNOWLEDGE\n"
-                    f"The following information is from the company's business documents "
-                    f"and website. Use it to answer the user's question if relevant:\n"
+                    f"## COMPANY KNOWLEDGE\n{header}\n"
                     f"{knowledge}"
                 )
         except Exception:

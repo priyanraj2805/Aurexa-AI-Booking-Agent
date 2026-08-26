@@ -386,6 +386,8 @@ class StatsResponse(BaseModel):
     bookings_by_day: List[DailyCount] = []  # Last 14 days of bookings
     cancelled_by_day: List[DailyCount] = []  # Last 14 days of cancelled sessions
     channel_breakdown: List[ChannelCount] = []  # CONFIRMED sessions by channel
+    web_bookings_by_day: List[DailyCount] = []  # Last 14 days of web bookings
+    whatsapp_bookings_by_day: List[DailyCount] = []  # Last 14 days of WhatsApp bookings
 
 
 class BookingItem(BaseModel):
@@ -646,6 +648,28 @@ async def get_stats(
         .group_by(ChatSession.channel)
     )
 
+    # Channel-specific bookings by day
+    web_booking_rows = await db.execute(
+        select(sa_cast(ChatSession.created_at, sa_date).label("day"), sa_func.count().label("c"))
+        .where(
+            ChatSession.org_id == org_id,
+            ChatSession.session_status == "CONFIRMED",
+            ChatSession.channel == "web",
+            ChatSession.created_at >= days_ago,
+        )
+        .group_by("day")
+    )
+    whatsapp_booking_rows = await db.execute(
+        select(sa_cast(ChatSession.created_at, sa_date).label("day"), sa_func.count().label("c"))
+        .where(
+            ChatSession.org_id == org_id,
+            ChatSession.session_status == "CONFIRMED",
+            ChatSession.channel == "whatsapp",
+            ChatSession.created_at >= days_ago,
+        )
+        .group_by("day")
+    )
+
     def fill_series(rows: list) -> List[DailyCount]:
         counts = {str(r[0]): r[1] for r in rows}
         start = datetime.now(timezone.utc).date() - timedelta(days=days - 1)
@@ -670,6 +694,8 @@ async def get_stats(
         channel_breakdown=[
             ChannelCount(channel=r[0] or "web", count=r[1]) for r in channel_rows.all()
         ],
+        web_bookings_by_day=fill_series(web_booking_rows.all()),
+        whatsapp_bookings_by_day=fill_series(whatsapp_booking_rows.all()),
     )
 
 
@@ -831,12 +857,13 @@ async def list_bookings(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=10, ge=1, le=100),
     search: Optional[str] = Query(None, max_length=100),
+    status: Optional[str] = Query(None, pattern="^(CONFIRMED|CANCELLED|ACTIVE|ARCHIVED|EXPIRED)$"),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Paginated bookings list for the current org (search + date range)."""
+    """Paginated bookings list for the current org (search + date range + status)."""
     from datetime import timedelta
 
     predicates = [Booking.org_id == user.org_id]
@@ -849,6 +876,8 @@ async def list_bookings(
                 Booking.customer_phone.ilike(like),
             )
         )
+    if status:
+        predicates.append(ChatSession.session_status == status)
     if from_date:
         try:
             fd = datetime.strptime(from_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)

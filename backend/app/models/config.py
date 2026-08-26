@@ -187,3 +187,8 @@ class OrgConfig(Base):
     total_pages_crawled = Column(Integer, nullable=True)
     uploaded_docs = Column(JSONB, nullable=True)
     org_name = Column(String(255), nullable=True)
+
+    # Structured context collected from the admin before knowledge ingestion:
+    # {"business_profile": {...}, "sources": {"<doc_id|website>": {...}}}
+    # Injected into the agent system prompt and stamped onto chunk metadata.
+    knowledge_context = Column(JSONB, nullable=True)

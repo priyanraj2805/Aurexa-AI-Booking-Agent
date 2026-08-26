@@ -24,21 +24,41 @@ _STOPWORDS = {
     "shall", "tell", "please", "thanks", "thank",
 }
 
-_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-]+")
+# Characters stripped from word edges before keyword checks. Deliberately
+# punctuation-only so scripts whose letters carry combining marks
+# (Devanagari matras, Arabic diacritics, ...) stay intact inside tokens.
+_EDGE_PUNCT = " \t\r\n.,!?;:\"'`()[]{}<>\u2014\u2013\u2026|\\//*~^%=+#@$&_"
+
+_TOKEN_SPLIT_RE = re.compile(r"\s+")
+
+
+def _clean_token(raw: str) -> str:
+    return raw.strip(_EDGE_PUNCT)
+
+
+def _has_word_content(tok: str) -> bool:
+    return any(ch.isalnum() for ch in tok)
 
 
 def extract_keywords(query: str, max_keywords: int = 10) -> List[str]:
-    """Extract lowercased keywords from the query, dropping stopwords."""
+    """Extract lowercased keywords from the query, dropping stopwords.
+
+    Script-agnostic: splits on whitespace and trims edge punctuation, so
+    queries in any language (English, Hindi, Arabic, CJK, ...) yield
+    keywords for BM25 retrieval instead of silently returning nothing.
+    """
     if not query:
         return []
 
-    tokens = _WORD_RE.findall(query.lower())
     seen: set = set()
     keywords: List[str] = []
-    for tok in tokens:
-        if tok in _STOPWORDS:
+    for raw in _TOKEN_SPLIT_RE.split(str(query).lower()):
+        tok = _clean_token(raw)
+        if not tok or len(tok) <= 2:
             continue
-        if len(tok) <= 2:
+        if not _has_word_content(tok):
+            continue
+        if tok in _STOPWORDS:
             continue
         if tok in seen:
             continue

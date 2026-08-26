@@ -28,6 +28,7 @@ export interface Stats {
   reliability_link: string;
   bookings_by_day: DailyCount[];
   cancelled_by_day: DailyCount[];
+  whatsapp_bookings_by_day?: DailyCount[];
   channel_breakdown: ChannelCount[];
 }
 
@@ -56,20 +57,6 @@ export interface CancelledBookingItem {
   cancelled_at: string | null;
 }
 
-export interface AuditLogItem {
-  id: string;
-  org_id: string;
-  actor_id: string | null;
-  actor_email: string | null;
-  action: string;
-  resource_type: string;
-  resource_id: string | null;
-  old_values: Record<string, unknown> | null;
-  new_values: Record<string, unknown> | null;
-  ip_address: string | null;
-  created_at: string;
-}
-
 export interface ConversationItem {
   id: string;
   session_status: string;
@@ -88,6 +75,7 @@ export interface MessageItem {
   id: string;
   role: "user" | "agent";
   content: string;
+  sender_type?: string;
   metadata: Record<string, unknown> | null;
   created_at: string;
 }
@@ -235,6 +223,31 @@ export interface MeetingProviderConnectResponse {
   auth_url: string;
 }
 
+// ── Knowledge wizard types ──────────────────────
+
+export interface BusinessProfile {
+  business_name: string | null;
+  business_description: string;
+  products_services: string | null;
+  target_customers: string | null;
+  key_policies: string | null;
+  answer_language_tone: string | null;
+  configured?: boolean;
+}
+
+export interface SourceContextInput {
+  source_description: string;
+  source_category?: string;
+  questions_to_answer?: string[];
+}
+
+export interface CrawlContextInput extends SourceContextInput {
+  pages_that_matter?: string;
+  not_covered?: string;
+}
+
+export const MAX_DOCS_PER_ORG = 10;
+
 // ── Generic fetch hook ───────────────────────────
 
 function useApi<T>(path: string, deps: unknown[] = []) {
@@ -278,16 +291,17 @@ export function useRecentBookings(limit = 20) {
 export function useBookings(
   page: number,
   pageSize = 10,
-  filters?: { search?: string; fromDate?: string; toDate?: string }
+  filters?: { search?: string; status?: string; fromDate?: string; toDate?: string }
 ) {
   const rangeOk = isDateRangeValid(filters?.fromDate || "", filters?.toDate || "");
   const qs = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
   if (rangeOk && filters?.search) qs.append("search", filters.search);
+  if (rangeOk && filters?.status) qs.append("status", filters.status);
   if (rangeOk && filters?.fromDate) qs.append("from_date", toApiDate(filters.fromDate) || filters.fromDate);
   if (rangeOk && filters?.toDate) qs.append("to_date", toApiDateTo(filters.toDate) || filters.toDate);
   return useApi<Paginated<BookingPageItem>>(
     rangeOk ? `/dashboard/bookings?${qs.toString()}` : "",
-    [page, pageSize, filters?.search, filters?.fromDate, filters?.toDate, rangeOk]
+    [page, pageSize, filters?.search, filters?.status, filters?.fromDate, filters?.toDate, rangeOk]
   );
 }
 
@@ -306,14 +320,6 @@ export function useCancelledBookings(
     [page, pageSize, filters?.search, filters?.fromDate, filters?.toDate, rangeOk]
   );
 }
-
-export function useAuditLogs(fromDate?: string, toDate?: string) {
-  const qs = new URLSearchParams({ page_size: "200" });
-  if (fromDate) qs.append("start_date", `${fromDate}T00:00:00`);
-  if (toDate) qs.append("end_date", `${toDate}T23:59:59`);
-  return useApi<AuditLogItem[]>(`/audit/logs?${qs.toString()}`, [fromDate, toDate]);
-}
-
 export interface Paginated<T> {
   items: T[];
   total: number;
@@ -501,8 +507,6 @@ export async function sendHumanMessage(orgId: string, conversationId: string, co
 
 // ── Knowledge Base (Vectorless RAG) Types & Hooks ──────────────────────────
 
-export const MAX_DOCS_PER_ORG = 10;
-
 export interface DocumentListItem {
   id: string;
   filename: string;
@@ -559,16 +563,46 @@ export function useDocuments() {
   return useApiNullable<DocumentListItem[]>("/documents/documents");
 }
 
-export async function uploadPdfDocument(file: File): Promise<DocumentUploadResponse> {
-  return uploadFile<DocumentUploadResponse>("/documents/documents/upload", file, "file");
+export function useBusinessProfile() {
+  return useApi<BusinessProfile>("/documents/business-profile");
+}
+
+export async function saveBusinessProfile(profile: BusinessProfile): Promise<BusinessProfile> {
+  return api.put<BusinessProfile>("/documents/business-profile", profile);
+}
+
+export async function uploadPdfDocument(
+  file: File,
+  ctx?: SourceContextInput,
+): Promise<DocumentUploadResponse> {
+  if (!ctx) {
+    return uploadFile<DocumentUploadResponse>("/documents/documents/upload", file, "file");
+  }
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("source_context", JSON.stringify(ctx));
+  const response = await fetch(`/api/v1/documents/documents/upload`, {
+    method: "POST",
+    headers: { "X-Requested-With": "XMLHttpRequest" },
+    credentials: "include",
+    body: formData,
+  });
+  if (!response.ok) {
+    const errBody = await response.json().catch(() => ({}));
+    throw new Error(errBody.detail || "Upload failed");
+  }
+  return response.json();
 }
 
 export async function deletePdfDocument(docId: string): Promise<void> {
   await api.del(`/documents/documents/${docId}`);
 }
 
-export async function startWebsiteCrawl(url: string): Promise<CrawlResponse> {
-  return api.post<CrawlResponse>("/documents/website/crawl", { url });
+export async function startWebsiteCrawl(
+  url: string,
+  ctx?: CrawlContextInput,
+): Promise<CrawlResponse> {
+  return api.post<CrawlResponse>("/documents/website/crawl", { url, ...ctx });
 }
 
 export function useCrawlStatus(crawlId: string | null) {

@@ -19,6 +19,19 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useTheme } from "next-themes";
+import { toast } from "sonner";
+import { AvatarInitials } from "@/components/ui/status-badge";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { HoverCard, HoverCardTrigger, HoverCardContent } from "@/components/ui/hover-card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { MoreHorizontal, Copy, Mail, Phone } from "lucide-react";
 import {
   Area,
   AreaChart,
@@ -68,13 +81,13 @@ function Sparkline({ data, color }: { data: number[]; color: string }) {
   const points = data.filter((n) => n >= 0);
   if (points.length < 2) return null;
   const max = Math.max(...points, 1);
-  const w = 96;
+  const w = 80;
   const h = 28;
   const pts = points
     .map((v, i) => `${(i / (points.length - 1)) * w},${h - (v / max) * (h - 2) - 1}`)
     .join(" ");
   return (
-    <svg width={w} height={h} className="overflow-visible shrink-0" aria-hidden>
+    <svg width={w} height={h} className="shrink-0" aria-hidden>
       <polyline
         points={pts}
         fill="none"
@@ -185,13 +198,13 @@ function StatCard({
         <span className={`flex items-center justify-center size-11 rounded-xl shrink-0 ${chipClass}`}>
           <Icon className="size-5" />
         </span>
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 overflow-hidden">
           <div className="text-[13px] font-medium text-muted-foreground">{title}</div>
           <div className="flex items-baseline gap-2">
             <span className="text-[28px] font-bold tracking-tight leading-none">{value}</span>
             {trend !== null && trend !== 0 && (
               <span
-                className={`inline-flex items-center gap-0.5 text-[11px] font-semibold ${
+                className={`inline-flex items-center gap-0.5 text-[11px] font-semibold whitespace-nowrap ${
                   trend > 0 ? "text-green-500" : "text-red-500"
                 }`}
               >
@@ -262,25 +275,31 @@ function DonutChart({
           <span className="text-[11px] text-muted-foreground">total</span>
         </div>
       </div>
-      <div className="mt-4 flex w-full flex-col gap-1.5 text-xs text-muted-foreground">
+      <div className="mt-4 flex w-full flex-col gap-2 text-xs text-muted-foreground">
         <Link
-          href="/dashboard/bookings"
-          className="flex items-center gap-2 rounded-md px-1 py-0.5 transition-colors hover:text-foreground"
+          href="/dashboard/bookings?status=CONFIRMED"
+          className="group flex items-center gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-secondary/50"
         >
-          <span className="inline-block h-2 w-2 rounded-sm bg-[var(--i500)]" />
-          <span className="flex-1">Bookings</span>
-          <span className="font-medium text-foreground">{booked}</span>
-          <span className="w-12 text-right">{bookedPct}%</span>
+          <span className="inline-block h-2.5 w-2.5 rounded-sm bg-[var(--i500)]" />
+          <span className="flex-1 font-medium">Bookings</span>
+          <span className="font-semibold text-foreground">{booked}</span>
+          <span className="w-10 text-right text-muted-foreground">{bookedPct}%</span>
         </Link>
+        <div className="h-1.5 w-full bg-secondary rounded-full overflow-hidden">
+          <div className="h-full rounded-full bg-[var(--i500)]" style={{ width: `${bookedPct}%` }} />
+        </div>
         <Link
           href="/dashboard/bookings/cancelled"
-          className="flex items-center gap-2 rounded-md px-1 py-0.5 transition-colors hover:text-foreground"
+          className="group flex items-center gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-secondary/50"
         >
-          <span className="inline-block h-2 w-2 rounded-sm bg-[var(--s600)]" />
-          <span className="flex-1">Cancelled</span>
-          <span className="font-medium text-foreground">{cancelled}</span>
-          <span className="w-12 text-right">{cancelledPct}%</span>
+          <span className="inline-block h-2.5 w-2.5 rounded-sm bg-[var(--s600)]" />
+          <span className="flex-1 font-medium">Cancelled</span>
+          <span className="font-semibold text-foreground">{cancelled}</span>
+          <span className="w-10 text-right text-muted-foreground">{cancelledPct}%</span>
         </Link>
+        <div className="h-1.5 w-full bg-secondary rounded-full overflow-hidden">
+          <div className="h-full rounded-full bg-[var(--s600)]" style={{ width: `${cancelledPct}%` }} />
+        </div>
       </div>
     </div>
   );
@@ -338,6 +357,13 @@ function getInitials(name: string): string {
     .slice(0, 2);
 }
 
+/** Deterministic avatar tone from the name — stable across re-renders. */
+function nameTone(name: string): "primary" | "red" {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  return hash % 2 === 0 ? "primary" : "red";
+}
+
 const SUPPORTED_CHANNELS = ["web", "whatsapp"];
 
 function ChannelBreakdown({
@@ -355,29 +381,33 @@ function ChannelBreakdown({
   const total = merged.reduce((s, d) => s + d.count, 0);
   if (total === 0) return null;
 
+  const channelIcons: Record<string, string> = {
+    web: "🌐",
+    whatsapp: "💬",
+  };
+
   return (
     <div className="flex flex-col h-full">
       <div className="text-center pb-4">
         <div className="text-4xl font-bold tracking-tight">{total}</div>
         <div className="text-xs text-muted-foreground mt-0.5">total confirmed</div>
       </div>
-      <div className="flex-1 space-y-3.5">
+      <div className="flex-1 space-y-4">
         {merged.map((d, i) => {
           const pct = total > 0 ? (d.count / total) * 100 : 0;
           const color = colors[i % colors.length];
           return (
-            <div key={d.name} className="space-y-1.5">
+            <div key={d.name} className="space-y-2">
               <div className="flex items-center justify-between text-sm">
-                <div className="flex items-center gap-2">
-                  <span
-                    className="w-2.5 h-2.5 rounded-full shrink-0"
-                    style={{ backgroundColor: color }}
-                  />
+                <div className="flex items-center gap-2.5">
+                  <span className="text-base">{channelIcons[d.name] || "📊"}</span>
                   <span className="font-medium capitalize">{d.name}</span>
                 </div>
-                <div className="text-muted-foreground">
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-secondary text-[10px] font-semibold">
+                    {Math.round(pct)}%
+                  </span>
                   <span className="font-semibold text-foreground">{d.count}</span>
-                  <span className="text-[11px] ml-1">({Math.round(pct)}%)</span>
                 </div>
               </div>
               <div className="h-2.5 bg-secondary rounded-full overflow-hidden">
@@ -397,7 +427,7 @@ function ChannelBreakdown({
       <div className="pt-4 mt-auto border-t border-border">
         <div className="flex items-center justify-between text-[11px] text-muted-foreground">
           <span>{merged.length} channels</span>
-          <span>Most: {merged[0]?.name || "—"}</span>
+          <span>Most: <span className="font-medium text-foreground capitalize">{merged[0]?.name || "—"}</span></span>
         </div>
       </div>
     </div>
@@ -498,9 +528,15 @@ export default function DashboardPage() {
     <>
       <div className="flex flex-wrap items-end justify-between gap-3 mb-6">
         <div>
-          <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">
-            {greeting()}, welcome back
-          </h1>
+          <div className="flex items-center gap-2 mb-1">
+            <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">
+              {greeting()}, welcome back
+            </h1>
+            <span className="relative flex size-2.5 mb-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+              <span className="relative inline-flex rounded-full size-2.5 bg-green-500" />
+            </span>
+          </div>
           <p className="text-muted-foreground text-xs sm:text-sm mt-1.5">{todayLabel()}</p>
         </div>
       </div>
@@ -596,7 +632,7 @@ export default function DashboardPage() {
             value={stats?.confirmed_sessions ?? 0}
             icon={CheckCircle2}
             chipClass={confirmedIcon}
-            href="/dashboard/bookings"
+            href="/dashboard/bookings?status=CONFIRMED"
             spark={(stats?.bookings_by_day ?? []).map((d) => d.count)}
             sparkColor={chartColors.green}
             trend={bookingsTrend}
@@ -732,7 +768,7 @@ export default function DashboardPage() {
             iconClass={cardIcon}
           />
           {statsLoading ? (
-            <div className="flex items-center justify-center text-muted-foreground text-sm h-56">
+            <div className="flex items-center justify-center text-muted-foreground text-sm h-48">
               <Loader2 className="size-4 animate-spin" />
             </div>
           ) : statsError ? (
@@ -750,186 +786,252 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Channel bar chart + recent appointments */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
-        {/* Left column - Channel + Stats */}
-        <div className="space-y-4">
-          <div className="bg-card border border-border rounded-2xl p-4 sm:p-6">
-            <CardHeader
-              icon={BarChart3}
-              title="Bookings by Channel"
-              subtitle="Confirmed sessions"
-              iconClass={activeIcon}
-            />
-            {statsLoading ? (
-              <div className="flex items-center justify-center text-muted-foreground text-sm h-56">
-                <Loader2 className="size-4 animate-spin" />
-              </div>
-            ) : statsError ? (
-              <div className="flex items-center gap-2 text-red-500 text-sm py-8">
-                <AlertCircle className="size-4" /> {statsError}
-              </div>
-            ) : barData.length === 0 ? (
-              <div className="text-center py-12">
-                <BarChart3 className="size-8 text-muted-foreground/40 mx-auto mb-2" />
-                <p className="text-muted-foreground text-sm">No channel data yet.</p>
-              </div>
-            ) : (
-              <ChannelBreakdown data={barData} colors={barColors} />
-            )}
-          </div>
 
-          {/* Quick Stats */}
-          <div className="bg-card border border-border rounded-2xl p-4 sm:p-6">
-            <CardHeader
-              icon={TrendingUp}
-              title="Quick Stats"
-              subtitle="Last 7 days performance"
-              iconClass={confirmedIcon}
-            />
-            {statsLoading ? (
-              <div className="flex items-center justify-center text-muted-foreground text-sm h-48">
-                <Loader2 className="size-4 animate-spin" />
-              </div>
-            ) : statsError ? (
-              <div className="flex items-center gap-2 text-red-500 text-sm py-8">
-                <AlertCircle className="size-4" /> {statsError}
-              </div>
-            ) : hasActivity ? (
-              <>
-                {/* Mini 7-day trend */}
-                <MiniTrendArea
-                  data={stats?.bookings_by_day?.slice(-7).map((d) => ({
-                    date: d.date,
-                    count: d.count,
-                  })) ?? []}
-                  color={chartColors.indigo}
-                  tooltipBg={chartColors.tooltipBg}
-                  tooltipBorder={chartColors.tooltipBorder}
-                  tickColor={chartColors.tick}
-                />
-                <div className="mt-4 space-y-3">
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-                      <span className="text-sm text-muted-foreground">Bookings today</span>
-                      <div className="flex items-baseline gap-2">
-                        <span className="text-xl font-bold">
-                          {stats?.bookings_by_day?.[stats.bookings_by_day.length - 1]?.count ?? 0}
-                        </span>
-                      </div>
-                      <StatMiniBar
-                        value={
-                          stats?.bookings_by_day?.[stats.bookings_by_day.length - 1]?.count ?? 0
-                        }
-                        max={
-                          Math.max(
-                            ...(stats?.bookings_by_day?.slice(-7).map((d) => d.count) ?? [0])
-                          )
-                        }
-                        color={chartColors.indigo}
-                      />
-                    </div>
+      {/* Row 1: Bookings by Channel + WhatsApp Stats */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6">
+          <CardHeader
+            icon={BarChart3}
+            title="Bookings by Channel"
+            subtitle="Confirmed sessions"
+            iconClass={activeIcon}
+          />
+          {statsLoading ? (
+            <div className="flex items-center justify-center text-muted-foreground text-sm h-56">
+              <Loader2 className="size-4 animate-spin" />
+            </div>
+          ) : statsError ? (
+            <div className="flex items-center gap-2 text-red-500 text-sm py-8">
+              <AlertCircle className="size-4" /> {statsError}
+            </div>
+          ) : barData.length === 0 ? (
+            <div className="text-center py-12">
+              <BarChart3 className="size-8 text-muted-foreground/40 mx-auto mb-2" />
+              <p className="text-muted-foreground text-sm">No channel data yet.</p>
+            </div>
+          ) : (
+            <ChannelBreakdown data={barData} colors={barColors} />
+          )}
+        </div>
+        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6">
+          <CardHeader
+            icon={MessageSquare}
+            title="WhatsApp Stats"
+            subtitle="Last 7 days performance"
+            iconClass="bg-green-500/15 text-green-500"
+          />
+          {statsLoading ? (
+            <div className="flex items-center justify-center text-muted-foreground text-sm h-48">
+              <Loader2 className="size-4 animate-spin" />
+            </div>
+          ) : statsError ? (
+            <div className="flex items-center gap-2 text-red-500 text-sm py-8">
+              <AlertCircle className="size-4" /> {statsError}
+            </div>
+          ) : hasActivity ? (
+            <>
+              <MiniTrendArea
+                data={stats?.whatsapp_bookings_by_day?.slice(-7).map((d) => ({
+                  date: d.date,
+                  count: d.count,
+                })) ?? []}
+                color={chartColors.green}
+                tooltipBg={chartColors.tooltipBg}
+                tooltipBorder={chartColors.tooltipBorder}
+                tickColor={chartColors.tick}
+              />
+              <div className="mt-4 space-y-3">
+                <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
+                  <div className="flex items-center gap-2">
+                    <span className="size-1.5 rounded-full bg-green-500" />
+                    <span className="text-sm text-muted-foreground">Bookings today</span>
                   </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-                      <span className="text-sm text-muted-foreground">Avg per day</span>
-                      <div className="flex items-baseline gap-2">
-                        <span className="text-xl font-bold">
-                          {stats?.bookings_by_day
-                            ? Math.round(
-                                stats.bookings_by_day.slice(-7).reduce((s, d) => s + d.count, 0) / 7
-                              )
-                            : 0}
-                        </span>
-                      </div>
-                      <StatMiniBar
-                        value={
-                          stats?.bookings_by_day
-                            ? Math.round(
-                                stats.bookings_by_day.slice(-7).reduce((s, d) => s + d.count, 0) / 7
-                              )
-                            : 0
-                        }
-                        max={
-                          Math.max(
-                            ...(stats?.bookings_by_day?.slice(-7).map((d) => d.count) ?? [0])
-                          )
-                        }
-                        color={chartColors.green}
-                      />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline justify-end gap-2">
+                      <span className="text-xl font-bold">
+                        {stats?.whatsapp_bookings_by_day?.[stats.whatsapp_bookings_by_day.length - 1]?.count ?? 0}
+                      </span>
                     </div>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-                      <span className="text-sm text-muted-foreground">Best channel</span>
-                      <div className="flex items-baseline gap-2">
-                        <span className="text-xl font-bold capitalize">
-                          {barData.length > 0
-                            ? barData.reduce((max, d) => (d.count > max.count ? d : max), barData[0]).name
-                            : "—"}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-                      <span className="text-sm text-muted-foreground">This week</span>
-                      <div className="flex items-baseline gap-2">
-                        <span className="text-xl font-bold">
-                          {stats?.bookings_this_week ?? 0}
-                        </span>
-                      </div>
-                      <StatMiniBar
-                        value={stats?.bookings_this_week ?? 0}
-                        max={
-                          Math.max(
-                            ...(stats?.bookings_by_day?.slice(-7).map((d) => d.count) ?? [0])
-                          )
-                        }
-                        color={chartColors.blue}
-                      />
-                    </div>
+                    <StatMiniBar
+                      value={stats?.whatsapp_bookings_by_day?.[stats.whatsapp_bookings_by_day.length - 1]?.count ?? 0}
+                      max={Math.max(...(stats?.whatsapp_bookings_by_day?.slice(-7).map((d) => d.count) ?? [0]))}
+                      color={chartColors.green}
+                    />
                   </div>
                 </div>
-              </>
-            ) : (
-              <div className="text-center py-10">
-                <TrendingUp className="size-8 text-muted-foreground/40 mx-auto mb-2" />
-                <p className="text-muted-foreground text-sm">No booking activity yet.</p>
+                <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
+                  <div className="flex items-center gap-2">
+                    <span className="size-1.5 rounded-full bg-emerald-500" />
+                    <span className="text-sm text-muted-foreground">Avg per day</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline justify-end gap-2">
+                      <span className="text-xl font-bold">
+                        {stats?.whatsapp_bookings_by_day
+                          ? Math.round(stats.whatsapp_bookings_by_day.slice(-7).reduce((s, d) => s + d.count, 0) / 7)
+                          : 0}
+                      </span>
+                    </div>
+                    <StatMiniBar
+                      value={stats?.whatsapp_bookings_by_day ? Math.round(stats.whatsapp_bookings_by_day.slice(-7).reduce((s, d) => s + d.count, 0) / 7) : 0}
+                      max={Math.max(...(stats?.whatsapp_bookings_by_day?.slice(-7).map((d) => d.count) ?? [0]))}
+                      color={chartColors.green}
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
+                  <div className="flex items-center gap-2">
+                    <span className="size-1.5 rounded-full bg-teal-500" />
+                    <span className="text-sm text-muted-foreground">WhatsApp this week</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline justify-end gap-2">
+                      <span className="text-xl font-bold">
+                        {stats?.whatsapp_bookings_by_day
+                          ? stats.whatsapp_bookings_by_day.slice(-7).reduce((s, d) => s + d.count, 0)
+                          : 0}
+                      </span>
+                    </div>
+                    <StatMiniBar
+                      value={stats?.whatsapp_bookings_by_day ? stats.whatsapp_bookings_by_day.slice(-7).reduce((s, d) => s + d.count, 0) : 0}
+                      max={Math.max(...(stats?.whatsapp_bookings_by_day?.slice(-7).map((d) => d.count) ?? [0]))}
+                      color={chartColors.green}
+                    />
+                  </div>
+                </div>
               </div>
-            )}
+            </>
+          ) : (
+            <div className="text-center py-10">
+              <MessageSquare className="size-8 text-muted-foreground/40 mx-auto mb-2" />
+              <p className="text-muted-foreground text-sm">No WhatsApp activity yet.</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Row 2: Quick Stats + Recent Appointments */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4 items-stretch">
+        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col">
+          <CardHeader
+            icon={TrendingUp}
+            title="Quick Stats"
+            subtitle="Last 7 days performance"
+            iconClass={confirmedIcon}
+          />
+          <div className="flex-1 flex flex-col justify-center">
+          {statsLoading ? (
+            <div className="flex items-center justify-center text-muted-foreground text-sm h-48">
+              <Loader2 className="size-4 animate-spin" />
+            </div>
+          ) : statsError ? (
+            <div className="flex items-center gap-2 text-red-500 text-sm py-8">
+              <AlertCircle className="size-4" /> {statsError}
+            </div>
+          ) : hasActivity ? (
+            <>
+              <MiniTrendArea
+                data={stats?.bookings_by_day?.slice(-7).map((d) => ({
+                  date: d.date,
+                  count: d.count,
+                })) ?? []}
+                color={chartColors.indigo}
+                tooltipBg={chartColors.tooltipBg}
+                tooltipBorder={chartColors.tooltipBorder}
+                tickColor={chartColors.tick}
+              />
+              <div className="mt-4 space-y-3">
+                <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
+                  <div className="flex items-center gap-2">
+                    <span className="size-1.5 rounded-full bg-indigo-500" />
+                    <span className="text-sm text-muted-foreground">Bookings today</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline justify-end gap-2">
+                      <span className="text-xl font-bold">
+                        {stats?.bookings_by_day?.[stats.bookings_by_day.length - 1]?.count ?? 0}
+                      </span>
+                    </div>
+                    <StatMiniBar
+                      value={stats?.bookings_by_day?.[stats.bookings_by_day.length - 1]?.count ?? 0}
+                      max={Math.max(...(stats?.bookings_by_day?.slice(-7).map((d) => d.count) ?? [0]))}
+                      color={chartColors.indigo}
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
+                  <div className="flex items-center gap-2">
+                    <span className="size-1.5 rounded-full bg-green-500" />
+                    <span className="text-sm text-muted-foreground">Avg per day</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline justify-end gap-2">
+                      <span className="text-xl font-bold">
+                        {stats?.bookings_by_day
+                          ? Math.round(stats.bookings_by_day.slice(-7).reduce((s, d) => s + d.count, 0) / 7)
+                          : 0}
+                      </span>
+                    </div>
+                    <StatMiniBar
+                      value={stats?.bookings_by_day ? Math.round(stats.bookings_by_day.slice(-7).reduce((s, d) => s + d.count, 0) / 7) : 0}
+                      max={Math.max(...(stats?.bookings_by_day?.slice(-7).map((d) => d.count) ?? [0]))}
+                      color={chartColors.indigo}
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
+                  <div className="flex items-center gap-2">
+                    <span className="size-1.5 rounded-full bg-blue-500" />
+                    <span className="text-sm text-muted-foreground">This week</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline justify-end gap-2">
+                      <span className="text-xl font-bold">
+                        {stats?.bookings_this_week ?? 0}
+                      </span>
+                    </div>
+                    <StatMiniBar
+                      value={stats?.bookings_this_week ?? 0}
+                      max={Math.max(...(stats?.bookings_by_day?.slice(-7).map((d) => d.count) ?? [0]))}
+                      color={chartColors.blue}
+                    />
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="text-center py-10">
+              <TrendingUp className="size-8 text-muted-foreground/40 mx-auto mb-2" />
+              <p className="text-muted-foreground text-sm">No booking activity yet.</p>
+            </div>
+          )}
           </div>
         </div>
-
-        {/* Right column - Recent Appointments */}
-        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 lg:col-span-2">
-          <div className="flex items-center justify-between mb-5">
+        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col">
+          <div className="flex items-center justify-between mb-4">
             <CardHeader
               icon={CalendarCheck}
               title="Recent Appointments"
               subtitle="Latest confirmed bookings"
               iconClass={confirmedIcon}
             />
-            <Link
-              href="/dashboard/bookings"
+<Link
+              href="/dashboard/bookings?status=CONFIRMED"
               className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
             >
               View all <ArrowRight className="size-3.5" />
             </Link>
           </div>
-
           {bookingsLoading ? (
-            <div className="space-y-3 animate-pulse">
-              {[...Array(3)].map((_, i) => (
-                <div key={i} className="flex items-center justify-between p-4 border border-border rounded-lg bg-background/50">
-                  <div className="flex items-center gap-4">
-                    <div className="size-10 bg-secondary rounded-full" />
-                    <div className="space-y-2">
-                      <div className="h-4 w-32 bg-secondary rounded" />
-                      <div className="h-3 w-48 bg-secondary rounded" />
-                    </div>
+            <div className="space-y-2 animate-pulse">
+              {[...Array(5)].map((_, i) => (
+                <div key={i} className="flex items-center gap-3 p-3 border border-border rounded-lg bg-background/50">
+                  <div className="size-9 bg-secondary rounded-full" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3.5 w-28 bg-secondary rounded" />
+                    <div className="h-3 w-40 bg-secondary rounded" />
                   </div>
-                  <div className="h-6 w-20 bg-secondary rounded-full" />
+                  <div className="h-3 w-16 bg-secondary rounded" />
                 </div>
               ))}
             </div>
@@ -938,83 +1040,89 @@ export default function DashboardPage() {
               <AlertCircle className="size-4" /> {bookingsError}
             </div>
           ) : !bookings || !Array.isArray(bookings) || bookings.length === 0 ? (
-            <div className="text-center py-10">
-              <CalendarCheck className="size-10 text-muted-foreground/40 mx-auto mb-3" />
-              <p className="text-muted-foreground text-sm">No bookings yet.</p>
-              <p className="text-muted-foreground/60 text-xs mt-1">
-                Deploy your widget and get your first booking to see it here.
-              </p>
-            </div>
+            <Empty className="flex-1 border border-dashed rounded-xl">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <CalendarCheck />
+                </EmptyMedia>
+                <EmptyTitle>No bookings yet</EmptyTitle>
+                <EmptyDescription>
+                  Deploy your widget and get your first booking to see it here.
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
           ) : (
-            <div className="w-full overflow-hidden">
-              <div className="md:hidden space-y-3 max-h-[420px] overflow-y-auto pr-1 scrollbar-thin">
-                {bookings.slice(0, 10).map((b) => (
-                  <div key={b.id} className="flex items-start gap-3 p-4 border border-border rounded-lg bg-background/50">
-                    <div className="flex items-center justify-center size-8 rounded-full bg-[#27272a] text-xs font-semibold shrink-0">
-                      {getInitials(b.customer_name)}
-                    </div>
-                    <div className="flex-1 min-w-0 space-y-1">
-                      <div className="font-medium text-[13px]">{b.customer_name}</div>
+            <div className="flex-1 min-h-0 overflow-y-auto pr-1 scrollbar-thin max-h-[340px]">
+              <div className="space-y-2">
+                {bookings.map((b) => (
+                  <div key={b.id} className="group flex items-center gap-3 p-3 border border-border rounded-lg bg-background/50 hover:bg-secondary/30 transition-colors">
+                    <HoverCard>
+                      <HoverCardTrigger render={<div className="cursor-default" />}>
+                        <AvatarInitials name={b.customer_name} tone={nameTone(b.customer_name)} />
+                      </HoverCardTrigger>
+                      <HoverCardContent className="w-60" align="start">
+                        <div className="flex items-center gap-3">
+                          <Avatar className="size-9">
+                            <AvatarFallback className="text-xs font-semibold">
+                              {getInitials(b.customer_name)}
+                            </AvatarFallback>
+                          </Avatar>
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold truncate">{b.customer_name}</div>
+                            <div className="text-xs text-muted-foreground truncate">{b.customer_email}</div>
+                          </div>
+                        </div>
+                        {b.customer_phone && (
+                          <div className="mt-2 text-xs text-muted-foreground border-t border-border pt-2">
+                            {b.customer_phone}
+                          </div>
+                        )}
+                      </HoverCardContent>
+                    </HoverCard>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-[13px] truncate group-hover:text-primary transition-colors">{b.customer_name}</div>
                       <div className="text-[11px] text-muted-foreground truncate">{b.customer_email}</div>
-                      {b.customer_phone && (
-                        <div className="text-[11px] text-muted-foreground">{b.customer_phone}</div>
-                      )}
+                    </div>
+                    <div className="text-right shrink-0">
                       <div className="text-[11px] text-muted-foreground">
-                        Meeting: {formatDateTime(b.slot_start)}
-                      </div>
-                      <div className="text-[11px] text-muted-foreground">
-                        Booked: {formatDateTime(b.created_at)}
+                        {formatDateTime(b.slot_start)}
                       </div>
                     </div>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger render={<button
+                        className="inline-flex items-center justify-center size-7 rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-pointer shrink-0"
+                        aria-label={`Actions for ${b.customer_name}`}
+                      />}>
+                        <MoreHorizontal className="size-4" />
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-44">
+                        <DropdownMenuItem
+                          onClick={() => {
+                            navigator.clipboard.writeText(b.customer_email);
+                            toast.success("Email copied");
+                          }}
+                        >
+                          <Mail className="size-3.5" /> Copy email
+                        </DropdownMenuItem>
+                        {b.customer_phone ? (
+                          <DropdownMenuItem
+                            onClick={() => {
+                              const phone = b.customer_phone ?? "";
+                              navigator.clipboard.writeText(phone);
+                              toast.success("Phone copied");
+                            }}
+                          >
+                            <Phone className="size-3.5" /> Copy phone
+                          </DropdownMenuItem>
+                        ) : null}
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem render={<Link href="/dashboard/bookings?status=CONFIRMED" className="w-full" />}>
+                          <Copy className="size-3.5" /> View in bookings
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
                 ))}
-              </div>
-              <div className="hidden md:block max-h-[420px] overflow-y-auto pr-1 scrollbar-thin">
-                <table className="w-full border-collapse">
-                  <thead className="sticky top-0 bg-card z-10">
-                    <tr>
-                      <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">
-                        Client
-                      </th>
-                      <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">
-                        Email
-                      </th>
-                      <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">
-                        Meeting Time
-                      </th>
-                      <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">
-                        Booked At
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {bookings.slice(0, 10).map((b) => (
-                      <tr key={b.id} className="hover:bg-secondary/50 transition-colors">
-                        <td className="px-4 py-4 text-[13px] border-b border-border">
-                          <div className="flex items-center gap-3">
-                            <div className="flex items-center justify-center size-8 rounded-full bg-[#27272a] text-xs font-semibold">
-                              {getInitials(b.customer_name)}
-                            </div>
-                            <div>
-                              <div className="font-medium">{b.customer_name}</div>
-                              {b.customer_phone && (
-                                <div className="text-[11px] text-muted-foreground">{b.customer_phone}</div>
-                              )}
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-4 py-4 text-[13px] border-b border-border">{b.customer_email}</td>
-                        <td className="px-4 py-4 text-[13px] border-b border-border">
-                          {formatDateTime(b.slot_start)}
-                          {b.slot_end && <> – {formatDateTime(b.slot_end)}</>}
-                        </td>
-                        <td className="px-4 py-4 text-[13px] border-b border-border">
-                          {formatDateTime(b.created_at)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
               </div>
             </div>
           )}

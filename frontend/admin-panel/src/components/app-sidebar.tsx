@@ -13,7 +13,6 @@ import {
   LifeBuoy,
   CreditCard,
   Settings,
-  ScrollText,
   Sun,
   Moon,
   Palette,
@@ -57,7 +56,6 @@ import { useTheme } from "next-themes";
 
 const navApp = [
   { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
-  { title: "Audit Log", url: "/dashboard/audit", icon: ScrollText },
   { title: "Calendar", url: "/dashboard/calendar", icon: CalendarClock },
   { title: "Inbox", url: "/dashboard/conversations", icon: Inbox },
 ];

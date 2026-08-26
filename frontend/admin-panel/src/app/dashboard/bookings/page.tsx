@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
-import { Loader2, AlertCircle, CalendarCheck, ExternalLink } from "lucide-react";
+import { useState, useEffect } from "react";
+import { Loader2, AlertCircle, CalendarCheck, ExternalLink, X } from "lucide-react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useBookings } from "@/hooks/use-dashboard";
 import { Pagination } from "@/components/pagination";
 import { SearchInput, DateFilter } from "@/components/filter-bar";
@@ -47,8 +48,15 @@ export default function BookingsPage() {
   const [search, setSearch] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  const [status, setStatus] = useState<string>("");
 
-  const { data, loading, error } = useBookings(page, 10, { search, fromDate, toDate });
+  const searchParams = useSearchParams();
+  useEffect(() => {
+    const s = searchParams.get("status");
+    if (s) setStatus(s);
+  }, [searchParams]);
+
+  const { data, loading, error } = useBookings(page, 10, { search, status, fromDate, toDate });
 
   return (
     <>
@@ -56,6 +64,11 @@ export default function BookingsPage() {
         <div>
           <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">
             Bookings
+            {status && (
+              <span className="ml-2 inline-flex items-center gap-1.5 text-sm font-medium px-2 py-1 rounded-full bg-primary/10 text-primary">
+                {status}
+              </span>
+            )}
           </h1>
           <p className="text-muted-foreground text-xs sm:text-sm mt-1">
             Every booking made by your AI agent, searchable and date-filtered.
@@ -79,6 +92,14 @@ export default function BookingsPage() {
             onFromChange={(v) => { setFromDate(v); setPage(1); }}
             onToChange={(v) => { setToDate(v); setPage(1); }}
           />
+          {status && (
+            <button
+              onClick={() => { setStatus(""); setPage(1); }}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Clear filter <X className="size-3.5" />
+            </button>
+          )}
         </div>
 
         {loading ? (
