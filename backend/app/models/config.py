@@ -70,6 +70,7 @@ class OrgConfig(Base):
         Integer, default=5, server_default="5", nullable=False
     )
     ui_brand_color = Column(String(10), default="#3B82F6")
+    logo_url = Column(String(512), nullable=True)
     require_otp = Column(Boolean, default=True, server_default="true", nullable=False)
     max_booking_days_ahead = Column(
         Integer, default=90, server_default="90", nullable=False

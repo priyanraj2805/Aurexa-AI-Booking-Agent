@@ -221,6 +221,7 @@ async def register(
                 full_name=user.full_name,
                 org_id=user.org_id,
                 org_name=org.name,
+                avatar_url=getattr(user, "avatar_url", None),
                 is_active=user.is_active,
                 created_at=user.created_at,
             ),
@@ -300,6 +301,7 @@ async def login(
                 full_name=user.full_name,
                 org_id=user.org_id,
                 org_name=org.name if org else None,
+                avatar_url=getattr(user, "avatar_url", None),
                 is_active=user.is_active,
                 created_at=user.created_at,
             ),
@@ -404,6 +406,7 @@ async def get_me(
         full_name=user.full_name,
         org_id=user.org_id,
         org_name=org.name if org else None,
+        avatar_url=getattr(user, "avatar_url", None),
         is_active=user.is_active,
         created_at=user.created_at,
     )

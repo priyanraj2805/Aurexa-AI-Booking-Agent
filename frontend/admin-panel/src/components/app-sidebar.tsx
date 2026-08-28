@@ -16,6 +16,10 @@ import {
   Sun,
   Moon,
   Palette,
+  Image as ImageIcon,
+  Upload,
+  Trash2,
+  Link as LinkIcon,
 } from "lucide-react";
 
 import {
@@ -53,6 +57,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/lib/auth-context";
 import { useTheme } from "next-themes";
+import { uploadFile } from "@/lib/api";
+import { toast } from "sonner";
 
 const navApp = [
   { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
@@ -67,15 +73,77 @@ const navSettings = [
 ];
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
-  const { user, logout } = useAuth();
+  const { user, logout, refresh } = useAuth();
   const { theme, setTheme } = useTheme();
   const pathname = usePathname();
   const router = useRouter();
   const { isMobile, setOpenMobile, openMobile } = useSidebar();
   const [confirmLogout, setConfirmLogout] = React.useState(false);
+  const avatarInputRef = React.useRef<HTMLInputElement>(null);
+  const [avatarUploading, setAvatarUploading] = React.useState(false);
 
   const openLogoutDialog = () => {
     setConfirmLogout(true);
+  };
+
+  const handleAvatarFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      toast.error("Please select an image file");
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      toast.error("Image must be under 2MB");
+      return;
+    }
+    setAvatarUploading(true);
+    try {
+      await uploadFile("/account/avatar", file);
+      toast.success("Avatar updated");
+      await refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setAvatarUploading(false);
+      if (avatarInputRef.current) avatarInputRef.current.value = "";
+    }
+  };
+
+  const handleAvatarRemove = async () => {
+    setAvatarUploading(true);
+    try {
+      const { api } = await import("@/lib/api");
+      await api.del("/account/avatar");
+      toast.success("Avatar removed");
+      await refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to remove");
+    } finally {
+      setAvatarUploading(false);
+    }
+  };
+
+  const handleAvatarUrl = async () => {
+    const url = window.prompt("Paste image URL (https://...)");
+    if (!url) return;
+    try {
+      new URL(url);
+    } catch {
+      toast.error("Invalid URL");
+      return;
+    }
+    setAvatarUploading(true);
+    try {
+      const { api } = await import("@/lib/api");
+      await api.put("/account/avatar-url", { avatar_url: url.trim() });
+      toast.success("Avatar URL saved");
+      await refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save URL");
+    } finally {
+      setAvatarUploading(false);
+    }
   };
 
   const isActive = (url: string) => {
@@ -244,9 +312,21 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             ].join(" ")}
             title="Account menu"
           >
-            {/* Avatar */}
-            <div className="flex items-center justify-center size-8 rounded-full bg-primary text-primary-foreground text-xs font-semibold shrink-0">
-              {initials}
+            {/* Avatar — image if uploaded, else initials */}
+            <div className="flex items-center justify-center size-8 rounded-full bg-primary text-primary-foreground text-xs font-semibold shrink-0 overflow-hidden">
+              {user?.avatar_url ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={user.avatar_url}
+                  alt={user.full_name || "User"}
+                  className="size-full object-cover"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).style.display = "none";
+                  }}
+                />
+              ) : (
+                initials
+              )}
             </div>
 
             {/* User info */}
@@ -280,6 +360,36 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               <Settings className="size-4" />
               Settings
             </DropdownMenuItem>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger className="cursor-pointer">
+                <ImageIcon className="size-4" />
+                Avatar
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuItem
+                  onClick={() => avatarInputRef.current?.click()}
+                  className="cursor-pointer"
+                  disabled={avatarUploading}
+                >
+                  <Upload className="size-4" />
+                  Upload image
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={handleAvatarUrl} className="cursor-pointer" disabled={avatarUploading}>
+                  <LinkIcon className="size-4" />
+                  Via URL
+                </DropdownMenuItem>
+                {user?.avatar_url && (
+                  <DropdownMenuItem
+                    onClick={handleAvatarRemove}
+                    className="cursor-pointer text-destructive focus:text-destructive"
+                    disabled={avatarUploading}
+                  >
+                    <Trash2 className="size-4" />
+                    Remove
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
             <DropdownMenuItem
               render={<Link href="/dashboard/billing" />}
               className="cursor-pointer"
@@ -327,6 +437,13 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        <input
+          ref={avatarInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/svg+xml"
+          className="hidden"
+          onChange={handleAvatarFile}
+        />
       </SidebarFooter>
 
       <SidebarRail />

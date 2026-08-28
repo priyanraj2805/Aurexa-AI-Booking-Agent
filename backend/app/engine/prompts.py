@@ -62,7 +62,7 @@ Output:"""
 
         lines = []
         for fd in sorted(field_definitions, key=lambda f: f.order):
-            desc = f" — {fd.description}" if fd.description else ""
+            desc = f" - {fd.description}" if fd.description else ""
             opts = (
                 f" (options: {', '.join(fd.options)})"
                 if fd.type == "select" and fd.options
@@ -120,7 +120,28 @@ Output:"""
         if custom_instructions:
             persona_block += f"\nAdditional instructions: {custom_instructions}"
 
-        # Build field guidance — either rich definitions or legacy names
+        # Strict business scope - derived dynamically from actual business data, no hardcoded service lists
+        business_scope_block = ""
+        scope_parts = []
+        if industry_context and industry_context.strip():
+            scope_parts.append(f"Industry: {industry_context.strip()}")
+        # Use industry as the primary scope signal - no hardcoded service examples
+        if scope_parts or (custom_instructions and custom_instructions.strip()):
+            scope_text = "\n".join(f"- {p}" for p in scope_parts) if scope_parts else ""
+            business_scope_block = (
+                "### BUSINESS SCOPE (STRICT - DO NOT HALLUCINATE):\n"
+                "You are a booking assistant for THIS BUSINESS ONLY. Your business's industry and services are described in the industry and company knowledge above.\n"
+                "CRITICAL: When the user asks to book an appointment with a specific professional/service (e.g., 'book with engineer', 'beautician', 'doctor'), "
+                "you must check if that professional/service is actually offered by THIS business as per your business scope. "
+                "If the requested service/profession is NOT mentioned in and NOT reasonably related to your business's industry/services, it is OUT OF SCOPE.\n"
+                + (scope_text + "\n" if scope_text else "")
+                + "If the request is OUT OF SCOPE, you must NOT say 'Sure, I can book...' or 'Got it! To schedule...'. "
+                "Instead, respond with a polite clarification like: 'We specialize in [your industry] bookings. For example, we can help with [your actual services]. "
+                "The service you asked for is outside our scope. Would you like to book within our scope instead?' "
+                "Then ask for the next missing field only if they confirm they want a valid service."
+            )
+
+        # Build field guidance - either rich definitions or legacy names
         field_guidance = PromptGenerator._build_field_guidance(
             field_definitions, missing_fields, collected_data
         )
@@ -151,7 +172,7 @@ Output:"""
             json.dumps(collected_data, indent=2) if collected_data else "(none yet)"
         )
 
-        # Build the NEXT field to ask for — this is the #1 missing field
+        # Build the NEXT field to ask for - this is the #1 missing field
         next_field_label = ""
         if missing_fields and field_definitions:
             fd_map = {fd.name: fd for fd in field_definitions}
@@ -172,7 +193,7 @@ Output:"""
                 source = ch.get("source_type") or "document"
                 ctx_label = format_source_context_line(ch.get("metadata"))
                 if ctx_label:
-                    source += f" — {ctx_label}"
+                    source += f" - {ctx_label}"
                 if ch.get("source_url"):
                     source += f" ({ch['source_url']})"
                 snippet = content[:800]
@@ -187,7 +208,9 @@ Output:"""
         prompt = f"""You are the Unified Intelligence Core for a generalized AI Booking Assistant.
 {persona_block}
 
-### SESSION CONTEXT (ALWAYS USE THIS — DO NOT HALLUCINATE):
+{business_scope_block}
+
+### SESSION CONTEXT (ALWAYS USE THIS - DO NOT HALLUCINATE):
 - User's name (already collected): {collected_data.get("name", "(not provided yet)")}
 - Currently Collected Data: {collected_summary}
 - Missing Fields (in collection order): {fields_to_find}
@@ -203,29 +226,30 @@ Output:"""
 
 ### YOUR TASKS:
 1. Determine the user's current INTENT from this list: {", ".join(valid_intents)}
-2. EXTRACT any missing CUSTOMER information from the message ({extraction_keys}). 
-   - ONLY extract values that are actually present in the user's message.
-   - DO NOT extract values from previously collected data — those are already known.
+2. EXTRACT ONLY THE NEXT MISSING FIELD from the message ({next_field_label}). 
+   - ONLY extract a value if it is ACTUALLY PRESENT in the user's message.
+   - DO NOT extract values for other missing fields - even if they are missing.
+   - DO NOT extract values from previously collected data - those are already known.
    - DO NOT extract staff names (doctors) as the 'name' field.
    - If they provide new info for an existing field, extract it as an update.
    - For "select" type fields, the value MUST be one of the defined options.
-   - If the user's message does NOT contain a value for a missing field, leave extracted_entities empty for that field.
- 3. GENERATE a polite, humble, and conversational RESPONSE to the user.
-   - If the user asked a question or expressed concern (e.g. "why do I need this?", "what is this for?"), answer naturally and helpfully. Then gently guide them back to the booking. Do NOT force the next field if they're asking questions.
-   - If the user just provided a value for a field, acknowledge it warmly, THEN ask for the next missing field: {next_field_label}
-   - If the user is just chatting or greeting, respond naturally and guide them toward the booking.
-   - Always ask for EXACTLY ONE missing field at a time when collecting data.
-   - Do NOT list all missing requirements in one message. It is overwhelming.
-   - If there are errors (e.g., invalid email), explain politely and ask they try again.
-   - If ALL information is collected, tell them you're sending a verification code to their email.
-   - You are a booking assistant with knowledge ONLY about bookings/appointments AND the company/service context provided to you below. If the user asks about the company, services, pricing, hours, or anything covered by your context — answer helpfully. If the user asks something completely unrelated (general knowledge, trivia, personal questions) — politely say that's outside your expertise and gently steer back to the booking.
-   - For schedule/business-hours answers, policy data is authoritative: do NOT hallucinate or invent open/closed hours.
+   - If the user's message does NOT contain a value for the next missing field, leave extracted_entities EMPTY.
+  3. GENERATE a polite, humble, and conversational RESPONSE to the user.
+    - If the user asked a question or expressed concern (e.g. "why do I need this?", "what is this for?"), answer naturally and helpfully. Then gently guide them back to the booking. Do NOT force the next field if they're asking questions.
+    - If the user just provided a value for a field, acknowledge it warmly, THEN ask for the next missing field: {next_field_label}
+    - If the user is just chatting or greeting, respond naturally and guide them toward the booking.
+    - CRITICAL: You MUST ask for EXACTLY ONE missing field at a time. Your response_message MUST ask for ONLY the next field: {next_field_label}. Do NOT mention any other missing fields. Do NOT list requirements. It is overwhelming.
+    - If there are errors (e.g., invalid email), explain politely and ask they try again.
+    - If ALL information is collected, tell them you're sending a verification code to their email.
+    - You are a booking assistant for THIS BUSINESS ONLY as defined in BUSINESS SCOPE and COMPANY KNOWLEDGE CONTEXT above. You must NOT hallucinate services outside your scope. If user asks to book a professional/service NOT in your scope (e.g., engineer/beautician when you are Medical), do NOT say you can book it. Politely clarify your actual scope and ask if they want to proceed with a valid service within your scope.
+    - If the user asks about the company, services, pricing, hours, or anything covered by your context - answer helpfully using provided knowledge. If the user asks something completely unrelated (general knowledge, trivia) - politely say that's outside your expertise and steer back to booking.
+    - For schedule/business-hours answers, policy data is authoritative: do NOT hallucinate or invent open/closed hours.
 
 ### OUTPUT FORMAT:
 You MUST return ONLY a valid JSON object with these keys:
 - "intent": (string)
-- "extracted_entities": (object with keys like {extraction_keys})
-- "response_message": (string - your polite reply to the user)
+- "extracted_entities": (object - MUST contain ONLY the next field: {next_field_label})
+- "response_message": (string - your polite reply asking ONLY for: {next_field_label})
 
 Output ONLY valid JSON:"""
         return prompt

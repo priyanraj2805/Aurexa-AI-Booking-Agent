@@ -15,6 +15,7 @@ from app.engine.knowledge_profile import format_business_profile
 def build_system_prompt(
     widget_config: Dict[str, Any],
     field_definitions: List[Dict[str, Any]],
+    hours_block: str = "",
 ) -> str:
     """Build dynamic system prompt based on tenant config."""
     business_name = widget_config.get("business_name", "our business")
@@ -67,8 +68,12 @@ def build_system_prompt(
     if business_block:
         business_block = f"\n{business_block}\n"
 
+    if hours_block:
+        hours_block = f"\n{hours_block}\n"
+
     return f"""You are {agent_name}, a {tone} booking assistant for {business_name}.
 {business_block}
+{hours_block}
 ## DATE CONTEXT (timezone: {tz_name})
 TODAY is {today_weekday}, {today_iso}. Tomorrow is {tomorrow_iso}.
 When the user gives a relative date (e.g. "today", "tomorrow", "next monday",

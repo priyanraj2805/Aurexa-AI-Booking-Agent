@@ -202,7 +202,16 @@ function WeeklyScheduleTab() {
   const updateDay = (idx: number, field: keyof ScheduleDay, value: string | boolean | null) => {
     setSchedule((prev) => {
       if (!prev) return prev;
-      const days = prev.days.map((d, i) => i === idx ? { ...d, [field]: value } : d);
+      const days = prev.days.map((d, i) => {
+        if (i !== idx) return d;
+        const next: ScheduleDay = { ...d, [field]: value as never };
+        // When activating a closed day that has null times (from onboarding), seed defaults
+        if (field === "is_active" && value === true) {
+          if (!next.open_time) next.open_time = "09:00";
+          if (!next.close_time) next.close_time = "17:00";
+        }
+        return next;
+      });
       return { ...prev, days };
     });
   };
@@ -321,13 +330,13 @@ function WeeklyScheduleTab() {
                   <>
                     <div className="flex items-center gap-2 flex-1 min-w-[140px]">
                       <TimeSelect
-                        value={day.open_time}
+                        value={day.open_time ?? ""}
                         onChange={(v) => updateDay(idx, "open_time", v)}
                         label="Open"
                       />
                       <span className="text-muted-foreground text-sm">–</span>
                       <TimeSelect
-                        value={day.close_time}
+                        value={day.close_time ?? ""}
                         onChange={(v) => updateDay(idx, "close_time", v)}
                         label="Close"
                       />

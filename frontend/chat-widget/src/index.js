@@ -236,7 +236,7 @@
         statusText.textContent = `👨‍💼 ${adminName} is now assisting you`;
         if (statusDot) statusDot.style.background = "#f59e0b"; // amber for human agent
       } else {
-        statusText.textContent = "Online — Ready to help";
+        statusText.textContent = "Online \u2014 Ready to help";
         if (statusDot) statusDot.style.background = "#22c55e"; // green for AI
       }
     }
@@ -346,17 +346,30 @@
 
     /* ─────────── BUILD ONCE ─────────── */
     _buildShell() {
+      const _logoUrl = this._agentConfig?.logo_url || null;
+      let _logoSrc = null;
+      if (_logoUrl) {
+        try {
+          _logoSrc = _logoUrl.startsWith("http") ? _logoUrl : new URL(_logoUrl, CONFIG.apiBase).href;
+        } catch (e) {
+          _logoSrc = _logoUrl;
+        }
+      }
+      const _avatarInner = _logoSrc
+        ? `<img src="${_logoSrc}" alt="logo" style="width:100%;height:100%;object-fit:cover;border-radius:12px;display:block;" onerror="this.style.display='none';this.nextElementSibling&& (this.nextElementSibling.style.display='block')">` + `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" style="display:none"><path d="M12 2a3 3 0 0 0-3 3v1a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10H5a2 2 0 0 0-2 2v1a7 7 0 0 0 14 0v-1a2 2 0 0 0-2-2z"/><line x1="12" y1="18" x2="12" y2="22"/></svg>`
+        : `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v1a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10H5a2 2 0 0 0-2 2v1a7 7 0 0 0 14 0v-1a2 2 0 0 0-2-2z"/><line x1="12" y1="18" x2="12" y2="22"/></svg>`;
       this.shadowRoot.innerHTML = `
                 <style>${this._css()}</style>
 
                 <div class="chat-container" id="chat-box" role="dialog" aria-label="Booking Assistant Chat" aria-hidden="true">
                     <div class="header">
                         <div class="header-avatar" id="avatar" aria-hidden="true">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v1a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10H5a2 2 0 0 0-2 2v1a7 7 0 0 0 14 0v-1a2 2 0 0 0-2-2z"/><line x1="12" y1="18" x2="12" y2="22"/></svg>
+                            ${_avatarInner}
                         </div>
                         <div class="header-info">
                             <h3 id="agent-name-title">${this._agentConfig?.agent_name || "Booking Assistant"}</h3>
-                            <p><span class="status-dot"></span> <span id="status-text">Online — Ready to help</span></p>
+                            ${(() => { const c = this._agentConfig || {}; const b = [c.business_name, c.business_tagline].filter(Boolean).join(" - "); if (!b) return ""; const esc = b.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); const dur = Math.max(8, Math.min(30, Math.round(b.length * 0.35))); return `<p class="header-business marquee" id="header-business" style="--marquee-duration:${dur}s"><span class="marquee-track"><span>${esc}</span><span>${esc}</span></span></p>`; })()}
+                            <p><span class="status-dot"></span> <span id="status-text">Online \u2014 Ready to help</span></p>
                         </div>
                         <button class="header-close" id="close-btn" title="Close chat">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -722,7 +735,7 @@
       if (this.isOpen) {
         this._chatBox.classList.add("visible");
         this._chatBox.classList.remove("hiding");
-        setTimeout(() => this._input.focus(), 200);
+        setTimeout(() => { this._input.focus(); this._applyHeaderMarquee(); }, 200);
       } else {
         this._chatBox.classList.add("hiding");
         setTimeout(() => {
@@ -2156,6 +2169,41 @@
 
                 .header-close:active {
                     transform: rotate(90deg) scale(0.9);
+                }
+
+
+                .header-business {
+                    font-size: 11.5px !important;
+                    font-weight: 600;
+                    color: var(--text-sec) !important;
+                    opacity: 0.95;
+                    margin-top: 2px !important;
+                    display: block !important;
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    max-width: 190px;
+                    letter-spacing: 0.1px;
+                }
+
+                .header-business.marquee {
+                    text-overflow: clip;
+                }
+
+                .header-business .marquee-track {
+                    display: inline-flex;
+                    white-space: nowrap;
+                    will-change: transform;
+                    animation: ds-header-marquee var(--marquee-duration, 14s) linear infinite;
+                }
+
+                .header-business .marquee-track > span {
+                    padding-right: 32px;
+                }
+
+                @keyframes ds-header-marquee {
+                    from { transform: translateX(0); }
+                    to   { transform: translateX(-50%); }
                 }
 
                 /* ════════ MESSAGES ════════ */

@@ -6,12 +6,56 @@ import logging
 import os
 import hmac
 import hashlib
-from datetime import datetime, timezone
+import uuid as _uuid
+from pathlib import Path
+from datetime import datetime, time, timezone
 from typing import Optional, List, Any, Dict
+
+def _parse_time(value: Optional[str]) -> Optional[time]:
+    """Parse HH:MM string to time object."""
+    if value is None or value == "":
+        return None
+    try:
+        return time.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+# Internal booking state keys that should never be shown in calendar "Additional Data"
+_INTERNAL_COLLECTED_KEYS = {
+    "otp_code", "otp_hash", "_internal",
+    "user_timezone", "locked_slot_id", "locked_slot_start_utc", "locked_slot_end_utc",
+    "timezone_source", "timezone_fallback_used", "timezone_fallback_reason",
+    "selected_slot_id", "selected_slot_start_utc", "runtime_checkpoint",
+    "active_path_effects", "active_path", "checkpoint",
+    "field_definitions_snapshot", "field_definitions", "field_snapshot", "slot_id",
+}
+_INTERNAL_KEY_SUBSTRINGS = ("checkpoint", "path_effects", "snapshot", "slot_id", "locked_slot")
+
+
+def _filter_collected_data(raw: dict) -> dict:
+    """Return only user-facing booking fields — hide internal state."""
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for k, v in raw.items():
+        norm = str(k).lower().replace(" ", "_")
+        if norm in _INTERNAL_COLLECTED_KEYS:
+            continue
+        if any(sub in norm for sub in _INTERNAL_KEY_SUBSTRINGS):
+            continue
+        if "timezone" in norm:  # hide timezone plumbing
+            continue
+        if v is None or v == "":
+            continue
+        if isinstance(v, (dict, list)):
+            continue  # hide [object Object] dumps
+        out[k] = v
+    return out
 from urllib.parse import quote, unquote, urlsplit
 from pydantic import BaseModel, Field, ValidationError
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, BackgroundTasks, File, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func as sa_func, or_, desc, asc, String
@@ -20,7 +64,7 @@ from app.db.database import get_db
 from app.models.user import User
 from app.models.organization import Organization
 from app.models.session import ChatSession
-from app.models.booking import Booking, TimeSlot
+from app.models.booking import Booking, TimeSlot, BusinessSchedule, ScheduleDay
 from app.models.config import (
     OrgConfig,
     CalendarProviderType,
@@ -400,6 +444,30 @@ class BookingItem(BaseModel):
     created_at: datetime
 
 
+class GlobalSearchBooking(BaseModel):
+    id: str
+    customer_name: str
+    customer_email: str
+    customer_phone: Optional[str]
+    slot_start: Optional[datetime]
+    created_at: datetime
+
+
+class GlobalSearchConversation(BaseModel):
+    id: str
+    session_status: str
+    channel: str = "web"
+    customer_name: Optional[str] = None
+    customer_email: Optional[str] = None
+    customer_phone: Optional[str] = None
+    updated_at: datetime
+
+
+class GlobalSearchResponse(BaseModel):
+    bookings: List[GlobalSearchBooking] = []
+    conversations: List[GlobalSearchConversation] = []
+
+
 class BookingPageItem(BaseModel):
     id: str
     customer_name: str
@@ -456,6 +524,7 @@ class AgentConfigResponse(BaseModel):
     custom_prompts: Optional[dict] = None
     timezone: str
     ui_brand_color: str
+    logo_url: Optional[str] = None
     org_name: str
     business_name: Optional[str] = None
     api_key: str
@@ -481,6 +550,7 @@ class AgentConfigUpdate(BaseModel):
     custom_prompts: Optional[dict] = None
     timezone: Optional[str] = None
     ui_brand_color: Optional[str] = None
+    logo_url: Optional[str] = None
     org_name: Optional[str] = None
     business_name: Optional[str] = None
     require_otp: Optional[bool] = None
@@ -757,6 +827,77 @@ async def get_recent_bookings(
             )
         )
     return items
+
+
+@router.get("/search", response_model=GlobalSearchResponse)
+async def global_search(
+    q: str = Query(..., min_length=2, max_length=100),
+    limit: int = Query(default=5, ge=1, le=20),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Unified org-scoped search across bookings and conversations."""
+    like = f"%{q}%"
+
+    bookings_result = await db.execute(
+        select(Booking, TimeSlot)
+        .outerjoin(TimeSlot, Booking.slot_id == TimeSlot.id)
+        .where(
+            Booking.org_id == user.org_id,
+            or_(
+                Booking.customer_name.ilike(like),
+                Booking.customer_email.ilike(like),
+                Booking.customer_phone.ilike(like),
+            ),
+        )
+        .order_by(Booking.created_at.desc())
+        .limit(limit)
+    )
+
+    conversations_result = await db.execute(
+        select(ChatSession)
+        .where(
+            ChatSession.org_id == user.org_id,
+            ChatSession.session_status != "ARCHIVED",
+            ChatSession.archived_at.is_(None),
+            or_(
+                ChatSession.current_intent.ilike(like),
+                ChatSession.channel.ilike(like),
+                ChatSession.id.cast(String).ilike(like),
+                ChatSession.state_data["name"].astext.ilike(like),
+                ChatSession.state_data["email"].astext.ilike(like),
+                ChatSession.state_data["phone"].astext.ilike(like),
+            ),
+        )
+        .order_by(ChatSession.updated_at.desc())
+        .limit(limit)
+    )
+
+    return GlobalSearchResponse(
+        bookings=[
+            GlobalSearchBooking(
+                id=str(b.id),
+                customer_name=b.customer_name or "Unknown",
+                customer_email=b.customer_email or "",
+                customer_phone=b.customer_phone,
+                slot_start=slot.start_time if slot else None,
+                created_at=b.created_at,
+            )
+            for b, slot in bookings_result.all()
+        ],
+        conversations=[
+            GlobalSearchConversation(
+                id=str(s.id),
+                session_status=s.session_status or "ACTIVE",
+                channel=s.channel or "web",
+                customer_name=_clean_customer_value((s.state_data or {}).get("name")),
+                customer_email=_clean_customer_value((s.state_data or {}).get("email")),
+                customer_phone=_clean_customer_value((s.state_data or {}).get("phone")),
+                updated_at=s.updated_at,
+            )
+            for s in conversations_result.scalars().all()
+        ],
+    )
 
 
 @router.get("/conversations")
@@ -1045,6 +1186,7 @@ async def get_agent_config(
         custom_prompts=config.custom_prompts,
         timezone=config.timezone or "UTC",
         ui_brand_color=config.ui_brand_color or "#3B82F6",
+        logo_url=getattr(config, "logo_url", None),
         org_name=config.org_name if getattr(config, "org_name", None) else (org.name if org else "Unknown"),
         business_name=getattr(config, "business_name", None),
         api_key=masked_api_key,
@@ -1179,6 +1321,8 @@ async def update_agent_config(
         config.org_name = update.org_name
     if update.business_name is not None:
         config.business_name = update.business_name
+    if update.logo_url is not None:
+        config.logo_url = update.logo_url
 
     from sqlalchemy.orm.attributes import flag_modified
 
@@ -1257,7 +1401,9 @@ async def update_agent_config(
         custom_prompts=config.custom_prompts,
         timezone=config.timezone or "UTC",
         ui_brand_color=config.ui_brand_color or "#3B82F6",
+        logo_url=getattr(config, "logo_url", None),
         org_name=org.name if org else "Unknown",
+        business_name=getattr(config, "business_name", None),
         api_key=masked_api_key,
         require_otp=config.require_otp if hasattr(config, "require_otp") else True,
         max_booking_days_ahead=config.max_booking_days_ahead
@@ -1273,7 +1419,125 @@ async def update_agent_config(
         if hasattr(config, "session_cleanup_hour_utc")
         else 0,
         meeting_policy=_meeting_policy_payload(config),
+        website_url=getattr(config, "website_url", None),
+        crawl_id=getattr(config, "crawl_id", None),
+        crawl_status=getattr(config, "crawl_status", None),
+        crawl_started_at=(
+            config.crawl_started_at.isoformat()
+            if getattr(config, "crawl_started_at", None)
+            else None
+        ),
+        crawl_completed_at=(
+            config.crawl_completed_at.isoformat()
+            if getattr(config, "crawl_completed_at", None)
+            else None
+        ),
+        total_pages_crawled=getattr(config, "total_pages_crawled", None),
     )
+
+
+# ── Logo upload endpoints ───────────────────────────────────────────────
+LOGO_DIR = Path("/app/uploads/logos")
+LOGO_DIR.mkdir(parents=True, exist_ok=True)
+ALLOWED_LOGO_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".svg"}
+ALLOWED_LOGO_MIME = {"image/png", "image/jpeg", "image/webp", "image/svg+xml"}
+MAX_LOGO_BYTES = 2 * 1024 * 1024  # 2 MB
+
+
+@router.post("/agent/logo", response_model=dict)
+async def upload_agent_logo(
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload chatbot logo for the current org (left of Brand Color)."""
+    if not file or not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+    ext = Path(file.filename).suffix.lower()
+    if ext not in ALLOWED_LOGO_EXTS:
+        raise HTTPException(status_code=400, detail=f"Unsupported image type {ext}. Allowed: png, jpg, jpeg, webp, svg")
+    if file.content_type and file.content_type not in ALLOWED_LOGO_MIME and not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail=f"Unsupported MIME {file.content_type}")
+    raw = await file.read()
+    if not raw or len(raw) == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(raw) > MAX_LOGO_BYTES:
+        raise HTTPException(status_code=413, detail="Logo exceeds 2MB limit")
+    # Basic SVG XSS check — reject script tags
+    if ext == ".svg" and b"<script" in raw.lower():
+        raise HTTPException(status_code=400, detail="SVG contains disallowed content")
+    # Store
+    filename = f"{user.org_id}{ext}"
+    dest = LOGO_DIR / filename
+    # Remove old logo files for this org with different ext
+    for p in LOGO_DIR.glob(f"{user.org_id}.*"):
+        if p != dest:
+            try:
+                p.unlink()
+            except Exception:
+                pass
+    dest.write_bytes(raw)
+    # Determine MIME for serving
+    mime = file.content_type or ("image/svg+xml" if ext == ".svg" else f"image/{ext.lstrip('.')}")
+    # Update OrgConfig
+    result = await db.execute(select(OrgConfig).where(OrgConfig.org_id == user.org_id))
+    config = result.scalars().first()
+    if not config:
+        raise HTTPException(status_code=404, detail="Org config not found")
+    # Public URL for widget/admin — served via public endpoint below
+    public_url = f"/api/v1/dashboard/public/logo/{user.org_id}"
+    config.logo_url = public_url
+    await db.commit()
+    return {"logo_url": public_url, "filename": filename, "mime": mime}
+
+
+@router.delete("/agent/logo", response_model=dict)
+async def delete_agent_logo(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove chatbot logo."""
+    for p in LOGO_DIR.glob(f"{user.org_id}.*"):
+        try:
+            p.unlink()
+        except Exception:
+            pass
+    result = await db.execute(select(OrgConfig).where(OrgConfig.org_id == user.org_id))
+    config = result.scalars().first()
+    if config:
+        config.logo_url = None
+        await db.commit()
+    return {"success": True}
+
+
+@router.get("/agent/logo")
+async def get_agent_logo(
+    user: User = Depends(get_current_user),
+):
+    """Serve current org's logo for authenticated admin panel preview."""
+    for p in LOGO_DIR.glob(f"{user.org_id}.*"):
+        mime = "image/svg+xml" if p.suffix == ".svg" else f"image/{p.suffix.lstrip('.')}"
+        if mime == "image/jpg":
+            mime = "image/jpeg"
+        from fastapi.responses import FileResponse
+        return FileResponse(str(p), media_type=mime)
+    raise HTTPException(status_code=404, detail="Logo not found")
+
+
+@router.get("/public/logo/{org_id}")
+async def get_public_logo(org_id: str):
+    """Public logo for widget — no auth, fetched by chatbot embed."""
+    try:
+        uuid_obj = _uuid.UUID(org_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid org id")
+    for p in LOGO_DIR.glob(f"{uuid_obj}.*"):
+        mime = "image/svg+xml" if p.suffix == ".svg" else f"image/{p.suffix.lstrip('.')}"
+        if mime == "image/jpg":
+            mime = "image/jpeg"
+        from fastapi.responses import FileResponse
+        return FileResponse(str(p), media_type=mime, headers={"Cache-Control": "public, max-age=3600"})
+    raise HTTPException(status_code=404, detail="Logo not found")
 
 
 @router.get("/availability", response_model=List[SlotItem])
@@ -1511,99 +1775,6 @@ async def cancel_booking_admin(
     )
 
 
-# ══════════════════════════════════════════════════
-#  ONBOARDING STATUS
-# ══════════════════════════════════════════════════
-
-
-class OnboardingStep(BaseModel):
-    key: str
-    label: str
-    description: str
-    completed: bool
-    link: str
-
-
-class OnboardingStatusResponse(BaseModel):
-    steps: List[OnboardingStep]
-    completed_count: int
-    total_count: int
-
-
-@router.get("/onboarding-status", response_model=OnboardingStatusResponse)
-async def get_onboarding_status(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Check what onboarding steps the tenant has completed."""
-    org_id = user.org_id
-
-    # Check OrgConfig exists and has custom fields
-    config_result = await db.execute(
-        select(OrgConfig).where(OrgConfig.org_id == org_id)
-    )
-    config = config_result.scalars().first()
-
-    has_persona = bool(
-        config
-        and isinstance(config.custom_prompts, dict)
-        and config.custom_prompts.get("agent_name")
-    )
-
-    has_fields = bool(
-        config and config.required_fields and len(config.required_fields) > 0
-    )
-
-    # Check if a BusinessSchedule is configured
-    from app.models.booking import BusinessSchedule
-
-    schedule_result = await db.execute(
-        select(BusinessSchedule).where(BusinessSchedule.org_id == org_id)
-    )
-    has_schedule = schedule_result.scalars().first() is not None
-
-    # Check if at least one booking exists
-    booking_count = await db.execute(
-        select(sa_func.count(Booking.id)).where(Booking.org_id == org_id)
-    )
-    has_bookings = (booking_count.scalar() or 0) > 0
-
-    steps = [
-        OnboardingStep(
-            key="configure_agent",
-            label="Configure Your Agent",
-            description="Set your agent's name, greeting message, and personality.",
-            completed=has_persona,
-            link="/dashboard/agent",
-        ),
-        OnboardingStep(
-            key="define_fields",
-            label="Define Booking Fields",
-            description="Choose what information your agent collects from customers.",
-            completed=has_fields,
-            link="/dashboard/agent",
-        ),
-        OnboardingStep(
-            key="add_availability",
-            label="Configure Business Hours",
-            description="Set your weekly schedule — days, hours, and breaks.",
-            completed=has_schedule,
-            link="/dashboard/business-hours",
-        ),
-        OnboardingStep(
-            key="first_booking",
-            label="Get Your First Booking",
-            description="Deploy the widget and receive your first real booking!",
-            completed=has_bookings,
-            link="/dashboard/integrations",
-        ),
-    ]
-
-    return OnboardingStatusResponse(
-        steps=steps,
-        completed_count=sum(1 for s in steps if s.completed),
-        total_count=len(steps),
-    )
 
 
 # ══════════════════════════════════════════════════
@@ -2732,8 +2903,8 @@ async def google_calendar_callback(
 class ScheduleDayItem(BaseModel):
     day_of_week: int  # 0=Mon … 6=Sun
     is_active: bool
-    open_time: str  # "HH:MM"
-    close_time: str  # "HH:MM"
+    open_time: Optional[str] = None  # "HH:MM" — null for closed days (proper nullable)
+    close_time: Optional[str] = None  # "HH:MM" — null for closed days
     break_start: Optional[str] = None
     break_end: Optional[str] = None
 
@@ -3152,13 +3323,7 @@ async def get_calendar_events(
 
     items = []
     for booking, slot, session in rows:
-        collected = {}
-        if session and session.state_data:
-            collected = {
-                k: v
-                for k, v in session.state_data.items()
-                if k not in ("otp_code", "otp_hash", "_internal")
-            }
+        collected = _filter_collected_data(session.state_data if session and session.state_data else {})
         items.append(
             CalendarEventItem(
                 id=str(booking.id),
@@ -3223,13 +3388,7 @@ async def get_upcoming_bookings(
 
     items = []
     for booking, slot, session in rows:
-        collected = {}
-        if session and session.state_data:
-            collected = {
-                k: v
-                for k, v in session.state_data.items()
-                if k not in ("otp_code", "otp_hash", "_internal")
-            }
+        collected = _filter_collected_data(session.state_data if session and session.state_data else {})
         items.append(
             CalendarEventItem(
                 id=str(booking.id),
@@ -3243,3 +3402,213 @@ async def get_upcoming_bookings(
             )
         )
     return items
+
+
+# Onboarding section
+# ── Onboarding ──────────────────────────────────────────────────────
+
+class OnboardingBusinessInfo(BaseModel):
+    industry_type: str = Field(..., min_length=1, max_length=100)
+
+
+class OnboardingHoursDay(BaseModel):
+    day_of_week: int = Field(..., ge=0, le=6)  # 0=Mon, 6=Sun
+    is_active: bool = True
+    open_time: Optional[str] = Field(None, pattern=r"^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
+    close_time: Optional[str] = Field(None, pattern=r"^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
+    break_start: Optional[str] = Field(None, pattern=r"^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
+    break_end: Optional[str] = Field(None, pattern=r"^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
+
+
+class OnboardingHours(BaseModel):
+    timezone: str = Field(..., min_length=1)
+    slot_duration_minutes: int = Field(..., ge=15, le=120)
+    booking_window_days: int = Field(..., ge=1, le=365)
+    weekly_schedule: List[OnboardingHoursDay] = Field(..., min_length=7, max_length=7)
+
+
+class OnboardingAgent(BaseModel):
+    agent_name: str = Field(default="Booking Assistant", max_length=100)
+    greeting_message: str = Field(default="Hello! How can I help you book today?", max_length=500)
+    tone: str = Field(default="friendly and professional", max_length=50)
+    require_otp: bool = True
+
+
+class OnboardingRequest(BaseModel):
+    business: OnboardingBusinessInfo
+    hours: OnboardingHours
+    agent: OnboardingAgent
+
+
+class OnboardingResponse(BaseModel):
+    success: bool
+    message: str
+
+
+class OnboardingGateResponse(BaseModel):
+    onboarding_completed: bool
+    industry_type: Optional[str] = None
+    hours_configured: bool = False
+
+
+@router.get("/onboarding/status", response_model=OnboardingGateResponse)
+async def get_onboarding_gate(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Check if onboarding is completed for the current user's org."""
+    result = await db.execute(
+        select(Organization).where(Organization.id == user.org_id)
+    )
+    org = result.scalars().first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    hours_result = await db.execute(
+        select(BusinessSchedule).where(BusinessSchedule.org_id == org.id)
+    )
+    schedule = hours_result.scalars().first()
+
+    return OnboardingGateResponse(
+        onboarding_completed=org.onboarding_completed,
+        industry_type=org.industry_type,
+        hours_configured=schedule is not None,
+    )
+
+
+@router.post("/onboarding", response_model=OnboardingResponse)
+async def complete_onboarding(
+    data: OnboardingRequest,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Complete the mandatory onboarding flow for a new organization."""
+    result = await db.execute(
+        select(Organization).where(Organization.id == user.org_id)
+    )
+    org = result.scalars().first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # Upsert business info
+    org.industry_type = data.business.industry_type
+    org.onboarding_completed = True
+    # Note: Organization has no timezone column — timezone lives in BusinessSchedule + OrgConfig
+
+    # Upsert OrgConfig so /dashboard/agent and /dashboard/schedule pages auto-fill after onboarding
+    config_result = await db.execute(select(OrgConfig).where(OrgConfig.org_id == org.id))
+    org_config = config_result.scalars().first()
+    if not org_config:
+        org_config = OrgConfig(
+            org_id=org.id,
+            required_fields=["name", "email", "phone", "date", "time"],
+            field_definitions=[],
+            custom_prompts={},
+            timezone=data.hours.timezone,
+            ui_brand_color="#3B82F6",
+            require_otp=data.agent.require_otp,
+            max_booking_days_ahead=data.hours.booking_window_days,
+        )
+        db.add(org_config)
+        await db.flush()  # ensure org_config is tracked before updates below
+    org_config.timezone = data.hours.timezone
+
+    # Upsert BusinessSchedule
+    schedule_result = await db.execute(
+        select(BusinessSchedule).where(BusinessSchedule.org_id == org.id)
+    )
+    schedule = schedule_result.scalars().first()
+    if not schedule:
+        schedule = BusinessSchedule(org_id=org.id)
+        db.add(schedule)
+
+    schedule.timezone = data.hours.timezone
+    schedule.slot_duration_minutes = data.hours.slot_duration_minutes
+    schedule.booking_window_days = data.hours.booking_window_days
+
+    # Upsert ScheduleDays
+    # Delete existing days and recreate
+    await db.execute(
+        ScheduleDay.__table__.delete().where(ScheduleDay.org_id == org.id)
+    )
+    for day_data in data.hours.weekly_schedule:
+        parsed_open = _parse_time(day_data.open_time)
+        parsed_close = _parse_time(day_data.close_time)
+        if day_data.is_active and (parsed_open is None or parsed_close is None):
+            raise HTTPException(status_code=400, detail=f"Day {day_data.day_of_week}: open/close time required when active")
+        day = ScheduleDay(
+            org_id=org.id,
+            day_of_week=day_data.day_of_week,
+            is_active=day_data.is_active,
+            open_time=parsed_open,
+            close_time=parsed_close,
+            break_start=_parse_time(day_data.break_start),
+            break_end=_parse_time(day_data.break_end),
+        )
+        db.add(day)
+
+    # Update agent persona — keep Organization.custom_prompts for legacy, but
+    # frontend Agent page reads OrgConfig.custom_prompts via /dashboard/agent-config
+    persona_org = dict(org.custom_prompts) if isinstance(org.custom_prompts, dict) else {}
+    persona_org.update({
+        "agent_name": data.agent.agent_name,
+        "greeting_message": data.agent.greeting_message,
+        "tone": data.agent.tone,
+    })
+    org.custom_prompts = persona_org
+
+    # Normalize onboarding tone to Agent page's allowed values
+    raw_tone = (data.agent.tone or "").lower()
+    if "casual" in raw_tone or "warm" in raw_tone:
+        norm_tone = "casual"
+    elif "formal" in raw_tone or "polite" in raw_tone:
+        norm_tone = "formal"
+    elif "friendly" in raw_tone:
+        norm_tone = "friendly"
+    elif "empathetic" in raw_tone:
+        norm_tone = "empathetic"
+    elif "concise" in raw_tone or "direct" in raw_tone:
+        norm_tone = "professional"
+    else:
+        norm_tone = data.agent.tone or "professional"
+
+    persona_cfg = dict(org_config.custom_prompts) if isinstance(org_config.custom_prompts, dict) else {}
+    persona_cfg.update({
+        "agent_name": data.agent.agent_name,
+        "greeting_message": data.agent.greeting_message,
+        "tone": norm_tone,
+        "industry_context": data.business.industry_type,
+    })
+    org_config.custom_prompts = persona_cfg
+
+    # Update config fields (these are what /dashboard/agent-config returns)
+    org_config.require_otp = data.agent.require_otp
+    org_config.max_booking_days_ahead = data.hours.booking_window_days
+
+    await db.commit()
+
+    log_audit_event(
+        background_tasks,
+        org_id=user.org_id,
+        actor_id=user.id,
+        actor_email=user.email,
+        action=AuditAction.CONFIG_UPDATE,
+        resource_type="organization",
+        resource_id=str(user.org_id),
+        new_values={"action": "onboarding_complete", "industry_type": org.industry_type},
+    )
+
+    return OnboardingResponse(success=True, message="Onboarding completed successfully")
+
+
+@router.get("/onboarding/hours-template", response_model=List[OnboardingHoursDay])
+async def get_hours_template(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get a default weekly hours template (Mon-Fri 9-5, weekends closed)."""
+    return [
+        OnboardingHoursDay(day_of_week=i, is_active=i < 5, open_time="09:00", close_time="17:00")
+        for i in range(7)
+    ]

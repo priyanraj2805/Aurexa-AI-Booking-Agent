@@ -701,10 +701,28 @@ export default function IntegrationsPage() {
       statusClass: (gcState.loading || ocState.loading) ? "bg-yellow-500/10 text-yellow-500" : activeProvider && activeProvider !== "NONE" ? "bg-green-500/10 text-green-500" : (gcState.connected || ocState.connected) ? "bg-green-500/10 text-green-500" : "bg-muted/10 text-muted-foreground",
       description: "Sync confirmed appointments dynamically in real-time.",
     },
+    {
+      id: "providers",
+      title: "Meeting Providers",
+      icon: Video,
+      iconBg: "bg-violet-500",
+      status:
+        meetingProviders?.active_meeting_provider && meetingProviders.active_meeting_provider !== "NONE"
+          ? `${meetingProviders.active_meeting_provider.replace("_", " ")} Active`
+          : meetingProviders?.google_meet_connected || meetingProviders?.microsoft_teams_connected || meetingProviders?.zoom_connected
+            ? "Connected"
+            : "Not Connected",
+      statusClass:
+        meetingProviders?.active_meeting_provider && meetingProviders.active_meeting_provider !== "NONE"
+          ? "bg-green-500/10 text-green-500"
+          : meetingProviders?.google_meet_connected || meetingProviders?.microsoft_teams_connected || meetingProviders?.zoom_connected
+            ? "bg-blue-500/10 text-blue-600"
+            : "bg-amber-500/10 text-amber-600",
+      description: "Connect Google Meet, Teams, or Zoom for online bookings.",
+    },
   ];
 
   const comingSoonIntegrations = [
-    { title: "Microsoft Teams", icon: MessageSquare, iconBg: "bg-indigo-600" },
     { title: "Slack", icon: Hash, iconBg: "bg-purple-500" },
     { title: "HubSpot", icon: Link2, iconBg: "bg-orange-500" },
   ];
@@ -808,7 +826,7 @@ export default function IntegrationsPage() {
                   {activeIntegrations.map((item) => (
                     <div 
                       key={item.title} 
-                      onClick={() => setActiveTab(item.id as "widget" | "whatsapp" | "calendar")}
+                      onClick={() => setActiveTab(item.id as "widget" | "whatsapp" | "calendar" | "providers")}
                       className="group cursor-pointer bg-card border border-border/60 hover:border-border rounded-xl p-5 flex flex-col transition-all duration-300 hover:shadow-lg hover:-translate-y-1 relative overflow-hidden"
                     >
                       <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none" />

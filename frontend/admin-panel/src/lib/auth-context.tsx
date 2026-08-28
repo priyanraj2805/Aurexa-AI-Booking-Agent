@@ -12,6 +12,7 @@ interface User {
   full_name: string;
   org_id: string;
   org_name: string | null;
+  avatar_url: string | null;
   is_active: boolean;
   created_at: string;
 }
@@ -26,6 +27,8 @@ interface AuthContextType {
   requestPasswordReset: (email: string) => Promise<void>;
   resetPassword: (email: string, code: string, newPassword: string) => Promise<void>;
   updateProfile: (fullName: string) => Promise<void>;
+  refresh: () => Promise<void>;
+  setUser: (u: User | null) => void;
   logout: () => void;
 }
 
@@ -138,6 +141,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser((prev) => (prev ? { ...prev, full_name: data.full_name } : prev));
   };
 
+  const refresh = async () => {
+    const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api/v1";
+    try {
+      const res = await fetch(`${API_BASE}/auth/me`, {
+        credentials: "include",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+      });
+      if (!res.ok) throw new Error("refresh failed");
+      const fresh = await res.json();
+      setUser(fresh);
+    } catch {
+      // ignore
+    }
+  };
+
   const logout = async () => {
     try {
       await apiFetch("/auth/logout", { method: "POST" });
@@ -160,6 +178,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         requestPasswordReset,
         resetPassword,
         updateProfile,
+        refresh,
+        setUser,
         logout,
       }}
     >

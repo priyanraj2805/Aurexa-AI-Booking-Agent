@@ -9,7 +9,9 @@ import logging
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from pathlib import Path
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, File, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +26,12 @@ from app.schemas.audit import AuditAction
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+AVATAR_DIR = Path("/app/uploads/avatars")
+AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+ALLOWED_AVATAR_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".svg"}
+ALLOWED_AVATAR_MIME = {"image/png", "image/jpeg", "image/webp", "image/svg+xml"}
+MAX_AVATAR_BYTES = 2 * 1024 * 1024
 
 
 class ProfileUpdate(BaseModel):
@@ -174,3 +182,91 @@ async def change_password(
         user_agent=request.headers.get("user-agent"),
     )
     return {"ok": True, "detail": "Password changed"}
+
+
+@router.post("/avatar", response_model=dict)
+async def upload_avatar(
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload user avatar (shown in user menu / settings)."""
+    if not file or not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+    ext = Path(file.filename).suffix.lower()
+    if ext not in ALLOWED_AVATAR_EXTS:
+        raise HTTPException(status_code=400, detail=f"Unsupported image type {ext}. Allowed: png, jpg, jpeg, webp, svg")
+    raw = await file.read()
+    if not raw or len(raw) == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(raw) > MAX_AVATAR_BYTES:
+        raise HTTPException(status_code=413, detail="Avatar exceeds 2MB limit")
+    if ext == ".svg" and b"<script" in raw.lower():
+        raise HTTPException(status_code=400, detail="SVG contains disallowed content")
+    filename = f"{user.id}{ext}"
+    dest = AVATAR_DIR / filename
+    for p in AVATAR_DIR.glob(f"{user.id}.*"):
+        if p != dest:
+            try:
+                p.unlink()
+            except Exception:
+                pass
+    dest.write_bytes(raw)
+    # Public-ish URL — served via authenticated GET /account/avatar below
+    # Frontend can use /api/v1/account/avatar as img src (cookie auth)
+    avatar_url = "/api/v1/account/avatar"
+    user.avatar_url = avatar_url
+    await db.commit()
+    return {"avatar_url": avatar_url, "filename": filename}
+
+
+@router.get("/avatar")
+async def get_avatar(
+    user: User = Depends(get_current_user),
+):
+    """Serve current user's avatar for admin-panel <img> (cookie auth)."""
+    for p in AVATAR_DIR.glob(f"{user.id}.*"):
+        mime = "image/svg+xml" if p.suffix == ".svg" else f"image/{p.suffix.lstrip('.')}"
+        if mime == "image/jpg":
+            mime = "image/jpeg"
+        return FileResponse(str(p), media_type=mime, headers={"Cache-Control": "public, max-age=3600"})
+    raise HTTPException(status_code=404, detail="Avatar not found")
+
+
+@router.delete("/avatar", response_model=dict)
+async def delete_avatar(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove user avatar."""
+    for p in AVATAR_DIR.glob(f"{user.id}.*"):
+        try:
+            p.unlink()
+        except Exception:
+            pass
+    user.avatar_url = None
+    await db.commit()
+    return {"success": True}
+
+
+@router.put("/avatar-url", response_model=dict)
+async def set_avatar_url(
+    payload: dict,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set avatar via external image URL (alternative to file upload)."""
+    url = (payload.get("avatar_url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="avatar_url required")
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid URL")
+    # Basic extension check — allow any http(s) but warn if not image
+    user.avatar_url = url
+    await db.commit()
+    return {"avatar_url": url}

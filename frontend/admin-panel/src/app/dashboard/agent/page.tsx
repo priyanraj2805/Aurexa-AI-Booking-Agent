@@ -5,9 +5,11 @@ import {
   Loader2, AlertCircle, Save, Bot, Sparkles,
   Plus, GripVertical, Trash2, ChevronDown, ChevronUp,
   ShieldCheck, CalendarDays, Eye, EyeOff, Copy, Check, KeyRound,
+  Upload, Image as ImageIcon, X, Link as LinkIcon,
 } from "lucide-react";
 import { useAgentConfig, type PersonaConfig, type FieldDefinition, type FieldType } from "@/hooks/use-dashboard";
-import { api } from "@/lib/api";
+import { api, uploadFile } from "@/lib/api";
+import { toast } from "sonner";
 import { KnowledgeBaseSection } from "./components/knowledge-base";
 
 const TONE_OPTIONS = [
@@ -302,6 +304,11 @@ export default function AgentCorePage() {
   // Organization settings
   const [brandColor, setBrandColor] = useState("#3B82F6");
   const [businessName, setBusinessName] = useState("");
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const [logoUploading, setLogoUploading] = useState(false);
+  const [logoError, setLogoError] = useState<string | null>(null);
+  const [logoUrlInput, setLogoUrlInput] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Persona state
   const [persona, setPersona] = useState<PersonaConfig>({
@@ -383,6 +390,81 @@ export default function AgentCorePage() {
     }
   };
 
+  const handleLogoFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setLogoError("Please select an image file");
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setLogoError("Image must be under 2MB");
+      return;
+    }
+    setLogoUploading(true);
+    setLogoError(null);
+    try {
+      const res = await uploadFile<{ logo_url: string }>("/dashboard/agent/logo", file);
+      setLogoUrl(res.logo_url);
+      setLogoUrlInput(res.logo_url);
+      toast.success("Logo uploaded");
+      await refetch();
+    } catch (err) {
+      setLogoError(err instanceof Error ? err.message : "Upload failed");
+      toast.error(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setLogoUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const handleLogoUrlSave = async () => {
+    const url = logoUrlInput.trim();
+    if (!url) {
+      setLogoError("Please enter an image URL");
+      return;
+    }
+    try {
+      new URL(url);
+    } catch {
+      setLogoError("Invalid URL");
+      return;
+    }
+    if (!/\.(png|jpe?g|webp|svg)(\?.*)?$/i.test(url) && !url.startsWith("/api")) {
+      // allow any image url, just warn
+    }
+    setLogoUploading(true);
+    setLogoError(null);
+    try {
+      await api.put("/dashboard/agent-config", { logo_url: url });
+      setLogoUrl(url);
+      toast.success("Logo URL saved");
+      await refetch();
+    } catch (err) {
+      setLogoError(err instanceof Error ? err.message : "Failed to save URL");
+    } finally {
+      setLogoUploading(false);
+    }
+  };
+
+  const handleLogoRemove = async () => {
+    setLogoUploading(true);
+    setLogoError(null);
+    try {
+      await api.del("/dashboard/agent/logo");
+      // also clear via config update to keep DB consistent
+      try { await api.put("/dashboard/agent-config", { logo_url: "" }); } catch {}
+      setLogoUrl(null);
+      setLogoUrlInput("");
+      toast.success("Logo removed");
+      await refetch();
+    } catch (err) {
+      setLogoError(err instanceof Error ? err.message : "Failed to remove");
+    } finally {
+      setLogoUploading(false);
+    }
+  };
+
   // Booking settings state
   const [requireOtp, setRequireOtp] = useState(true);
 
@@ -392,11 +474,20 @@ export default function AgentCorePage() {
       setBrandColor(config.ui_brand_color || "#3B82F6");
       setBusinessName(config.business_name || "");
       setRequireOtp(config.require_otp ?? true);
+      setLogoUrl((config as unknown as { logo_url?: string | null }).logo_url || null);
+      setLogoUrlInput((config as unknown as { logo_url?: string | null }).logo_url || "");
       if (config.custom_prompts && typeof config.custom_prompts === "object") {
+        const rawTone = String(config.custom_prompts.tone || "professional").toLowerCase();
+        let normTone = config.custom_prompts.tone || "professional";
+        if (rawTone.includes("casual") || rawTone.includes("warm")) normTone = "casual";
+        else if (rawTone.includes("formal") || rawTone.includes("polite")) normTone = "formal";
+        else if (rawTone.includes("friendly")) normTone = "friendly";
+        else if (rawTone.includes("empathetic")) normTone = "empathetic";
+        else if (rawTone.includes("concise") || rawTone.includes("direct")) normTone = "professional";
         setPersona({
           agent_name: config.custom_prompts.agent_name || "",
           greeting_message: config.custom_prompts.greeting_message || "",
-          tone: config.custom_prompts.tone || "professional",
+          tone: normTone,
           industry_context: config.custom_prompts.industry_context || "",
           custom_instructions: config.custom_prompts.custom_instructions || "",
           business_name: config.custom_prompts.business_name || "",
@@ -699,6 +790,79 @@ export default function AgentCorePage() {
             </p>
           </div>
 
+          <div>
+            <label className="text-[13px] text-muted-foreground font-medium mb-2 block flex items-center gap-1.5">
+              <ImageIcon className="size-3.5" /> Chatbot Logo
+            </label>
+            <div className="flex items-center gap-3">
+              <div
+                className="size-16 rounded-xl border-2 bg-secondary flex items-center justify-center overflow-hidden shrink-0"
+                style={{ borderColor: brandColor }}
+              >
+                {logoUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={logoUrl} alt="Chatbot logo" className="size-full object-cover" />
+                ) : (
+                  <ImageIcon className="size-6 text-muted-foreground" />
+                )}
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={logoUploading}
+                    className="inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                  >
+                    {logoUploading ? <Loader2 className="size-3 animate-spin" /> : <Upload className="size-3" />}
+                    {logoUrl ? "Change" : "Upload Image"}
+                  </button>
+                  {logoUrl && (
+                    <button
+                      type="button"
+                      onClick={handleLogoRemove}
+                      disabled={logoUploading}
+                      className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-md bg-secondary border border-border hover:bg-accent disabled:opacity-50"
+                    >
+                      <X className="size-3" /> Remove
+                    </button>
+                  )}
+                </div>
+                <p className="text-[11px] text-muted-foreground">PNG, JPG, WEBP, SVG • Max 2MB</p>
+              </div>
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/svg+xml"
+              className="hidden"
+              onChange={handleLogoFile}
+            />
+            <div className="mt-3">
+              <label className="text-[11px] text-muted-foreground font-medium flex items-center gap-1">
+                <LinkIcon className="size-3" /> Or paste image URL
+              </label>
+              <div className="flex gap-2 mt-1">
+                <input
+                  type="url"
+                  value={logoUrlInput}
+                  onChange={(e) => setLogoUrlInput(e.target.value)}
+                  placeholder="https://example.com/logo.png"
+                  className="flex-1 bg-background border border-border px-3 py-1.5 rounded-md text-xs focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                />
+                <button
+                  type="button"
+                  onClick={handleLogoUrlSave}
+                  disabled={logoUploading}
+                  className="text-xs font-medium px-3 py-1.5 rounded-md bg-secondary border border-border hover:bg-accent disabled:opacity-50"
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+            {logoError && <p className="text-xs text-red-500 mt-1.5">{logoError}</p>}
+            <p className="text-[11px] text-muted-foreground mt-1.5">Shows in chatbot header, left of brand color.</p>
+          </div>
           <div>
             <label className="text-[13px] text-muted-foreground font-medium mb-2 block">
               Brand Color

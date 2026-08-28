@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api, uploadFile } from "@/lib/api";
 import { isDateRangeValid, toApiDate, toApiDateTo } from "@/components/filter-bar";
 
@@ -9,6 +9,77 @@ import { isDateRangeValid, toApiDate, toApiDateTo } from "@/components/filter-ba
 export interface DailyCount {
   date: string;
   count: number;
+}
+
+export interface SearchBookingItem {
+  id: string;
+  customer_name: string;
+  customer_email: string;
+  customer_phone: string | null;
+  slot_start: string | null;
+  created_at: string;
+}
+
+export interface SearchConversationItem {
+  id: string;
+  session_status: string;
+  channel: string;
+  customer_name: string | null;
+  customer_email: string | null;
+  customer_phone: string | null;
+  updated_at: string;
+}
+
+export interface GlobalSearchResults {
+  bookings: SearchBookingItem[];
+  conversations: SearchConversationItem[];
+}
+
+/**
+ * Debounced global search across bookings + conversations.
+ * Skips queries shorter than `minChars`; stale responses are ignored.
+ */
+export function useGlobalSearch(query: string, minChars = 2, debounceMs = 300) {
+  const [results, setResults] = useState<GlobalSearchResults | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const latestQuery = useRef("");
+
+  const trimmed = query.trim();
+
+  useEffect(() => {
+    if (trimmed.length < minChars) {
+      latestQuery.current = "";
+      setResults(null);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
+    latestQuery.current = trimmed;
+    setLoading(true);
+    setError(null);
+
+    const timer = setTimeout(async () => {
+      try {
+        const data = await api.get<GlobalSearchResults>(
+          `/dashboard/search?q=${encodeURIComponent(trimmed)}&limit=5`
+        );
+        if (latestQuery.current !== trimmed) return; // stale response
+        setResults(data);
+        setError(null);
+      } catch (err) {
+        if (latestQuery.current !== trimmed) return;
+        setError(err instanceof Error ? err.message : "Search failed");
+      } finally {
+        if (latestQuery.current === trimmed) setLoading(false);
+      }
+    }, debounceMs);
+
+    return () => clearTimeout(timer);
+  }, [trimmed, minChars, debounceMs]);
+
+  return { results, loading, error };
 }
 
 export interface ChannelCount {
@@ -110,6 +181,7 @@ export interface AgentConfig {
   custom_prompts: PersonaConfig | null;
   timezone: string;
   ui_brand_color: string;
+  logo_url?: string | null;
   org_name: string;
   business_name?: string | null;
   api_key: string;
@@ -155,8 +227,8 @@ export interface OnboardingStatus {
 export interface ScheduleDay {
   day_of_week: number;  // 0=Mon, 6=Sun
   is_active: boolean;
-  open_time: string;    // "HH:MM"
-  close_time: string;
+  open_time: string | null;    // "HH:MM" — null for closed days
+  close_time: string | null;
   break_start: string | null;
   break_end: string | null;
 }

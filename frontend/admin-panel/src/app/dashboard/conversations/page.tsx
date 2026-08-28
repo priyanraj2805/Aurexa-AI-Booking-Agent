@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { useSearchParams } from "next/navigation";
 import { Loader2, AlertCircle, ArrowLeft, User, Bot, Globe, MessageCircle, Headset, Bot as BotIcon, Send, Search, ChevronDown, ChevronUp, Calendar, ArrowUpDown } from "lucide-react";
 import { useConversations, useTranscript, takeoverConversation, releaseConversation, sendHumanMessage } from "@/hooks/use-dashboard";
 import { useAuth } from "@/lib/auth-context";
@@ -439,6 +440,12 @@ export default function ConversationsPage() {
   const sessions = data?.items ?? [];
   const total = data?.total ?? 0;
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const searchParams = useSearchParams();
+  useEffect(() => {
+    const id = searchParams.get("id");
+    if (id) setSelectedId(id);
+  }, [searchParams]);
 
   if (selectedId) {
     return <TranscriptPanel sessionId={selectedId} onBack={() => setSelectedId(null)} />;

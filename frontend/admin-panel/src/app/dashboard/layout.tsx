@@ -15,6 +15,7 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
+import { Rocket } from "lucide-react";
 
 /** Read the sidebar_state cookie that sidebar.tsx writes on toggle. */
 function getPersistedSidebarState(): boolean {
@@ -50,6 +51,7 @@ export default function DashboardLayout({
   const breadcrumb = getBreadcrumb(pathname);
   // Read persisted sidebar state from cookie so collapse survives navigation
   const [sidebarOpen] = useState<boolean>(getPersistedSidebarState);
+  const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
 
   useEffect(() => {
     if (!isLoading && !user) {
@@ -57,7 +59,25 @@ export default function DashboardLayout({
     }
   }, [isLoading, user, router]);
 
-  if (isLoading) {
+  useEffect(() => {
+    if (!isLoading && user) {
+      let cancelled = false;
+      fetch("/api/v1/dashboard/onboarding/status")
+        .then((res) => res.json())
+        .then((data) => {
+          if (!cancelled) setOnboardingComplete(Boolean(data.onboarding_completed));
+        })
+        .catch(() => {
+          // On failure, don't lock the user out — treat as complete.
+          if (!cancelled) setOnboardingComplete(true);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+  }, [isLoading, user]);
+
+  if (isLoading || (user && onboardingComplete === null)) {
     return (
       <div className="flex h-screen items-center justify-center bg-background">
         <LoaderPulseSquare className="size-16 text-primary" />
@@ -69,6 +89,69 @@ export default function DashboardLayout({
     return (
       <div className="flex h-screen items-center justify-center bg-background">
         <LoaderPulseSquare className="size-16 text-primary" />
+      </div>
+    );
+  }
+
+  // ── Mandatory onboarding gate ────────────────────────────────────────
+  // Until onboarding is complete the dashboard renders blurred and
+  // non-interactive, with a card linking to the onboarding wizard.
+  if (!onboardingComplete) {
+    return (
+      <div className="relative h-screen overflow-hidden bg-background">
+        {/* Blurred, inert preview of the real dashboard shell */}
+        <div aria-hidden className="pointer-events-none select-none blur-sm opacity-50">
+          <div className="flex h-16 items-center gap-3 border-b border-border px-8">
+            <span className="text-sm font-medium text-muted-foreground">
+              {breadcrumb.category ? `${breadcrumb.category} / ` : ""}
+              <span className="text-foreground">{breadcrumb.page}</span>
+            </span>
+          </div>
+          <main className="flex flex-col gap-6 px-[60px] py-10">
+            <div className="h-10 w-72 rounded-lg bg-secondary" />
+            <div className="grid grid-cols-4 gap-4">
+              {[...Array(4)].map((_, i) => (
+                <div key={i} className="h-[118px] rounded-2xl border border-border bg-card" />
+              ))}
+            </div>
+            <div className="grid grid-cols-3 gap-4">
+              <div className="h-64 rounded-2xl border border-border bg-card" />
+              <div className="h-64 rounded-2xl border border-border bg-card" />
+              <div className="h-64 rounded-2xl border border-border bg-card" />
+            </div>
+          </main>
+        </div>
+
+        {/* Gate card */}
+        <div className="absolute inset-0 z-10 flex items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-2xl border border-border bg-card p-8 text-center shadow-2xl">
+            <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-xl bg-primary/10 text-primary">
+              <Rocket className="size-6" />
+            </div>
+            <h1 className="text-xl font-semibold tracking-tight">
+              Finish setup to unlock your dashboard
+            </h1>
+            <p className="mt-2 text-sm text-muted-foreground">
+              We need a few mandatory details — your industry, timezone and
+              business hours — before your booking assistant can go live.
+            </p>
+            <button
+              onClick={() => router.replace("/onboarding")}
+              className="mt-6 inline-flex h-10 w-full items-center justify-center rounded-lg bg-primary px-4 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 cursor-pointer"
+            >
+              Complete setup now
+            </button>
+            <button
+              onClick={() => {
+                // Allow re-check (e.g. completed in another tab)
+                setOnboardingComplete(null);
+              }}
+              className="mt-3 text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+            >
+              I already completed it — recheck
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -94,8 +177,8 @@ export default function DashboardLayout({
             <span className="hidden sm:inline text-[11px] font-semibold uppercase px-2 py-1 rounded bg-primary/10 text-primary">
               Agent Online
             </span>
-              <AnnouncementBell />
-            </div>
+            <AnnouncementBell />
+          </div>
         </header>
         {/* Main content — matches template: padding 40px 60px, gap 32px */}
         <main className="flex flex-1 flex-col gap-6 md:gap-8 px-4 sm:px-6 md:px-8 lg:px-[60px] py-6 md:py-10 overflow-x-hidden">

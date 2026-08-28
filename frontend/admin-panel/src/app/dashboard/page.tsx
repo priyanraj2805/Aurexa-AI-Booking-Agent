@@ -77,6 +77,31 @@ function trendPct(arr: DailyCount[] | undefined): number | null {
   return Math.round(((curr - prev) / prev) * 100);
 }
 
+/** Animates from the previous value to `target` with an ease-out count-up. */
+function useCountUp(target: number, duration = 900): number {
+  const [display, setDisplay] = useState(0);
+  const prevRef = useRef(0);
+  useEffect(() => {
+    const from = prevRef.current;
+    if (from === target) return;
+    const start = performance.now();
+    let raf = 0;
+    const tick = (now: number) => {
+      const t = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - t, 3);
+      setDisplay(Math.round(from + (target - from) * eased));
+      if (t < 1) {
+        raf = requestAnimationFrame(tick);
+      } else {
+        prevRef.current = target;
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target, duration]);
+  return display;
+}
+
 function Sparkline({ data, color }: { data: number[]; color: string }) {
   const points = data.filter((n) => n >= 0);
   if (points.length < 2) return null;
@@ -188,10 +213,11 @@ function StatCard({
   trend,
   badge,
 }: StatCardProps) {
+  const shown = useCountUp(value);
   return (
     <Link
       href={href}
-      className="group relative overflow-hidden rounded-2xl border border-border bg-card p-5 transition-all hover:border-primary/40 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40"
+      className="group relative overflow-hidden rounded-2xl border border-border bg-card p-5 transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40"
     >
       <div className="absolute inset-x-0 top-0 h-[3px] bg-gradient-to-r from-transparent via-primary/60 to-transparent opacity-0 transition-opacity group-hover:opacity-100" />
       <div className="flex items-center gap-3">
@@ -201,7 +227,7 @@ function StatCard({
         <div className="flex-1 min-w-0 overflow-hidden">
           <div className="text-[13px] font-medium text-muted-foreground">{title}</div>
           <div className="flex items-baseline gap-2">
-            <span className="text-[28px] font-bold tracking-tight leading-none">{value}</span>
+            <span className="text-[28px] font-bold tracking-tight leading-none tabular-nums">{shown}</span>
             {trend !== null && trend !== 0 && (
               <span
                 className={`inline-flex items-center gap-0.5 text-[11px] font-semibold whitespace-nowrap ${
@@ -271,7 +297,7 @@ function DonutChart({
           </PieChart>
         </ResponsiveContainer>
         <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-          <span className="text-3xl font-bold tracking-tight">{total}</span>
+          <span className="text-3xl font-bold tracking-tight tabular-nums">{total}</span>
           <span className="text-[11px] text-muted-foreground">total</span>
         </div>
       </div>
@@ -663,7 +689,7 @@ export default function DashboardPage() {
 
       {/* Area chart + donut */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
-        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 lg:col-span-2">
+        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 lg:col-span-2 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
           <CardHeader
             icon={Activity}
             title="Activity Overview"
@@ -760,7 +786,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Bookings vs Cancelled */}
-        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6">
+        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
           <CardHeader
             icon={CalendarX2}
             title="Bookings vs Cancelled"
@@ -789,7 +815,7 @@ export default function DashboardPage() {
 
       {/* Row 1: Bookings by Channel + WhatsApp Stats */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
-        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6">
+        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
           <CardHeader
             icon={BarChart3}
             title="Bookings by Channel"
@@ -813,7 +839,7 @@ export default function DashboardPage() {
             <ChannelBreakdown data={barData} colors={barColors} />
           )}
         </div>
-        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6">
+        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
           <CardHeader
             icon={MessageSquare}
             title="WhatsApp Stats"
@@ -912,7 +938,7 @@ export default function DashboardPage() {
 
       {/* Row 2: Quick Stats + Recent Appointments */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4 items-stretch">
-        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col">
+        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
           <CardHeader
             icon={TrendingUp}
             title="Quick Stats"
@@ -1007,7 +1033,7 @@ export default function DashboardPage() {
           )}
           </div>
         </div>
-        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col">
+        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
           <div className="flex items-center justify-between mb-4">
             <CardHeader
               icon={CalendarCheck}
@@ -1080,7 +1106,13 @@ export default function DashboardPage() {
                       </HoverCardContent>
                     </HoverCard>
                     <div className="flex-1 min-w-0">
-                      <div className="font-medium text-[13px] truncate group-hover:text-primary transition-colors">{b.customer_name}</div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-medium text-[13px] truncate group-hover:text-primary transition-colors">{b.customer_name}</span>
+                        <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-green-500/10 px-1.5 py-px text-[10px] font-semibold text-green-600 dark:text-green-400 shrink-0">
+                          <span className="size-1 rounded-full bg-green-500" />
+                          Confirmed
+                        </span>
+                      </div>
                       <div className="text-[11px] text-muted-foreground truncate">{b.customer_email}</div>
                     </div>
                     <div className="text-right shrink-0">

@@ -54,6 +54,11 @@ export default function BookingsPage() {
   useEffect(() => {
     const s = searchParams.get("status");
     if (s) setStatus(s);
+    const q = searchParams.get("search");
+    if (q) {
+      setSearch(q);
+      setPage(1);
+    }
   }, [searchParams]);
 
   const { data, loading, error } = useBookings(page, 10, { search, status, fromDate, toDate });

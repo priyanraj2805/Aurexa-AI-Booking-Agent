@@ -284,6 +284,7 @@ async def call_model(
             user_message=latest_user_message,
             effective_timezone=effective_timezone,
             org_timezone=str(org_config.get("timezone") or "UTC"),
+            in_booking_flow=bool(state.get("collected_fields")),
         )
         if schedule_answer:
             policy_payload = {
@@ -327,7 +328,12 @@ async def call_model(
     ]
     
     # 3. Build system prompt
-    sys_prompt = build_system_prompt(org_config, field_definitions)
+    from app.engine.scheduling_policy import load_weekly_hours_block
+
+    hours_block = await load_weekly_hours_block(
+        db, str(state.get("org_id") or "")
+    )
+    sys_prompt = build_system_prompt(org_config, field_definitions, hours_block=hours_block)
     context_block = build_context_block(collected, missing, "ACTIVE")
     if active_summary:
         context_block = f"{context_block}\n\nConversation summary:\n{active_summary}"

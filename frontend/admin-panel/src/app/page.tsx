@@ -524,7 +524,7 @@ export default function LandingPage() {
             <span className="text-sm text-zinc-500">© 2026 DotStark AI. All rights reserved.</span>
           </div>
           <div className="flex items-center gap-6 text-sm text-zinc-500">
-            <a href="#" className="hover:text-white transition-colors">Privacy</a>
+            <Link href="/privacy-policy" className="hover:text-white transition-colors">Privacy Policy</Link>
             <a href="#" className="hover:text-white transition-colors">Terms</a>
             <a href="#" className="hover:text-white transition-colors">Contact</a>
           </div>

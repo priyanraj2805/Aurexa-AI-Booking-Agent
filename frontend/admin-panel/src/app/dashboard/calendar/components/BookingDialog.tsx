@@ -45,9 +45,36 @@ export function BookingDialog({
     { icon: Phone, label: "Phone Number", value: event.customer_phone ?? "Not provided" },
   ];
 
-  const extraEntries = Object.entries(event.collected_data).filter(
-    ([k]) => !["name", "email", "phone", "date", "time", "appointment_date", "appointment_time"].includes(k)
-  );
+  const INTERNAL_KEYS = new Set([
+    "user_timezone",
+    "locked_slot_id",
+    "locked_slot_start_utc",
+    "locked_slot_end_utc",
+    "timezone_source",
+    "timezone_fallback_used",
+    "timezone_fallback_reason",
+    "selected_slot_id",
+    "selected_slot_start_utc",
+    "runtime_checkpoint",
+    "active_path_effects",
+    "active_path",
+    "checkpoint",
+    "field_definitions_snapshot",
+    "field_definitions",
+    "field_snapshot",
+    "slot_id",
+  ]);
+
+  const extraEntries = Object.entries(event.collected_data).filter(([k, v]) => {
+    const norm = k.toLowerCase().replace(/ /g, "_");
+    if (["name", "email", "phone", "date", "time", "appointment_date", "appointment_time"].includes(norm)) return false;
+    if (INTERNAL_KEYS.has(norm)) return false;
+    if (/(checkpoint|path_effects|snapshot|slot_id|timezone|locked_slot)/i.test(k)) return false;
+    if (v === null || v === undefined || v === "") return false;
+    // Hide internal objects/arrays — important booking fields are primitives
+    if (typeof v === "object") return false;
+    return true;
+  });
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-200">

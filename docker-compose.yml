@@ -57,6 +57,8 @@ services:
     restart: unless-stopped
     ports:
       - "8005:8005"
+    volumes:
+      - org_logos:/app/uploads
     # Load environment variables from the docker-specific env file.
     # NOTE: FIRECRAWL_API_KEY and all secrets come from ./backend/.env.docker.
     # Do NOT also list them under `environment:` — the `environment:` block
@@ -185,3 +187,4 @@ networks:
 # Your database data is SAFE across container restarts.
 volumes:
   postgres_data:
+  org_logos:

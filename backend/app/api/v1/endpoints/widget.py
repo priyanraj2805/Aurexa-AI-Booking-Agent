@@ -69,6 +69,7 @@ def _build_config_response(org: Organization, config: Optional[OrgConfig]) -> di
         f"Hello! I'm {agent_name}. How can I help you schedule an appointment today?"
     )
     brand_color = (config.ui_brand_color if config else None) or "#3B82F6"
+    logo_url = (getattr(config, "logo_url", None) if config else None) or None
     required_fields = (config.required_fields if config else None) or [
         "name",
         "email",
@@ -129,6 +130,7 @@ def _build_config_response(org: Organization, config: Optional[OrgConfig]) -> di
         "agent_name": agent_name,
         "greeting_message": greeting,
         "brand_color": brand_color,
+        "logo_url": logo_url,
         "business_name": custom.get("business_name") or None,
         "business_tagline": custom.get("business_tagline") or None,
         "required_fields": required_fields,
@@ -148,6 +150,7 @@ class WidgetConfigResponse(BaseModel):
     agent_name: str
     greeting_message: str
     brand_color: str
+    logo_url: Optional[str] = None
     business_name: Optional[str] = None
     business_tagline: Optional[str] = None
     required_fields: list

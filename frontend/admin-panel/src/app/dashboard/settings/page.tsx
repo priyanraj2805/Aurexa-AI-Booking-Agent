@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Loader2, User, Mail, Building2, Calendar } from "lucide-react";
+import { useState, useRef } from "react";
+import { Loader2, User, Mail, Building2, Calendar, Upload, Image as ImageIcon, Trash2, Link as LinkIcon } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/auth-context";
 import { Button } from "@/components/ui/button";
@@ -9,11 +9,16 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { api, uploadFile } from "@/lib/api";
 
 export default function SettingsPage() {
-  const { user, updateProfile } = useAuth();
+  const { user, updateProfile, refresh } = useAuth();
   const [fullName, setFullName] = useState(user?.full_name ?? "");
   const [savingProfile, setSavingProfile] = useState(false);
+  const [avatarUploading, setAvatarUploading] = useState(false);
+  const [avatarError, setAvatarError] = useState<string | null>(null);
+  const [avatarUrlInput, setAvatarUrlInput] = useState(user?.avatar_url || "");
+  const avatarInputRef = useRef<HTMLInputElement>(null);
 
   const initials = user?.full_name
     ? user.full_name
@@ -23,6 +28,72 @@ export default function SettingsPage() {
         .toUpperCase()
         .slice(0, 2)
     : "DS";
+
+  const handleAvatarFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setAvatarError("Please select an image file");
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setAvatarError("Image must be under 2MB");
+      return;
+    }
+    setAvatarUploading(true);
+    setAvatarError(null);
+    try {
+      await uploadFile("/account/avatar", file);
+      toast.success("Avatar updated");
+      await refresh();
+    } catch (err) {
+      setAvatarError(err instanceof Error ? err.message : "Upload failed");
+      toast.error(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setAvatarUploading(false);
+      if (avatarInputRef.current) avatarInputRef.current.value = "";
+    }
+  };
+
+  const handleAvatarUrlSave = async () => {
+    const url = avatarUrlInput.trim();
+    if (!url) {
+      setAvatarError("Please enter an image URL");
+      return;
+    }
+    try {
+      new URL(url);
+    } catch {
+      setAvatarError("Invalid URL");
+      return;
+    }
+    setAvatarUploading(true);
+    setAvatarError(null);
+    try {
+      await api.put("/account/avatar-url", { avatar_url: url });
+      toast.success("Avatar URL saved");
+      await refresh();
+    } catch (err) {
+      setAvatarError(err instanceof Error ? err.message : "Failed to save URL");
+    } finally {
+      setAvatarUploading(false);
+    }
+  };
+
+  const handleAvatarRemove = async () => {
+    setAvatarUploading(true);
+    setAvatarError(null);
+    try {
+      await api.del("/account/avatar");
+      setAvatarUrlInput("");
+      toast.success("Avatar removed");
+      await refresh();
+    } catch (err) {
+      setAvatarError(err instanceof Error ? err.message : "Failed to remove");
+    } finally {
+      setAvatarUploading(false);
+    }
+  };
 
   const handleProfileSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -84,13 +155,50 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleProfileSave} className="space-y-5">
-            <div className="flex items-center gap-4">
-              <div className="flex size-14 shrink-0 items-center justify-center rounded-full bg-primary text-sm font-semibold text-primary-foreground">
-                {initials}
+            <div className="flex items-start gap-4">
+              <div className="size-16 rounded-full border-2 border-border bg-primary text-primary-foreground flex items-center justify-center overflow-hidden shrink-0">
+                {user?.avatar_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={user.avatar_url} alt={user.full_name || "User"} className="size-full object-cover" />
+                ) : (
+                  <span className="text-sm font-semibold">{initials}</span>
+                )}
               </div>
-              <div>
+              <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium">{user?.full_name || "User"}</p>
-                <p className="text-sm text-muted-foreground">{user?.email}</p>
+                <p className="text-sm text-muted-foreground truncate">{user?.email}</p>
+                <div className="flex flex-wrap gap-2 mt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => avatarInputRef.current?.click()}
+                    disabled={avatarUploading}
+                    className="h-7 text-xs"
+                  >
+                    {avatarUploading ? <Loader2 className="size-3 animate-spin" /> : <Upload className="size-3" />}
+                    {user?.avatar_url ? "Change" : "Upload"} avatar
+                  </Button>
+                  {user?.avatar_url && (
+                    <Button type="button" variant="ghost" size="sm" onClick={handleAvatarRemove} disabled={avatarUploading} className="h-7 text-xs">
+                      <Trash2 className="size-3" /> Remove
+                    </Button>
+                  )}
+                </div>
+                <input ref={avatarInputRef} type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" className="hidden" onChange={handleAvatarFile} />
+                <div className="flex gap-2 mt-2">
+                  <Input
+                    value={avatarUrlInput}
+                    onChange={(e) => setAvatarUrlInput(e.target.value)}
+                    placeholder="Or paste image URL https://..."
+                    className="h-7 text-xs flex-1"
+                  />
+                  <Button type="button" variant="secondary" size="sm" onClick={handleAvatarUrlSave} disabled={avatarUploading} className="h-7 text-xs">
+                    <LinkIcon className="size-3" /> Save URL
+                  </Button>
+                </div>
+                <p className="text-[11px] text-muted-foreground mt-1">PNG, JPG, WEBP, SVG • Max 2MB • Shown in user menu</p>
+                {avatarError && <p className="text-xs text-red-500 mt-1">{avatarError}</p>}
               </div>
             </div>
 

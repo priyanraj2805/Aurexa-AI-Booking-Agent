@@ -18,7 +18,10 @@ import {
   Moon,
   Sun,
   Search,
+  MessageSquare,
+  Loader2,
 } from "lucide-react";
+import { useGlobalSearch } from "@/hooks/use-dashboard";
 import {
   Command,
   CommandDialog,
@@ -58,6 +61,11 @@ export function CommandPalette() {
   const router = useRouter();
   const { resolvedTheme, setTheme } = useTheme();
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const { results, loading, error } = useGlobalSearch(open ? query : "");
+  const trimmed = query.trim();
+  const hasResults =
+    !!results && (results.bookings.length > 0 || results.conversations.length > 0);
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -69,6 +77,10 @@ export function CommandPalette() {
     document.addEventListener("keydown", down);
     return () => document.removeEventListener("keydown", down);
   }, []);
+
+  useEffect(() => {
+    if (!open) setQuery("");
+  }, [open]);
 
   const run = (fn: () => void) => {
     setOpen(false);
@@ -96,12 +108,93 @@ export function CommandPalette() {
         <Search className="size-4" />
       </button>
       <CommandDialog open={open} onOpenChange={setOpen}>
-        <Command className="p-1">
-          <CommandInput placeholder="Type a command or search…" />
+        <Command className="p-1" shouldFilter={trimmed.length < 2}>
+          <CommandInput
+            placeholder="Search bookings, conversations or jump to a page…"
+            value={query}
+            onValueChange={setQuery}
+          />
           <CommandList>
-            <CommandEmpty>No results found.</CommandEmpty>
+            {trimmed.length >= 2 && (
+              <>
+                {loading && (
+                  <div className="flex items-center gap-2 px-3 py-4 text-sm text-muted-foreground">
+                    <Loader2 className="size-3.5 animate-spin" /> Searching…
+                  </div>
+                )}
+                {!loading && hasResults && (
+                  <>
+                    {results!.bookings.length > 0 && (
+                      <CommandGroup heading="Bookings">
+                        {results!.bookings.map((b) => (
+                          <CommandItem
+                            key={b.id}
+                            value={`booking-${b.customer_name} ${b.customer_email}`}
+                            onSelect={() =>
+                              run(() =>
+                                router.push(
+                                  `/dashboard/bookings?search=${encodeURIComponent(
+                                    b.customer_email || b.customer_name
+                                  )}`
+                                )
+                              )
+                            }
+                          >
+                            <CalendarCheck className="size-4 shrink-0" />
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-sm font-medium">{b.customer_name}</div>
+                              <div className="truncate text-xs text-muted-foreground">
+                                {b.customer_email}
+                                {b.slot_start
+                                  ? ` · ${new Date(b.slot_start).toLocaleDateString("en-US", {
+                                      month: "short",
+                                      day: "numeric",
+                                    })}`
+                                  : ""}
+                              </div>
+                            </div>
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    )}
+                    {results!.conversations.length > 0 && (
+                      <CommandGroup heading="Conversations">
+                        {results!.conversations.map((c) => (
+                          <CommandItem
+                            key={c.id}
+                            value={`conversation-${c.customer_name ?? ""} ${c.customer_email ?? ""} ${c.id}`}
+                            onSelect={() => run(() => router.push(`/dashboard/conversations?id=${c.id}`))}
+                          >
+                            <MessageSquare className="size-4 shrink-0" />
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-sm font-medium">
+                                {c.customer_name || c.customer_email || c.id.slice(0, 8)}
+                              </div>
+                              <div className="truncate text-xs text-muted-foreground capitalize">
+                                {c.channel} · {c.session_status.toLowerCase()}
+                              </div>
+                            </div>
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    )}
+                  </>
+                )}
+                {!loading && error && (
+                  <div className="px-3 py-4 text-center text-sm text-red-500">
+                    Search failed: {error}
+                  </div>
+                )}
+                {!loading && !error && !hasResults && trimmed.length >= 2 && (
+                  <div className="px-3 py-4 text-center text-sm text-muted-foreground">
+                    No matches for “{trimmed}”.
+                  </div>
+                )}
+              </>
+            )}
+            {trimmed.length < 2 && <CommandEmpty>No results found.</CommandEmpty>}
             {NAV_GROUPS.map((group) => (
-              <CommandGroup key={group.heading} heading={group.heading}>
+              <CommandGroup key={group.heading} heading={trimmed.length >= 2 ? "Pages" : group.heading}>
                 {group.items.map((item) => (
                   <CommandItem
                     key={item.href}

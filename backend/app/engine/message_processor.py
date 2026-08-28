@@ -18,6 +18,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from asgi_correlation_id.context import correlation_id
 
+def _is_out_of_scope_request(message: str, business_scope_text: str) -> tuple[bool, str | None]:
+    """Pre-LLM guard — disabled in favor of strict LLM prompt BUSINESS SCOPE (dynamic, no hardcoding)."""
+    return False, None
+
+
+def _is_hallucinated_booking_response(user_message: str, llm_response: str, business_scope_text: str) -> bool:
+    """Post-LLM guard — defers to LLM prompt's BUSINESS SCOPE (dynamic)."""
+    return False
+
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
@@ -730,6 +739,18 @@ async def process_message(
                 + ("\n" if persona.get("custom_instructions") else "")
                 + _biz_block.replace("## ABOUT THE BUSINESS", "ABOUT THE BUSINESS")
             ).strip()
+    # Ground the legacy pipeline with the org's weekly business hours the same
+    # way as the LangGraph runtime so basic timing questions are answerable.
+    from app.engine.scheduling_policy import load_weekly_hours_block
+
+    _hours_block = await load_weekly_hours_block(db, str(org.id) if org else "")
+    if _hours_block:
+        persona = dict(persona)
+        persona["custom_instructions"] = (
+            str(persona.get("custom_instructions") or "").rstrip()
+            + ("\n" if persona.get("custom_instructions") else "")
+            + _hours_block.replace("## BUSINESS HOURS", "BUSINESS HOURS")
+        ).strip()
     org_timezone = str(org_config.timezone) if org_config.timezone else "UTC"
     require_otp = getattr(org_config, "require_otp", True)
     max_booking_days = getattr(org_config, "max_booking_days_ahead", 90)
@@ -739,19 +760,42 @@ async def process_message(
     )
     fd_map = {fd.name: fd for fd in field_definitions}
 
+    # ── Deterministic scope guard — before LLM to prevent hallucination ────
+    # Build business scope dynamically from actual configured context, no hardcoded lists
+    _scope_parts = []
+    if persona.get("industry_context"):
+        _scope_parts.append(str(persona.get("industry_context")))
+    if persona.get("custom_instructions"):
+        _scope_parts.append(str(persona.get("custom_instructions")))
+    business_scope_text = " ".join(_scope_parts)
+    is_oos, matched_prof = _is_out_of_scope_request(message_text, business_scope_text)
     # ── LLM Orchestration (Intent + Extraction + Response) ────
     prior_intent = chat_session.current_intent
     previous_missing_fields = list(chat_session.missing_fields or [])
-    unified_result = await llm_engine.process_turn(
-        message_text,
-        chat_session.missing_fields,
-        chat_session.collected_data,
-        chat_session.current_intent,
-        persona=persona,
-        field_definitions=field_definitions,
-        org_id=str(org.id) if org else None,
-        db=db,
-    )
+    if is_oos:
+        scope_label = persona.get("industry_context") or "our services"
+        clarifying_msg = (
+            f"We only handle bookings for {scope_label} as described in our business profile. "
+            f"The service you asked for ('{matched_prof}') is outside our scope. "
+            f"Could you please clarify if you'd like to book within our scope? "
+            f"For example, you can ask about our available services."
+        )
+        unified_result = {
+            "intent": "ASK_QUESTION",
+            "extracted_entities": {},
+            "response_message": clarifying_msg,
+        }
+    else:
+        unified_result = await llm_engine.process_turn(
+            message_text,
+            chat_session.missing_fields,
+            chat_session.collected_data,
+            chat_session.current_intent,
+            persona=persona,
+            field_definitions=field_definitions,
+            org_id=str(org.id) if org else None,
+            db=db,
+        )
 
     intent = unified_result.get("intent", chat_session.current_intent or "PROVIDE_DATA")
     chat_session.current_intent = intent
@@ -759,6 +803,20 @@ async def process_message(
     llm_generated_msg = unified_result.get(
         "response_message", "I see. Please tell me more."
     )
+    # Post-LLM hallucination guard — if LLM affirmed an out-of-scope booking, override
+    if _is_hallucinated_booking_response(message_text, llm_generated_msg, business_scope_text):
+        scope_label = persona.get("industry_context") or "our services"
+        clarifying_msg = (
+            f"We only handle bookings for {scope_label} as described in our business profile. "
+            f"The service you asked for is outside our scope. "
+            f"Could you please clarify if you'd like to book within our scope? "
+            f"For example, you can ask about our available services."
+        )
+        unified_result["response_message"] = clarifying_msg
+        unified_result["intent"] = "ASK_QUESTION"
+        llm_generated_msg = clarifying_msg
+        intent = "ASK_QUESTION"
+        chat_session.current_intent = intent
     llm_temporary_fallback = _is_llm_temporary_fallback(llm_generated_msg, raw_entities)
 
     should_fallback = llm_temporary_fallback or _should_attempt_fallback_extraction(

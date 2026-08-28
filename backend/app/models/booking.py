@@ -138,8 +138,8 @@ class ScheduleDay(Base):
     )
     day_of_week = Column(Integer, nullable=False)  # 0=Mon, 6=Sun
     is_active = Column(Boolean, nullable=False, default=True)
-    open_time = Column(Time, nullable=False)
-    close_time = Column(Time, nullable=False)
+    open_time = Column(Time, nullable=True)
+    close_time = Column(Time, nullable=True)
     break_start = Column(Time, nullable=True)
     break_end = Column(Time, nullable=True)
 

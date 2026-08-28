@@ -1,4 +1,5 @@
 import uuid
+import sqlalchemy as sa
 from sqlalchemy import Column, String, Boolean, DateTime
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
@@ -23,3 +24,8 @@ class Organization(Base):
     # This is acceptable security practice for server-generated API keys.
     old_api_key = Column(String(64), nullable=True, index=True)
     old_key_expires_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Onboarding
+    onboarding_completed = Column(Boolean, default=False, server_default=sa.false())
+    industry_type = Column(String(100), nullable=True)
+    custom_prompts = Column(sa.JSON, nullable=True)

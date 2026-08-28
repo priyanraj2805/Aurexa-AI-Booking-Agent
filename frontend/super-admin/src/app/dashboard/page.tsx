@@ -618,12 +618,14 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-5">
-          <h2 className="text-sm font-semibold text-slate-100">Top orgs by bookings</h2>
-          <p className="mt-0.5 text-[11px] text-slate-400">Ranked by booking volume</p>
-          <div className="mt-3 space-y-1.5">
-            {top.map((o, i) => (
+      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3 items-stretch">
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-5 flex flex-col h-[420px]">
+          <div className="shrink-0">
+            <h2 className="text-sm font-semibold text-slate-100">Top orgs by bookings</h2>
+            <p className="mt-0.5 text-[11px] text-slate-400">Ranked by booking volume</p>
+          </div>
+          <div className="mt-3 flex-1 overflow-y-auto pr-1 -mr-1 space-y-1.5 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+            {top.slice(0, 20).map((o, i) => (
               <Link
                 key={o.id}
                 href={`/dashboard/organizations/${o.id}`}
@@ -662,8 +664,8 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-5 lg:col-span-2">
-          <div className="flex items-center justify-between">
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-5 lg:col-span-2 flex flex-col h-[420px]">
+          <div className="flex items-center justify-between shrink-0">
             <div className="flex items-center gap-3">
               <span className="flex items-center justify-center size-9 rounded-lg bg-amber-500/15 text-amber-300 shrink-0">
                 <ScrollText className="size-4" />
@@ -682,8 +684,8 @@ export default function DashboardPage() {
               View full audit log →
             </Link>
           </div>
-          <div className="mt-3 divide-y divide-slate-800">
-            {recent.map((r) => {
+          <div className="mt-3 flex-1 overflow-y-auto pr-1 -mr-1 divide-y divide-slate-800 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+            {recent.slice(0, 20).map((r) => {
               const meta = humanizeAction(r.action);
               const Icon = meta.icon;
               return (
