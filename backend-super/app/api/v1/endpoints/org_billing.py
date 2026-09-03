@@ -267,3 +267,166 @@ async def change_org_plan(
         user_agent=request.headers.get("user-agent"),
     )
     return {"ok": True, "org_id": str(payload.org_id), "plan_code": plan["code"]}
+
+
+class RazorpayOrderRequest(BaseModel):
+    org_id: UUID
+    plan_id: UUID
+
+
+class RazorpayVerifyRequest(BaseModel):
+    org_id: UUID
+    plan_id: UUID
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+    requested_by_email: Optional[str] = None
+
+
+@router.post("/razorpay/order")
+async def create_razorpay_order(
+    payload: RazorpayOrderRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a Razorpay order for the requested plan (tenant self-service)."""
+    org = await _org_or_404(db, payload.org_id)
+    plan = (
+        await db.execute(
+            text("SELECT id, code, name, monthly_price_cents, is_active FROM super_admin.plans WHERE id = :plan_id"),
+            {"plan_id": payload.plan_id},
+        )
+    ).mappings().first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    if not plan["is_active"]:
+        raise HTTPException(status_code=422, detail="Cannot subscribe to an archived plan")
+    if (plan["monthly_price_cents"] or 0) == 0:
+        # Free plan — no payment needed, return a mock order that will verify instantly
+        return {
+            "order_id": f"order_free_{plan['id']}",
+            "amount": 0,
+            "currency": "INR",
+            "key_id": "",
+            "plan_code": plan["code"],
+        }
+    provider = get_provider()
+    # Use provider's razorpay order creation (Mock or Razorpay)
+    try:
+        if hasattr(provider, "create_razorpay_order"):
+            order = await provider.create_razorpay_order(
+                amount_cents=int(plan["monthly_price_cents"]),
+                currency="INR",
+                receipt=f"rcpt_{str(payload.org_id)[:8]}_{str(plan['id'])[:8]}",
+            )
+        else:
+            # Fallback for providers without razorpay support (Stripe/Mock without method)
+            import uuid as uuid_mod
+
+            order = {
+                "id": f"order_{uuid_mod.uuid4().hex[:12]}",
+                "amount": int(plan["monthly_price_cents"]),
+                "currency": "INR",
+            }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to create Razorpay order: {e}")
+    # Determine key_id to use on frontend
+    from app.core.config import settings as _settings
+
+    key_id = getattr(_settings, "RAZORPAY_KEY_ID", "") or ""
+    return {
+        "order_id": order.get("id") or order.get("order_id"),
+        "amount": order.get("amount", plan["monthly_price_cents"]),
+        "currency": order.get("currency", "INR"),
+        "key_id": key_id,
+        "plan_code": plan["code"],
+    }
+
+
+@router.post("/razorpay/verify")
+async def verify_razorpay_payment(
+    payload: RazorpayVerifyRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Verify Razorpay payment signature and, on success, assign the plan."""
+    org = await _org_or_404(db, payload.org_id)
+    plan = (
+        await db.execute(
+            text("SELECT id, code, name, monthly_price_cents, is_active FROM super_admin.plans WHERE id = :plan_id"),
+            {"plan_id": payload.plan_id},
+        )
+    ).mappings().first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    if (plan["monthly_price_cents"] or 0) == 0:
+        # Free plan — assign directly without verification
+        pass
+    else:
+        provider = get_provider()
+        verified = False
+        try:
+            if hasattr(provider, "verify_razorpay_payment"):
+                verified = await provider.verify_razorpay_payment(
+                    payload.razorpay_order_id, payload.razorpay_payment_id, payload.razorpay_signature
+                )
+            else:
+                verified = True  # mock provider without verify
+        except Exception:
+            verified = False
+        if not verified:
+            raise HTTPException(status_code=400, detail="Razorpay signature verification failed")
+    # Payment verified (or free) — now assign the plan same as change_org_plan
+    old = await _active_assignment(db, payload.org_id)
+    await db.execute(
+        text("UPDATE super_admin.plan_assignments SET status = 'revoked', revoked_at = now() WHERE org_id = :org_id AND status = 'active'"),
+        {"org_id": payload.org_id},
+    )
+    await db.execute(
+        text(
+            """
+            INSERT INTO super_admin.plan_assignments
+                (org_id, plan_id, status, assigned_by_id, assigned_by_email, note)
+            VALUES (:org_id, :plan_id, 'active', NULL, :email, :note)
+            """
+        ),
+        {"org_id": payload.org_id, "plan_id": payload.plan_id, "email": payload.requested_by_email, "note": f"razorpay:{payload.razorpay_payment_id}" if (plan["monthly_price_cents"] or 0) != 0 else "free plan"},
+    )
+    existing_sub = (
+        await db.execute(
+            text("SELECT id, status FROM super_admin.subscriptions WHERE org_id = :org_id AND status IN ('active', 'past_due', 'trialing')"),
+            {"org_id": payload.org_id},
+        )
+    ).mappings().first()
+    if existing_sub:
+        await db.execute(
+            text("UPDATE super_admin.subscriptions SET plan_id = :plan_id, status = 'active', current_period_start = COALESCE(current_period_start, now()), updated_at = now() WHERE id = :id"),
+            {"id": existing_sub["id"], "plan_id": payload.plan_id},
+        )
+    else:
+        provider = get_provider()
+        ext = {}
+        try:
+            ext = await provider.create_subscription(str(payload.org_id), plan["code"])
+        except Exception:
+            ext = {}
+        await db.execute(
+            text(
+                """
+                INSERT INTO super_admin.subscriptions
+                    (org_id, plan_id, provider, provider_customer_id, provider_sub_id, status, current_period_start, current_period_end)
+                VALUES (:org_id, :plan_id, :provider, :cust_id, :sub_id, 'active', now(), now() + interval '1 month')
+                """
+            ),
+            {"org_id": payload.org_id, "plan_id": payload.plan_id, "provider": provider.name, "cust_id": ext.get("provider_customer_id"), "sub_id": ext.get("provider_sub_id")},
+        )
+    await db.commit()
+    await write_audit_log(
+        actor_email=payload.requested_by_email,
+        action="plan.assign",
+        resource_type="organization",
+        resource_id=str(payload.org_id),
+        new_values={"org_name": org["name"], "from_plan": old["code"] if old else None, "to_plan": plan["code"], "source": "razorpay", "payment_id": payload.razorpay_payment_id},
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return {"ok": True, "org_id": str(payload.org_id), "plan_code": plan["code"]}

@@ -27,7 +27,10 @@ export async function apiFetch<T = unknown>(
     ...rest,
   });
 
-  if (response.status === 401) {
+  // Surface the backend's specific 401 detail on login (e.g. "Wrong password. Please try again.")
+  // instead of the generic "Unauthorized" that was previously thrown for every 401.
+  const isLoginRequest = path.includes("/auth/login");
+  if (response.status === 401 && !isLoginRequest && !skipAuth) {
     // Only redirect to login if not already there (prevents infinite reload loop)
     if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login") && !window.location.pathname.startsWith("/register")) {
       window.dispatchEvent(new Event("auth:unauthorized"));

@@ -26,6 +26,9 @@ dist/
 .vscode/
 .idea/
 
+secrets/
+*.json
+
 # OS
 .DS_Store
 Thumbs.db

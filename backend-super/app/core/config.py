@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     # Stripe is used only when a secret key is configured; otherwise the
     # deterministic MockProvider handles dev/test flows.
     STRIPE_SECRET_KEY: str = os.getenv("STRIPE_SECRET_KEY", "")
+    RAZORPAY_KEY_ID: str = os.getenv("RAZORPAY_KEY_ID", "")
+    RAZORPAY_KEY_SECRET: str = os.getenv("RAZORPAY_KEY_SECRET", "")
+    RAZORPAY_WEBHOOK_SECRET: str = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
     # Refunds at or below this amount (cents) execute with MFA step-up only;
     # larger refunds additionally require a second admin's approval.
     REFUND_APPROVAL_THRESHOLD_CENTS: int = int(

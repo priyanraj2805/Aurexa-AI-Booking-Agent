@@ -166,12 +166,14 @@ async def rerank_chunks(query: str, chunks: List[dict], top_k: int = 5) -> List[
             timeout=RERANK_HARD_TIMEOUT_SECONDS,
         )
         if not raw:
+            logger.debug("rerank_chunks: LLM returned empty, fallback to BM25")
             return chunks[:top_k]
 
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         parsed = json.loads(match.group(0)) if match else {}
         scores_map = parsed.get("scores", {})
         if not isinstance(scores_map, dict):
+            logger.debug("rerank_chunks: invalid scores format, fallback to BM25")
             return chunks[:top_k]
 
         for idx_str, score in scores_map.items():
@@ -185,8 +187,11 @@ async def rerank_chunks(query: str, chunks: List[dict], top_k: int = 5) -> List[
         for c in chunks:
             c.setdefault("rerank_score", 0)
         return sorted(chunks, key=lambda x: x.get("rerank_score", 0), reverse=True)[:top_k]
+    except asyncio.TimeoutError:
+        logger.debug("rerank_chunks timeout after %ss, fallback to BM25", RERANK_HARD_TIMEOUT_SECONDS)
+        return chunks[:top_k]
     except Exception as e:
-        logger.warning(f"rerank_chunks failed, returning BM25 order: {e}")
+        logger.debug(f"rerank_chunks failed (fallback to BM25): {e}")
         return chunks[:top_k]
 
 

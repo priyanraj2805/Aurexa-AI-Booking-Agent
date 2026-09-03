@@ -135,6 +135,27 @@ function TranscriptPanel({
   const [sendingMessage, setSendingMessage] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const orgId = user?.org_id ?? "";
+  const searchParams = useSearchParams();
+  const highlightMessageId = searchParams.get("highlight");
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const h = searchParams.get("highlight");
+    if (h) {
+      setHighlightedMessageId(h);
+      const t = setTimeout(() => setHighlightedMessageId(null), 3500);
+      return () => clearTimeout(t);
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!highlightedMessageId || !messages) return;
+    const t = setTimeout(() => {
+      const el = document.querySelector(`[data-message-id="${highlightedMessageId}"]`);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 400);
+    return () => clearTimeout(t);
+  }, [highlightedMessageId, messages]);
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -299,15 +320,22 @@ function TranscriptPanel({
             No messages recorded for this session yet.
           </p>
         ) : (
-          <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-2">
+          <>
+            <style>{`@keyframes highlight { 0% { background-color: hsl(var(--primary) / 0.25); transform: scale(1.01); } 50% { background-color: hsl(var(--primary) / 0.15); } 100% { background-color: transparent; transform: scale(1); } }`}</style>
+            <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-2">
             {messages.map((m) => {
               const isHumanMessage = m.sender_type === "human";
               const isSystemMessage = m.sender_type === "system" || (m.metadata && typeof m.metadata === "object" && ("human_joined" in m.metadata || "human_left" in m.metadata));
+              const isHighlighted = highlightedMessageId === m.id;
 
               // System notification messages (human joined/left)
               if (isSystemMessage) {
                 return (
-                  <div key={m.id} className="flex justify-center">
+                  <div
+                    key={m.id}
+                    data-message-id={m.id}
+                    className={`flex justify-center transition-all ${isHighlighted ? "ring-2 ring-primary/40 rounded-full animate-pulse" : ""}`}
+                  >
                     <span className="text-xs text-muted-foreground bg-secondary/50 px-3 py-1.5 rounded-full">
                       {resolveTranscriptText(m.content) || "—"}
                     </span>
@@ -318,7 +346,11 @@ function TranscriptPanel({
               // Human agent message - different styling
               if (isHumanMessage) {
                 return (
-                  <div key={m.id} className="flex gap-3 justify-start">
+                  <div
+                    key={m.id}
+                    data-message-id={m.id}
+                    className={`flex gap-3 justify-start transition-all ${isHighlighted ? "ring-2 ring-blue-500/40 rounded-xl bg-blue-500/20 animate-pulse p-1" : ""}`}
+                  >
                     <div className="flex-shrink-0 mt-1">
                       <div className="size-7 rounded-full bg-blue-500 flex items-center justify-center">
                         <Headset className="size-3.5 text-white" />
@@ -340,7 +372,10 @@ function TranscriptPanel({
               return (
                 <div
                   key={m.id}
-                  className={`flex gap-3 ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                  data-message-id={m.id}
+                  className={`flex gap-3 ${m.role === "user" ? "justify-end" : "justify-start"} transition-all ${
+                    isHighlighted ? "ring-2 ring-primary/40 rounded-xl bg-primary/10 animate-pulse p-1" : ""
+                  }`}
                 >
                   {m.role === "agent" && (
                     <div className="flex-shrink-0 mt-1">
@@ -374,7 +409,8 @@ function TranscriptPanel({
               );
             })}
             <div ref={messagesEndRef} />
-          </div>
+            </div>
+          </>
         )}
 
         {/* Human Message Input (only visible when human is active) */}
@@ -442,9 +478,37 @@ export default function ConversationsPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const searchParams = useSearchParams();
+  const highlightId = searchParams.get("highlight");
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const h = searchParams.get("highlight");
+    if (h) {
+      setHighlightedId(h);
+      const t = setTimeout(() => setHighlightedId(null), 3500);
+      return () => clearTimeout(t);
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!highlightedId || !sessions) return;
+    const t = setTimeout(() => {
+      const el = document.querySelector(`[data-conversation-id="${highlightedId}"]`);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 400);
+    return () => clearTimeout(t);
+  }, [highlightedId, sessions]);
+
   useEffect(() => {
     const id = searchParams.get("id");
     if (id) setSelectedId(id);
+    // If highlight is a session id and we're on list view, also auto-select it to show transcript
+    const h = searchParams.get("highlight");
+    if (h && !id) {
+      // Check if highlight matches a session on current page - if so, highlight the row (handled above)
+      // If highlight looks like a session UUID and not found on this page, try to navigate to it
+      // For now, just highlight the row if present
+    }
   }, [searchParams]);
 
   if (selectedId) {
@@ -475,6 +539,7 @@ export default function ConversationsPage() {
 
   return (
     <>
+      <style>{`@keyframes highlight { 0% { background-color: hsl(var(--primary) / 0.25); transform: scale(1.01); } 50% { background-color: hsl(var(--primary) / 0.15); } 100% { background-color: transparent; transform: scale(1); } }`}</style>
       <div className="mb-6">
         <div>
           <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">Inbox</h1>
@@ -548,11 +613,13 @@ export default function ConversationsPage() {
             <div className="md:hidden divide-y divide-border">
               {sessions.map((s) => {
                 const ident = customerIdentity(s);
+                const isHighlighted = highlightedId === s.id;
                 return (
                 <div
                   key={s.id}
+                  data-conversation-id={s.id}
                   onClick={() => setSelectedId(s.id)}
-                  className="p-4 hover:bg-secondary/50 transition-colors cursor-pointer space-y-2"
+                  className={`p-4 hover:bg-secondary/50 transition-colors cursor-pointer space-y-2 ${isHighlighted ? "bg-primary/10 ring-2 ring-primary/30 animate-pulse" : ""}`}
                 >
                   <div className="flex items-center justify-between">
                     <span className="text-[13px] font-medium">
@@ -649,11 +716,13 @@ export default function ConversationsPage() {
               <tbody>
                 {sessions.map((s) => {
                   const ident = customerIdentity(s);
+                  const isHighlighted = highlightedId === s.id;
                   return (
                   <tr
                     key={s.id}
+                    data-conversation-id={s.id}
                     onClick={() => setSelectedId(s.id)}
-                    className="hover:bg-secondary/50 transition-colors cursor-pointer"
+                    className={`hover:bg-secondary/50 transition-colors cursor-pointer ${isHighlighted ? "bg-primary/10 ring-2 ring-inset ring-primary/30 animate-pulse" : ""}`}
                   >
                     <td className="px-4 py-4 border-b border-border">
                       <span className="text-[13px] font-medium text-foreground">{ident.title}</span>

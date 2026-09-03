@@ -847,13 +847,45 @@ async def process_message_with_graph(
 
     field_definitions = _resolve_field_definitions_snapshot(chat_session, org_config_dict)
     fd_map = {fd.name: fd for fd in field_definitions}
-    next_action = StateEvaluator.determine_next_action(
-        field_meta.get("follow_up_fields", []),
-        current_intent,
-        field_definitions=field_definitions,
-    )
-    directive = str(next_action.get("directive") or "TEXT_INPUT")
-    directive_meta = next_action.get("field_meta")
+    # Hybrid meeting type selection before booking
+    _collected = chat_session.collected_data if isinstance(chat_session.collected_data, dict) else {}
+    _need_meeting_type = False
+    try:
+        from app.models.config import MeetingMode as _MM
+        from app.engine.message_processor import _normalize_meeting_mode as _normM
+        _m = _normM(getattr(org_config, "meeting_mode", None))
+        _allow = bool(getattr(org_config, "allow_hybrid_selection", False))
+        if not field_meta.get("follow_up_fields") and not _collected.get("meeting_type") and _m == _MM.HYBRID and _allow:
+            # Check if user just sent Online/Offline
+            _msg_lower = (message_text or "").strip().lower()
+            if _msg_lower in ("online", "offline"):
+                _collected["meeting_type"] = "ONLINE" if _msg_lower == "online" else "OFFLINE"
+                chat_session.collected_data = _collected
+                await crud_chat.update_chat_session(db, session_id, chat_session)
+            else:
+                _need_meeting_type = True
+    except Exception:
+        pass
+    if _need_meeting_type:
+        directive = "REQUIRE_SELECT"
+        field_meta.update({
+            "name": "meeting_type",
+            "type": "select",
+            "label": "Meeting Type",
+            "options": ["Online", "Offline"],
+            "description": "How would you like to meet?",
+            "icon": "💻",
+        })
+        next_action = {"directive": directive, "field_meta": dict(field_meta)}
+        directive_meta = dict(field_meta)
+    else:
+        next_action = StateEvaluator.determine_next_action(
+            field_meta.get("follow_up_fields", []),
+            current_intent,
+            field_definitions=field_definitions,
+        )
+        directive = str(next_action.get("directive") or "TEXT_INPUT")
+        directive_meta = next_action.get("field_meta")
     is_valid_directive, validation_error = StateEvaluator.validate_directive_payload(
         directive,
         directive_meta,
@@ -1095,9 +1127,41 @@ async def process_message_with_graph(
 
         if confirmation_event_key not in sent_confirmations:
             booking_details = dict(chat_session.collected_data or {})
+            # Enrich with meeting link from DB so SMTP mail shows Join Meeting (offline vs online)
+            # LangGraph path previously used only collected_data, missing meeting_ fields -> mail showed Offline
+            try:
+                from app.models.booking import Booking
+                from sqlalchemy import select as _sel
+                _res = await db.execute(_sel(Booking).where(Booking.session_id == session_id, Booking.org_id == org.id).order_by(Booking.created_at.desc()).limit(1))
+                _bk = _res.scalars().first()
+                if _bk:
+                    if getattr(_bk, "meeting_type_snapshot", None):
+                        booking_details["meeting_type_snapshot"] = _bk.meeting_type_snapshot
+                    if getattr(_bk, "meeting_link_status", None):
+                        _st = _bk.meeting_link_status
+                        booking_details["meeting_link_status"] = _st.value if hasattr(_st, "value") else str(_st)
+                    if getattr(_bk, "meeting_link_url", None):
+                        booking_details["meeting_link_url"] = _bk.meeting_link_url
+                    if getattr(_bk, "meeting_link_provider", None):
+                        _pv = _bk.meeting_link_provider
+                        booking_details["meeting_link_provider"] = _pv.value if hasattr(_pv, "value") else str(_pv)
+                    # Add dual time if missing
+                    if getattr(_bk, "user_timezone", None) and "user_timezone" not in booking_details:
+                        booking_details["user_timezone"] = _bk.user_timezone
+                    if getattr(_bk, "org_timezone_snapshot", None) and "org_timezone_snapshot" not in booking_details:
+                        booking_details["org_timezone_snapshot"] = _bk.org_timezone_snapshot
+            except Exception as _enrich_err:
+                logger.warning(f"Failed to enrich booking_details with meeting link for email: {_enrich_err}")
             customer_email = booking_details.get("email")
             admin_email = booking_details.get("admin_email")
+            # Explicit: always send confirmation email if email present, even when email OTP was disabled and phone OTP verified
             if customer_email:
+                logger.info(
+                    "Booking confirmation email queued for %s via %s (session %s)",
+                    customer_email,
+                    "phone-otp" if getattr(chat_session, "phone_otp_verified", False) else "email-otp/none",
+                    session_id,
+                )
                 try:
                     if background_tasks:
                         background_tasks.add_task(
@@ -1270,6 +1334,31 @@ async def process_message_with_graph(
                     "I couldn't load the available times right now. "
                     "Please pick a date and I'll try again."
                 )
+
+    # Enforce one-by-one flow: override LLM dump of "provide name, email, phone, date, time" with deterministic single-field ask
+    _single_field_directives = {
+        "TEXT_INPUT",
+        "REQUIRE_EMAIL_INPUT",
+        "REQUIRE_PHONE_INPUT",
+        "REQUIRE_DATE_PICKER",
+        "REQUIRE_TIME_SLOT_GRID",
+        "REQUIRE_SELECT",
+        "REQUIRE_TEXTAREA",
+        "REQUIRE_NUMBER_INPUT",
+    }
+    if directive in _single_field_directives:
+        # If LLM mentions 2+ fields or lists them, replace with deterministic single-field message
+        _lower = (assistant_message or "").lower()
+        _mentions = sum(1 for _kw in ["name", "email", "phone", "date", "time"] if _kw in _lower)
+        if _mentions > 1 or ("," in assistant_message and _mentions >= 2):
+            assistant_message = message_processor._build_context_aware_response(
+                directive=directive,
+                field_meta=field_meta,
+                collected_data=dict(chat_session.collected_data or {}),
+                valid_data={},
+                errors={},
+                llm_generated_msg=assistant_message,
+            )
 
     assistant_message = _guard_user_visible_booking_message(
         assistant_message=assistant_message,

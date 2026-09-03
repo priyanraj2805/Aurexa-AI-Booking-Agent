@@ -270,3 +270,60 @@ async def set_avatar_url(
     user.avatar_url = url
     await db.commit()
     return {"avatar_url": url}
+
+
+class RazorpayOrderIn(BaseModel):
+    plan_id: str
+
+
+class RazorpayVerifyIn(BaseModel):
+    plan_id: str
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+@router.post("/razorpay/order", response_model=dict)
+async def create_razorpay_order(
+    payload: RazorpayOrderIn,
+    user: User = Depends(get_current_user),
+):
+    """Create a Razorpay order for the requested plan (proxied to control plane)."""
+    try:
+        data = await _call_control_plane(
+            "POST",
+            "/api/v1/org-billing/razorpay/order",
+            {"org_id": str(user.org_id), "plan_id": payload.plan_id},
+        )
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to create Razorpay order: {e}")
+
+
+@router.post("/razorpay/verify", response_model=dict)
+async def verify_razorpay_payment(
+    payload: RazorpayVerifyIn,
+    request: Request,
+    user: User = Depends(get_current_user),
+):
+    """Verify Razorpay payment and, on success, activate the plan."""
+    try:
+        data = await _call_control_plane(
+            "POST",
+            "/api/v1/org-billing/razorpay/verify",
+            {
+                "org_id": str(user.org_id),
+                "plan_id": payload.plan_id,
+                "razorpay_order_id": payload.razorpay_order_id,
+                "razorpay_payment_id": payload.razorpay_payment_id,
+                "razorpay_signature": payload.razorpay_signature,
+                "requested_by_email": user.email,
+            },
+        )
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Razorpay verification failed: {e}")

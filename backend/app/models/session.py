@@ -22,6 +22,7 @@ class ChatSession(Base):
     current_intent = Column(String(50), nullable=True)
     session_status = Column(String(20), default="ACTIVE", nullable=False)
     otp_verified = Column(Boolean, default=False, nullable=False)
+    phone_otp_verified = Column(Boolean, default=False, nullable=False)
     pending_cancel = Column(Boolean, default=False, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     archived_at = Column(DateTime(timezone=True), nullable=True)

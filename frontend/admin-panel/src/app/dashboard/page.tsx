@@ -151,6 +151,7 @@ function MiniTrendArea({
               <stop offset="100%" stopColor={color} stopOpacity={0} />
             </linearGradient>
           </defs>
+          <XAxis dataKey="date" hide />
           <Tooltip
             contentStyle={{
               backgroundColor: tooltipBg,
@@ -162,7 +163,7 @@ function MiniTrendArea({
             formatter={(value: number | string) => [`${value}`, "Bookings"]}
             labelFormatter={(label: string) => {
               const d = new Date(`${label}T00:00:00`);
-              return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+              return isNaN(d.getTime()) ? label : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
             }}
           />
           <Area
@@ -464,6 +465,7 @@ export default function DashboardPage() {
   const { resolvedTheme } = useTheme();
   const dark = resolvedTheme !== "light";
   const [range, setRange] = useState(7);
+  const [channelStatsChannel, setChannelStatsChannel] = useState<"web" | "whatsapp">("whatsapp");
   const MAX_FETCH_DAYS = 30;
   const { data: stats, loading: statsLoading, error: statsError } = useStats(MAX_FETCH_DAYS);
   const { data: bookings, loading: bookingsLoading, error: bookingsError } = useRecentBookings(10);
@@ -840,99 +842,100 @@ export default function DashboardPage() {
           )}
         </div>
         <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
-          <CardHeader
-            icon={MessageSquare}
-            title="WhatsApp Stats"
-            subtitle="Last 7 days performance"
-            iconClass="bg-green-500/15 text-green-500"
-          />
-          {statsLoading ? (
-            <div className="flex items-center justify-center text-muted-foreground text-sm h-48">
-              <Loader2 className="size-4 animate-spin" />
-            </div>
-          ) : statsError ? (
-            <div className="flex items-center gap-2 text-red-500 text-sm py-8">
-              <AlertCircle className="size-4" /> {statsError}
-            </div>
-          ) : hasActivity ? (
-            <>
-              <MiniTrendArea
-                data={stats?.whatsapp_bookings_by_day?.slice(-7).map((d) => ({
-                  date: d.date,
-                  count: d.count,
-                })) ?? []}
-                color={chartColors.green}
-                tooltipBg={chartColors.tooltipBg}
-                tooltipBorder={chartColors.tooltipBorder}
-                tickColor={chartColors.tick}
-              />
-              <div className="mt-4 space-y-3">
-                <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
-                  <div className="flex items-center gap-2">
-                    <span className="size-1.5 rounded-full bg-green-500" />
-                    <span className="text-sm text-muted-foreground">Bookings today</span>
+          {(() => {
+            const channelMap = {
+              web: { label: "Web", data: stats?.web_bookings_by_day, color: chartColors.blue, iconBg: "bg-blue-500/15 text-blue-500", empty: "No web bookings yet." },
+              whatsapp: { label: "WhatsApp", data: stats?.whatsapp_bookings_by_day, color: chartColors.green, iconBg: "bg-green-500/15 text-green-500", empty: "No WhatsApp activity yet." },
+            } as const;
+            const cfg = channelMap[channelStatsChannel];
+            const series = cfg.data?.slice(-7) ?? [];
+            const today = series.length ? series[series.length - 1].count : 0;
+            const weekTotal = cfg.data ? cfg.data.slice(-7).reduce((s, d) => s + d.count, 0) : 0;
+            const avg = cfg.data ? Math.round(weekTotal / 7) : 0;
+            const maxVal = Math.max(...(series.map((d) => d.count) ?? [0]), 1);
+            return (
+              <>
+                <CardHeader
+                  icon={MessageSquare}
+                  title={`${cfg.label} Stats`}
+                  subtitle="Last 7 days performance"
+                  iconClass={cfg.iconBg}
+                  action={
+                    <select
+                      value={channelStatsChannel}
+                      onChange={(e) => setChannelStatsChannel(e.target.value as "web" | "whatsapp")}
+                      className="rounded-md border border-border bg-background px-2 py-1 text-xs text-muted-foreground outline-none focus:border-primary"
+                    >
+                      <option value="web">Web</option>
+                      <option value="whatsapp">WhatsApp</option>
+                    </select>
+                  }
+                />
+                {statsLoading ? (
+                  <div className="flex items-center justify-center text-muted-foreground text-sm h-48">
+                    <Loader2 className="size-4 animate-spin" />
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline justify-end gap-2">
-                      <span className="text-xl font-bold">
-                        {stats?.whatsapp_bookings_by_day?.[stats.whatsapp_bookings_by_day.length - 1]?.count ?? 0}
-                      </span>
-                    </div>
-                    <StatMiniBar
-                      value={stats?.whatsapp_bookings_by_day?.[stats.whatsapp_bookings_by_day.length - 1]?.count ?? 0}
-                      max={Math.max(...(stats?.whatsapp_bookings_by_day?.slice(-7).map((d) => d.count) ?? [0]))}
-                      color={chartColors.green}
+                ) : statsError ? (
+                  <div className="flex items-center gap-2 text-red-500 text-sm py-8">
+                    <AlertCircle className="size-4" /> {statsError}
+                  </div>
+                ) : hasActivity ? (
+                  <>
+                    <MiniTrendArea
+                      data={series.map((d) => ({ date: d.date, count: d.count }))}
+                      color={cfg.color}
+                      tooltipBg={chartColors.tooltipBg}
+                      tooltipBorder={chartColors.tooltipBorder}
+                      tickColor={chartColors.tick}
                     />
-                  </div>
-                </div>
-                <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
-                  <div className="flex items-center gap-2">
-                    <span className="size-1.5 rounded-full bg-emerald-500" />
-                    <span className="text-sm text-muted-foreground">Avg per day</span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline justify-end gap-2">
-                      <span className="text-xl font-bold">
-                        {stats?.whatsapp_bookings_by_day
-                          ? Math.round(stats.whatsapp_bookings_by_day.slice(-7).reduce((s, d) => s + d.count, 0) / 7)
-                          : 0}
-                      </span>
+                    <div className="mt-4 space-y-3">
+                      <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
+                        <div className="flex items-center gap-2">
+                          <span className="size-1.5 rounded-full" style={{ backgroundColor: cfg.color }} />
+                          <span className="text-sm text-muted-foreground">Bookings today</span>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-baseline justify-end gap-2">
+                            <span className="text-xl font-bold">{today}</span>
+                          </div>
+                          <StatMiniBar value={today} max={maxVal} color={cfg.color} />
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
+                        <div className="flex items-center gap-2">
+                          <span className="size-1.5 rounded-full bg-emerald-500" />
+                          <span className="text-sm text-muted-foreground">Avg per day</span>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-baseline justify-end gap-2">
+                            <span className="text-xl font-bold">{avg}</span>
+                          </div>
+                          <StatMiniBar value={avg} max={maxVal} color={cfg.color} />
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
+                        <div className="flex items-center gap-2">
+                          <span className="size-1.5 rounded-full bg-teal-500" />
+                          <span className="text-sm text-muted-foreground">{cfg.label} this week</span>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-baseline justify-end gap-2">
+                            <span className="text-xl font-bold">{weekTotal}</span>
+                          </div>
+                          <StatMiniBar value={weekTotal} max={maxVal} color={cfg.color} />
+                        </div>
+                      </div>
                     </div>
-                    <StatMiniBar
-                      value={stats?.whatsapp_bookings_by_day ? Math.round(stats.whatsapp_bookings_by_day.slice(-7).reduce((s, d) => s + d.count, 0) / 7) : 0}
-                      max={Math.max(...(stats?.whatsapp_bookings_by_day?.slice(-7).map((d) => d.count) ?? [0]))}
-                      color={chartColors.green}
-                    />
+                  </>
+                ) : (
+                  <div className="text-center py-10">
+                    <MessageSquare className="size-8 text-muted-foreground/40 mx-auto mb-2" />
+                    <p className="text-muted-foreground text-sm">{cfg.empty}</p>
                   </div>
-                </div>
-                <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
-                  <div className="flex items-center gap-2">
-                    <span className="size-1.5 rounded-full bg-teal-500" />
-                    <span className="text-sm text-muted-foreground">WhatsApp this week</span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline justify-end gap-2">
-                      <span className="text-xl font-bold">
-                        {stats?.whatsapp_bookings_by_day
-                          ? stats.whatsapp_bookings_by_day.slice(-7).reduce((s, d) => s + d.count, 0)
-                          : 0}
-                      </span>
-                    </div>
-                    <StatMiniBar
-                      value={stats?.whatsapp_bookings_by_day ? stats.whatsapp_bookings_by_day.slice(-7).reduce((s, d) => s + d.count, 0) : 0}
-                      max={Math.max(...(stats?.whatsapp_bookings_by_day?.slice(-7).map((d) => d.count) ?? [0]))}
-                      color={chartColors.green}
-                    />
-                  </div>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="text-center py-10">
-              <MessageSquare className="size-8 text-muted-foreground/40 mx-auto mb-2" />
-              <p className="text-muted-foreground text-sm">No WhatsApp activity yet.</p>
-            </div>
-          )}
+                )}
+              </>
+            );
+          })()}
         </div>
       </div>
 

@@ -75,6 +75,7 @@ async def get_chat_session(
         current_intent=db_session.current_intent,
         session_status=db_session.session_status or "ACTIVE",
         otp_verified=db_session.otp_verified or False,
+        phone_otp_verified=getattr(db_session, "phone_otp_verified", False) or False,
         pending_cancel=db_session.pending_cancel or False,
     )
 
@@ -106,6 +107,7 @@ async def get_or_create_channel_session(
             current_intent=db_session.current_intent,
             session_status=db_session.session_status or "ACTIVE",
             otp_verified=db_session.otp_verified or False,
+            phone_otp_verified=getattr(db_session, "phone_otp_verified", False) or False,
             pending_cancel=db_session.pending_cancel or False,
         )
 
@@ -141,6 +143,7 @@ async def update_chat_session(
         db_session.current_intent = state.current_intent
         db_session.session_status = state.session_status
         db_session.otp_verified = state.otp_verified
+        db_session.phone_otp_verified = getattr(state, "phone_otp_verified", False)
         db_session.pending_cancel = state.pending_cancel
         flag_modified(db_session, "state_data")
         flag_modified(db_session, "missing_fields")

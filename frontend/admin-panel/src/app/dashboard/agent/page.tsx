@@ -1,6 +1,17 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
+import { useRouter } from "next/navigation";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Loader2, AlertCircle, Save, Bot, Sparkles,
   Plus, GripVertical, Trash2, ChevronDown, ChevronUp,
@@ -467,6 +478,10 @@ export default function AgentCorePage() {
 
   // Booking settings state
   const [requireOtp, setRequireOtp] = useState(true);
+  const [requirePhoneOtp, setRequirePhoneOtp] = useState(false);
+  const [meetingMode, setMeetingMode] = useState<"OFFLINE_ONLY" | "ONLINE_ONLY" | "HYBRID">("OFFLINE_ONLY");
+  const [allowHybridSelection, setAllowHybridSelection] = useState(true);
+  const [meetingProviderDefault, setMeetingProviderDefault] = useState<"NONE" | "GOOGLE_MEET">("NONE");
 
   // Sync config → local state when loaded
   useEffect(() => {
@@ -474,6 +489,14 @@ export default function AgentCorePage() {
       setBrandColor(config.ui_brand_color || "#3B82F6");
       setBusinessName(config.business_name || "");
       setRequireOtp(config.require_otp ?? true);
+      setRequirePhoneOtp((config as unknown as { require_phone_otp?: boolean }).require_phone_otp ?? false);
+      const mp = (config as unknown as { meeting_policy?: { meeting_mode?: string; allow_hybrid_selection?: boolean; meeting_provider_default?: string } }).meeting_policy;
+      if (mp) {
+        setMeetingMode((mp.meeting_mode as "OFFLINE_ONLY" | "ONLINE_ONLY" | "HYBRID") || "OFFLINE_ONLY");
+        setAllowHybridSelection(mp.allow_hybrid_selection ?? true);
+        const prov = (mp.meeting_provider_default as "NONE" | "GOOGLE_MEET") || "NONE";
+        setMeetingProviderDefault(prov === "GOOGLE_MEET" ? "GOOGLE_MEET" : "NONE");
+      }
       setLogoUrl((config as unknown as { logo_url?: string | null }).logo_url || null);
       setLogoUrlInput((config as unknown as { logo_url?: string | null }).logo_url || "");
       if (config.custom_prompts && typeof config.custom_prompts === "object") {
@@ -522,6 +545,82 @@ export default function AgentCorePage() {
     }
   }, [config]);
 
+  // ── Unsaved changes guard ────────────────────────
+  const router = useRouter();
+  const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
+  const [pendingUrl, setPendingUrl] = useState<string | null>(null);
+
+  const isDirty = useMemo(() => {
+    if (!config) return false;
+    if (fieldsDirtyRef.current) return true;
+    const origPersona = (config.custom_prompts || {}) as PersonaConfig;
+    const origTone = String(origPersona.tone || "professional").toLowerCase();
+    const curTone = String(persona.tone || "professional").toLowerCase();
+    // Normalize tone comparison (same as backend)
+    const norm = (t: string) => {
+      const l = t.toLowerCase();
+      if (l.includes("casual") || l.includes("warm")) return "casual";
+      if (l.includes("formal") || l.includes("polite")) return "formal";
+      if (l.includes("friendly")) return "friendly";
+      if (l.includes("empathetic")) return "empathetic";
+      if (l.includes("concise") || l.includes("direct")) return "professional";
+      return l || "professional";
+    };
+    if (norm(origTone) !== norm(curTone)) return true;
+    if ((origPersona.agent_name || "") !== (persona.agent_name || "")) return true;
+    if ((origPersona.greeting_message || "") !== (persona.greeting_message || "")) return true;
+    if ((origPersona.industry_context || "") !== (persona.industry_context || "")) return true;
+    if ((origPersona.custom_instructions || "") !== (persona.custom_instructions || "")) return true;
+    if ((origPersona.business_name || "") !== (persona.business_name || "")) return true;
+    if ((origPersona.business_tagline || "") !== (persona.business_tagline || "")) return true;
+    if ((config.ui_brand_color || "#3B82F6").toLowerCase() !== (brandColor || "#3B82F6").toLowerCase()) return true;
+    const origBusinessName = (config as unknown as { business_name?: string | null }).business_name || "";
+    if ((origBusinessName || "") !== (businessName || "")) return true;
+    const origLogo = (config as unknown as { logo_url?: string | null }).logo_url || null;
+    if ((origLogo || null) !== (logoUrl || null)) return true;
+    if ((config.require_otp ?? true) !== requireOtp) return true;
+    const origPhoneOtp = (config as unknown as { require_phone_otp?: boolean }).require_phone_otp ?? false;
+    if (origPhoneOtp !== requirePhoneOtp) return true;
+    const mp = (config as unknown as { meeting_policy?: { meeting_mode?: string; allow_hybrid_selection?: boolean; meeting_provider_default?: string } }).meeting_policy;
+    if (mp) {
+      if ((mp.meeting_mode || "OFFLINE_ONLY") !== meetingMode) return true;
+      if ((mp.allow_hybrid_selection ?? true) !== allowHybridSelection) return true;
+      if ((mp.meeting_provider_default || "NONE") !== meetingProviderDefault) return true;
+    }
+    return false;
+  }, [config, fieldDefs, persona, brandColor, businessName, logoUrl, requireOtp, requirePhoneOtp, meetingMode, allowHybridSelection, meetingProviderDefault]);
+
+  useEffect(() => {
+    if (!isDirty) return;
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [isDirty]);
+
+  useEffect(() => {
+    if (!isDirty) return;
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      const anchor = target.closest("a");
+      if (anchor && anchor.href && anchor.target !== "_blank" && !anchor.href.includes("#")) {
+        try {
+          const url = new URL(anchor.href);
+          if (url.origin === window.location.origin && url.pathname !== window.location.pathname) {
+            e.preventDefault();
+            e.stopPropagation();
+            setPendingUrl(anchor.href);
+            setShowUnsavedDialog(true);
+          }
+        } catch {}
+      }
+    };
+    document.addEventListener("click", handleClick, true);
+    return () => document.removeEventListener("click", handleClick, true);
+  }, [isDirty]);
+
   const handleSave = async () => {
     // Validate fields before saving
     const invalid = fieldDefs.find((f) => !f.name || !f.label);
@@ -543,7 +642,11 @@ export default function AgentCorePage() {
         ui_brand_color: brandColor,
         custom_prompts: persona,
         require_otp: requireOtp,
+        require_phone_otp: requirePhoneOtp,
         business_name: businessName,
+        meeting_mode: meetingMode,
+        allow_hybrid_selection: allowHybridSelection,
+        meeting_provider_default: meetingProviderDefault,
       };
       // Only send field definitions when the user actually modified them —
       // the backend validates core booking fields (name, email, phone, date,
@@ -553,6 +656,7 @@ export default function AgentCorePage() {
         payload.field_definitions = orderedDefs;
       }
       await api.put("/dashboard/agent-config", payload);
+      fieldsDirtyRef.current = false;
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 2000);
       await refetch();
@@ -953,7 +1057,7 @@ export default function AgentCorePage() {
         </div>
 
         <div className="grid grid-cols-1 gap-5">
-          {/* OTP Verification toggle */}
+          {/* Email OTP Verification toggle */}
           <div className="flex items-start gap-4 p-4 bg-background border border-border rounded-lg">
             <div className="flex items-center justify-center size-9 rounded-lg bg-green-500/10 text-green-500 shrink-0 mt-0.5">
               <ShieldCheck className="size-5" />
@@ -961,7 +1065,7 @@ export default function AgentCorePage() {
             <div className="flex-1 min-w-0">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 sm:gap-4">
                 <div>
-                  <p className="text-[13px] font-semibold">OTP Verification</p>
+                  <p className="text-[13px] font-semibold">Email OTP Verification</p>
                   <p className="text-[12px] text-muted-foreground mt-0.5">
                     Require email OTP verification before confirming a booking. Recommended for preventing spam.
                   </p>
@@ -986,7 +1090,45 @@ export default function AgentCorePage() {
                 {requireOtp ? (
                   <span className="text-green-500">✓ Enabled — customers must verify via email OTP</span>
                 ) : (
-                  <span className="text-amber-500">⚠ Disabled — bookings will be confirmed without OTP</span>
+                  <span className="text-amber-500">⚠ Disabled — bookings will be confirmed without email OTP</span>
+                )}
+              </p>
+            </div>
+          </div>
+          {/* Phone OTP Verification toggle */}
+          <div className="flex items-start gap-4 p-4 bg-background border border-border rounded-lg">
+            <div className="flex items-center justify-center size-9 rounded-lg bg-blue-500/10 text-blue-500 shrink-0 mt-0.5">
+              <ShieldCheck className="size-5" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 sm:gap-4">
+                <div>
+                  <p className="text-[13px] font-semibold">Phone OTP Verification</p>
+                  <p className="text-[12px] text-muted-foreground mt-0.5">
+                    Require SMS OTP to the customer&apos;s phone before confirming.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={requirePhoneOtp}
+                  onClick={() => setRequirePhoneOtp(!requirePhoneOtp)}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
+                    requirePhoneOtp ? "bg-primary" : "bg-secondary"
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block size-5 rounded-full bg-white shadow-lg ring-0 transition-transform ${
+                      requirePhoneOtp ? "translate-x-5" : "translate-x-0"
+                    }`}
+                  />
+                </button>
+              </div>
+              <p className="text-[11px] mt-2 font-medium">
+                {requirePhoneOtp ? (
+                  <span className="text-blue-500">✓ Enabled — customers must verify via SMS OTP</span>
+                ) : (
+                  <span className="text-amber-500">⚠ Disabled — bookings will be confirmed without phone OTP</span>
                 )}
               </p>
             </div>
@@ -994,8 +1136,58 @@ export default function AgentCorePage() {
         </div>
       </div>
 
-      {/* API Key */}
+      {/* Meeting Policy - moved from Integrations > Meeting Providers */}
       <div className="bg-card border border-border rounded-xl p-4 sm:p-6">
+        <div className="flex items-center gap-3 mb-5">
+          <div className="flex items-center justify-center size-9 rounded-lg bg-violet-500/10 text-violet-500">
+            <CalendarDays className="size-5" />
+          </div>
+          <div>
+            <h3 className="text-base font-semibold">Meeting Policy</h3>
+            <p className="text-[13px] text-muted-foreground">Control which meeting types are allowed in booking flows.</p>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <div>
+            <label className="text-[13px] font-semibold text-foreground mb-1.5 block">Meeting Mode</label>
+            <select
+              value={meetingMode}
+              onChange={(e) => setMeetingMode(e.target.value as "OFFLINE_ONLY" | "ONLINE_ONLY" | "HYBRID")}
+              className="w-full bg-background border border-border rounded-lg px-4 py-2.5 text-sm"
+            >
+              <option value="OFFLINE_ONLY">Offline only</option>
+              <option value="ONLINE_ONLY">Online only</option>
+              <option value="HYBRID">Hybrid</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-[13px] font-semibold text-foreground mb-1.5 block">Default Online Provider</label>
+            <select
+              value={meetingProviderDefault}
+              onChange={(e) => setMeetingProviderDefault(e.target.value as "NONE" | "GOOGLE_MEET")}
+              className="w-full bg-background border border-border rounded-lg px-4 py-2.5 text-sm"
+            >
+              <option value="NONE">None</option>
+              <option value="GOOGLE_MEET">Google Meet</option>
+            </select>
+          </div>
+        </div>
+        <div className="flex items-center justify-between border border-border rounded-lg px-4 py-3">
+          <div>
+            <p className="text-sm font-medium">Allow hybrid user selection</p>
+            <p className="text-xs text-muted-foreground">When disabled in HYBRID mode, booking flow is restricted to a single deterministic option.</p>
+          </div>
+          <button
+            onClick={() => setAllowHybridSelection((v) => !v)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${allowHybridSelection ? "bg-green-500" : "bg-muted"}`}
+          >
+            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${allowHybridSelection ? "translate-x-6" : "translate-x-1"}`} />
+          </button>
+        </div>
+      </div>
+
+      {/* API Key - hidden: not useful for users, use Widget Token in Integration → Web Widget instead */}
+      <div className="hidden">
         <div className="flex items-center gap-3 mb-5">
           <div className="flex items-center justify-center size-9 rounded-lg bg-primary/10 text-primary">
             <KeyRound className="size-5" />
@@ -1061,6 +1253,41 @@ export default function AgentCorePage() {
 
       {/* Knowledge Base (Vectorless RAG: PDF upload + website crawl) */}
       <KnowledgeBaseSection />
+
+      <AlertDialog open={showUnsavedDialog} onOpenChange={setShowUnsavedDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Unsaved changes</AlertDialogTitle>
+            <AlertDialogDescription>
+              You have unsaved changes. If you leave now, your changes will be lost. Save before leaving?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="flex-col sm:flex-row gap-2">
+            <AlertDialogCancel onClick={() => { setShowUnsavedDialog(false); setPendingUrl(null); }}>Stay on page</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                fieldsDirtyRef.current = false;
+                setShowUnsavedDialog(false);
+                if (pendingUrl) window.location.href = pendingUrl;
+                setPendingUrl(null);
+              }}
+              className="bg-amber-500 hover:bg-amber-600"
+            >
+              Discard changes
+            </AlertDialogAction>
+            <AlertDialogAction
+              onClick={async () => {
+                setShowUnsavedDialog(false);
+                await handleSave();
+                if (pendingUrl) window.location.href = pendingUrl;
+                setPendingUrl(null);
+              }}
+            >
+              Save and leave
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }

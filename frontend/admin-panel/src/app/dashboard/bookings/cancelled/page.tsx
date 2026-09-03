@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useSearchParams } from "next/navigation";
 import { Loader2, AlertCircle, CalendarX2, ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import { useCancelledBookings } from "@/hooks/use-dashboard";
@@ -34,10 +35,33 @@ export default function CancelledBookingsPage() {
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
 
+  const searchParams = useSearchParams();
+  const highlightId = searchParams.get("highlight");
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const h = searchParams.get("highlight");
+    if (h) {
+      setHighlightedId(h);
+      const t = setTimeout(() => setHighlightedId(null), 3500);
+      return () => clearTimeout(t);
+    }
+  }, [searchParams]);
+
   const { data, loading, error } = useCancelledBookings(page, 10, { search, fromDate, toDate });
+
+  useEffect(() => {
+    if (!highlightedId) return;
+    const t = setTimeout(() => {
+      const el = document.querySelector(`[data-booking-id="${highlightedId}"]`);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 300);
+    return () => clearTimeout(t);
+  }, [highlightedId, data]);
 
   return (
     <>
+      <style>{`@keyframes highlight { 0% { background-color: hsl(var(--primary) / 0.25); transform: scale(1.01); } 50% { background-color: hsl(var(--primary) / 0.15); } 100% { background-color: transparent; transform: scale(1); } }`}</style>
       <div className="flex items-end justify-between mb-2">
         <div>
           <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">
@@ -91,7 +115,13 @@ export default function CancelledBookingsPage() {
               {/* Mobile card view */}
               <div className="md:hidden space-y-3">
                 {data.items.map((b) => (
-                  <div key={b.id} className="flex items-start gap-3 p-4 border border-border rounded-lg bg-background/50">
+                  <div
+                    key={b.id}
+                    data-booking-id={b.id}
+                    className={`flex items-start gap-3 p-4 border rounded-lg bg-background/50 transition-all ${
+                      highlightedId === b.id ? "border-primary bg-primary/10 ring-2 ring-primary/30 animate-pulse" : "border-border"
+                    }`}
+                  >
                     <div className="flex items-center justify-center size-8 rounded-full bg-red-500/10 text-red-500 text-xs font-semibold shrink-0">
                       {getInitials(b.customer_name)}
                     </div>
@@ -126,7 +156,11 @@ export default function CancelledBookingsPage() {
                 </thead>
                 <tbody>
                   {data.items.map((b) => (
-                    <tr key={b.id} className="hover:bg-secondary/50 transition-colors">
+                    <tr
+                      key={b.id}
+                      data-booking-id={b.id}
+                      className={`hover:bg-secondary/50 transition-colors ${highlightedId === b.id ? "bg-primary/10 ring-2 ring-inset ring-primary/30 animate-pulse" : ""}`}
+                    >
                       <td className="px-4 py-4 text-[13px] border-b border-border">
                         <div className="flex items-center gap-3">
                           <div className="flex items-center justify-center size-8 rounded-full bg-red-500/10 text-red-500 text-xs font-semibold">

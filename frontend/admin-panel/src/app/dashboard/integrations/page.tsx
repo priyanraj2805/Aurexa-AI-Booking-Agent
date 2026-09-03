@@ -220,6 +220,7 @@ export default function IntegrationsPage() {
   const [wtRegenerating, setWtRegenerating] = useState(false);
   const [wtCopied, setWtCopied] = useState(false);
   const [wtRevealed, setWtRevealed] = useState(false);
+  const [justRegenerated, setJustRegenerated] = useState(false);
 
   useEffect(() => {
     loadWhatsAppConfig();
@@ -354,9 +355,11 @@ export default function IntegrationsPage() {
   const loadWidgetToken = async () => {
     setWtLoading(true);
     try {
-      const data = await api.get<WidgetTokenData>("/dashboard/widget-token");
+      const data = await api.get<WidgetTokenData>(`/dashboard/widget-token?t=${Date.now()}`);
+      console.log("[WidgetToken] Loaded", data.masked_token);
       setWidgetToken(data);
-    } catch {
+    } catch (e) {
+      console.log("[WidgetToken] Load failed", e);
       // Token doesn't exist yet — backend will generate on first GET
     }
     setWtLoading(false);
@@ -364,13 +367,24 @@ export default function IntegrationsPage() {
 
   const regenerateWidgetToken = async () => {
     setWtRegenerating(true);
+    const oldMasked = widgetToken?.masked_token || "";
+    console.log("[WidgetToken] Regenerate clicked, old", oldMasked);
     try {
       const data = await api.post<WidgetTokenData>("/dashboard/widget-token/regenerate");
+      console.log("[WidgetToken] Regenerated", data.widget_token, data.masked_token, "old", oldMasked, "changed", oldMasked !== data.masked_token);
       setWidgetToken(data);
       setWtRevealed(true);
-      setTimeout(() => setWtRevealed(false), 3000);
-      toast.success("Widget token regenerated.");
+      setJustRegenerated(true);
+      setTimeout(() => setJustRegenerated(false), 6000);
+      try {
+        await navigator.clipboard.writeText(data.widget_token);
+        toast.success(`Widget token regenerated! Old ${oldMasked} -> New ${data.masked_token} (copied)`);
+      } catch {
+        toast.success(`Widget token regenerated! ${oldMasked} -> ${data.masked_token} (now revealed)`);
+      }
+      setTimeout(() => setWtRevealed(false), 15000);
     } catch (err: unknown) {
+      console.error("[WidgetToken] Regenerate failed", err);
       toast.error(err instanceof Error ? err.message : "Failed to regenerate widget token");
     }
     setWtRegenerating(false);
@@ -709,22 +723,24 @@ export default function IntegrationsPage() {
       status:
         meetingProviders?.active_meeting_provider && meetingProviders.active_meeting_provider !== "NONE"
           ? `${meetingProviders.active_meeting_provider.replace("_", " ")} Active`
-          : meetingProviders?.google_meet_connected || meetingProviders?.microsoft_teams_connected || meetingProviders?.zoom_connected
-            ? "Connected"
+          : meetingProviders?.google_meet_connected
+            ? "Inactive"
             : "Not Connected",
       statusClass:
         meetingProviders?.active_meeting_provider && meetingProviders.active_meeting_provider !== "NONE"
           ? "bg-green-500/10 text-green-500"
-          : meetingProviders?.google_meet_connected || meetingProviders?.microsoft_teams_connected || meetingProviders?.zoom_connected
-            ? "bg-blue-500/10 text-blue-600"
-            : "bg-amber-500/10 text-amber-600",
-      description: "Connect Google Meet, Teams, or Zoom for online bookings.",
+          : meetingProviders?.google_meet_connected
+            ? "bg-amber-500/10 text-amber-600"
+            : "bg-muted/10 text-muted-foreground",
+      description: "Connect Google Meet for online bookings.",
     },
   ];
 
   const comingSoonIntegrations = [
     { title: "Slack", icon: Hash, iconBg: "bg-purple-500" },
     { title: "HubSpot", icon: Link2, iconBg: "bg-orange-500" },
+    { title: "Microsoft Teams", icon: MessageCircle, iconBg: "bg-[#6264A7]" },
+    { title: "Zoom", icon: Video, iconBg: "bg-[#2D8CFF]" },
   ];
 
   return (
@@ -886,7 +902,7 @@ export default function IntegrationsPage() {
                   </div>
                   {widgetToken && (
                     <button
-                      onClick={() => setConfirmAction("regenerate_token")}
+                      onClick={() => { console.log("[WidgetToken] Regenerate button clicked"); setConfirmAction("regenerate_token"); }}
                       disabled={wtRegenerating}
                       className="flex items-center gap-2 text-[12px] font-medium px-3 py-1.5 rounded-md border border-amber-200 dark:border-amber-800 text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950 transition-colors disabled:opacity-50"
                     >
@@ -896,11 +912,6 @@ export default function IntegrationsPage() {
                   )}
                 </div>
                 <div className="p-6 md:p-8">
-                  <p className="text-sm text-muted-foreground mb-6 leading-relaxed">
-                    A <strong>widget token</strong> is a limited-purpose key used to embed the chat widget on your website. 
-                    It cannot access your dashboard, modify bookings, or view sensitive data.
-                  </p>
-                  
                   {wtLoading ? (
                     <div className="flex items-center gap-3">
                       <Loader2 className="size-4 animate-spin text-muted-foreground" />
@@ -908,25 +919,14 @@ export default function IntegrationsPage() {
                     </div>
                   ) : widgetToken ? (
                     <div className="space-y-5">
-                      <div className="bg-green-500/5 border border-green-500/20 rounded-xl p-4 flex items-start gap-3">
-                        <Shield className="size-5 text-green-500 shrink-0 mt-0.5" />
-                        <div>
-                          <p className="text-sm font-semibold text-green-600 dark:text-green-400">
-                            Widget token is active
-                          </p>
-                          <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-                            It is completely safe to embed this in your public HTML.
-                          </p>
-                        </div>
-                      </div>
                       <div>
                         <label className="text-xs font-semibold text-muted-foreground uppercase tracking-widest mb-2 block">
                           Your Active Token
                         </label>
                       <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                          <div className="flex-1 flex items-center gap-3 bg-secondary/30 border border-border rounded-xl px-4 py-3">
-                            <Code2 className="size-4 text-muted-foreground shrink-0" />
-                            <code className="text-sm font-mono text-foreground break-all tracking-tight">
+                          <div className={`flex-1 flex items-center gap-3 border rounded-xl px-4 py-3 transition-all ${justRegenerated ? "bg-green-500/10 border-green-500/30 ring-2 ring-green-500/20" : "bg-secondary/30 border-border"}`}>
+                            <Code2 className={`size-4 shrink-0 ${justRegenerated ? "text-green-600" : "text-muted-foreground"}`} />
+                            <code className={`text-sm font-mono break-all tracking-tight ${justRegenerated ? "text-green-700 dark:text-green-300" : "text-foreground"}`}>
                               {wtRevealed ? widgetToken.widget_token : widgetToken.masked_token}
                             </code>
                           </div>
@@ -963,53 +963,6 @@ export default function IntegrationsPage() {
                     </div>
                   )}
                 </div>
-              </div>
-
-              <div className="bg-card border border-border rounded-2xl p-6 space-y-4 shadow-sm">
-                <h3 className="font-semibold text-base">Public URL Configuration</h3>
-                <p className="text-sm text-muted-foreground">
-                  Set the public API base used in embed snippets (Cloudflare backend URL + <code>/api/v1</code>).
-                </p>
-                <div className="flex flex-col md:flex-row gap-3">
-                  <input
-                    type="text"
-                    value={publicApiBaseInput}
-                    onChange={(e) => setPublicApiBaseInput(e.target.value)}
-                    placeholder={`${runtimeApiBase}`}
-                    className="flex-1 bg-background border border-border rounded-lg px-4 py-2.5 text-sm"
-                  />
-                  <button
-                    onClick={() => persistPublicApiBase(publicApiBaseInput)}
-                    disabled={!publicApiBaseInput.trim()}
-                    className="text-sm font-medium px-4 py-2.5 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Save URL
-                  </button>
-                  <button
-                    onClick={() => persistPublicApiBase(runtimeApiBase)}
-                    className="text-sm font-medium px-4 py-2.5 rounded-lg border border-border hover:bg-accent"
-                  >
-                    Use Current Runtime
-                  </button>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Script source: <code>{selectedPublicApiRoot}/static/widget/widget.js</code>
-                </p>
-                {oauthWarnings.length > 0 && (
-                  <div className="space-y-2 text-xs text-amber-700 dark:text-amber-300 bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200/60 dark:border-amber-900 rounded-lg p-3">
-                    {oauthWarnings.map((warning) => (
-                      <p key={warning}>• {warning}</p>
-                    ))}
-                  </div>
-                )}
-                {Object.keys(oauthRedirectUris).length > 0 && (
-                  <div className="text-xs text-muted-foreground space-y-1">
-                    <p className="font-semibold text-foreground">OAuth Redirect URIs</p>
-                    <p>Google: <code>{oauthRedirectUris.google}</code></p>
-                    <p>Microsoft: <code>{oauthRedirectUris.microsoft}</code></p>
-                    <p>Zoom: <code>{oauthRedirectUris.zoom}</code></p>
-                  </div>
-                )}
               </div>
 
               <div className="bg-card border border-border rounded-2xl overflow-hidden shadow-sm">
@@ -1487,30 +1440,7 @@ export default function IntegrationsPage() {
                             </svg>
                           ),
                         },
-                        {
-                          key: "MICROSOFT_TEAMS" as const,
-                          title: "Microsoft Teams",
-                          description: "Host meetings via Microsoft Teams for online bookings.",
-                          connected: Boolean(meetingProviders?.microsoft_teams_connected),
-                          iconBg: "bg-[#6264A7]",
-                          icon: (
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="white">
-                              <path d="M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/>
-                            </svg>
-                          ),
-                        },
-                        {
-                          key: "ZOOM" as const,
-                          title: "Zoom",
-                          description: "Host meetings via Zoom for online bookings.",
-                          connected: Boolean(meetingProviders?.zoom_connected),
-                          iconBg: "bg-[#2D8CFF]",
-                          icon: (
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="white">
-                              <path d="M4 3h12a2 2 0 0 1 2 2v7l4-3v8l-4-3v3a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/>
-                            </svg>
-                          ),
-                        },
+
                       ].map((provider) => {
                         const isActive = meetingProviders?.active_meeting_provider === provider.key;
                         const ui = meetingProviderUi[provider.key];
@@ -1528,31 +1458,33 @@ export default function IntegrationsPage() {
                               </div>
                               <span
                                 className={`text-[11px] px-2.5 py-1 rounded-full font-semibold ${
-                                  provider.connected
-                                    ? isActive
-                                      ? "bg-green-500/15 text-green-600"
-                                      : "bg-blue-500/10 text-blue-600"
-                                    : "bg-amber-500/10 text-amber-600"
+                                  provider.connected ? "bg-green-500/15 text-green-600" : "bg-muted text-muted-foreground"
                                 }`}
                               >
-                                {provider.connected ? (isActive ? "Active" : "Connected") : "Not Connected"}
+                                {provider.connected ? "Connected" : "Not Connected"}
                               </span>
                             </div>
 
                             <div className="flex flex-wrap gap-2">
                               {provider.connected ? (
                                 <>
-                                  <button
-                                    onClick={() => handleActivateMeetingProvider(provider.key)}
-                                    disabled={meetingProviderSaving || isActive}
-                                    className={`text-sm font-medium px-4 py-2 rounded-lg transition-colors ${
-                                      isActive
-                                        ? "bg-green-500/20 text-green-600 border border-green-500/30"
-                                        : "bg-secondary border border-border hover:bg-accent disabled:opacity-50"
-                                    }`}
-                                  >
-                                    {isActive ? "✓ Active Provider" : "Set Active"}
-                                  </button>
+                                  {isActive ? (
+                                    <button
+                                      onClick={() => handleActivateMeetingProvider("NONE")}
+                                      disabled={meetingProviderSaving}
+                                      className="text-sm font-medium px-4 py-2 rounded-lg border border-amber-500/20 text-amber-600 hover:bg-amber-500/10 disabled:opacity-50"
+                                    >
+                                      Disable
+                                    </button>
+                                  ) : (
+                                    <button
+                                      onClick={() => handleActivateMeetingProvider(provider.key)}
+                                      disabled={meetingProviderSaving}
+                                      className="text-sm font-medium px-4 py-2 rounded-lg bg-secondary border border-border hover:bg-accent disabled:opacity-50"
+                                    >
+                                      Set Active
+                                    </button>
+                                  )}
                                   <button
                                     onClick={() => handleMeetingProviderDisconnect(provider.key)}
                                     disabled={ui?.disconnecting}
@@ -1580,101 +1512,6 @@ export default function IntegrationsPage() {
                       If a provider link is unavailable at confirmation time, customers are informed explicitly and asked to retry or contact support.
                     </div>
 
-                    {meetingProviders?.active_meeting_provider && meetingProviders.active_meeting_provider !== "NONE" && (
-                      <div className="pt-4 border-t border-border">
-                        <button
-                          onClick={() => handleActivateMeetingProvider("NONE")}
-                          disabled={meetingProviderSaving}
-                          className="text-sm text-muted-foreground hover:text-foreground"
-                        >
-                          Disable active meeting provider
-                        </button>
-                      </div>
-                    )}
-
-                    {/* Meeting Policy */}
-                    <div className="border-t border-border pt-8">
-                      <h4 className="font-semibold text-sm mb-1">Meeting Policy</h4>
-                      <p className="text-xs text-muted-foreground mb-4">
-                        Control which meeting types are allowed in booking flows. Changes are applied immediately across admin and widget surfaces.
-                      </p>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                        <div>
-                          <label className="text-[13px] font-semibold text-foreground mb-1.5 block">Meeting Mode</label>
-                          <select
-                            title="Meeting mode"
-                            value={meetingMode}
-                            onChange={(e) => applyMeetingMode(e.target.value as "OFFLINE_ONLY" | "ONLINE_ONLY" | "HYBRID")}
-                            className="w-full bg-background border border-border rounded-lg px-4 py-2.5 text-sm"
-                          >
-                            <option value="OFFLINE_ONLY">Offline only</option>
-                            <option value="ONLINE_ONLY">Online only</option>
-                            <option value="HYBRID">Hybrid</option>
-                          </select>
-                        </div>
-                        <div>
-                          <label className="text-[13px] font-semibold text-foreground mb-1.5 block">Default Online Provider</label>
-                          <select
-                            title="Meeting provider default"
-                            value={meetingProviderDefault}
-                            onChange={(e) => setMeetingProviderDefault(e.target.value as "NONE" | "GOOGLE_MEET" | "MICROSOFT_TEAMS" | "ZOOM")}
-                            className="w-full bg-background border border-border rounded-lg px-4 py-2.5 text-sm"
-                          >
-                            <option value="NONE">None</option>
-                            <option value="GOOGLE_MEET">Google Meet</option>
-                            <option value="MICROSOFT_TEAMS">Microsoft Teams</option>
-                            <option value="ZOOM">Zoom</option>
-                          </select>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center justify-between border border-border rounded-lg px-4 py-3 mb-4">
-                        <div>
-                          <p className="text-sm font-medium">Allow hybrid user selection</p>
-                          <p className="text-xs text-muted-foreground">
-                            When disabled in HYBRID mode, booking flow is restricted to a single deterministic option.
-                          </p>
-                        </div>
-                        <button
-                          onClick={() => setAllowHybridSelection((v) => !v)}
-                          title="Toggle hybrid option selection"
-                          aria-label="Toggle hybrid option selection"
-                          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                            allowHybridSelection ? "bg-green-500" : "bg-muted"
-                          }`}
-                        >
-                          <span
-                            className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
-                              allowHybridSelection ? "translate-x-6" : "translate-x-1"
-                            }`}
-                          />
-                        </button>
-                      </div>
-
-                      <div className="text-xs text-muted-foreground mb-4">
-                        Available in widget:{" "}
-                        <span className="font-medium text-foreground">
-                          {meetingMode === "ONLINE_ONLY"
-                            ? "ONLINE"
-                            : meetingMode === "OFFLINE_ONLY"
-                              ? "OFFLINE"
-                              : allowHybridSelection
-                                ? "ONLINE + OFFLINE"
-                                : "OFFLINE"}
-                        </span>
-                      </div>
-
-                      <div className="flex justify-end">
-                        <button
-                          onClick={saveMeetingPolicy}
-                          disabled={policySaving}
-                          className="flex items-center gap-2 text-sm font-medium px-6 py-2.5 rounded-xl bg-primary text-primary-foreground hover:bg-primary/90 transition-all shadow-sm"
-                        >
-                          {policySaving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
-                          Save Meeting Policy
-                        </button>
-                      </div>
-                    </div>
                   </>
                 )}
               </div>

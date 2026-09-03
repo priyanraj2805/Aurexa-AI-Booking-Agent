@@ -48,6 +48,20 @@ class BillingProvider(ABC):
     ) -> dict:
         """Refund a paid invoice; returns {'refund_id': str}."""
 
+    async def create_razorpay_order(self, amount_cents: int, currency: str = "INR", receipt: str | None = None) -> dict:
+        """Create a Razorpay order. Default mock for providers that don't support Razorpay."""
+        return {
+            "id": f"order_{uuid_mod.uuid4().hex[:12]}",
+            "amount": amount_cents,
+            "currency": currency,
+            "receipt": receipt or f"rcpt_{uuid_mod.uuid4().hex[:8]}",
+            "status": "created",
+        }
+
+    async def verify_razorpay_payment(self, order_id: str, payment_id: str, signature: str) -> bool:
+        """Verify Razorpay signature. Default true for mock."""
+        return True
+
 
 class MockProvider(BillingProvider):
     name = "mock"
@@ -68,6 +82,76 @@ class MockProvider(BillingProvider):
         self, provider_invoice_id: str, amount_cents: int, reason: str
     ) -> dict:
         return {"refund_id": f"re_mock_{provider_invoice_id[:8]}"}
+
+    async def create_razorpay_order(self, amount_cents: int, currency: str = "INR", receipt: str | None = None) -> dict:
+        return {
+            "id": f"order_mock_{uuid_mod.uuid4().hex[:12]}",
+            "amount": amount_cents,
+            "currency": currency,
+            "receipt": receipt or f"rcpt_mock_{uuid_mod.uuid4().hex[:8]}",
+            "status": "created",
+        }
+
+    async def verify_razorpay_payment(self, order_id: str, payment_id: str, signature: str) -> bool:
+        # Mock always succeeds in dev
+        return True
+
+
+class RazorpayProvider(BillingProvider):
+    name = "razorpay"
+
+    def _client(self):
+        import razorpay
+
+        return razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+
+    async def create_subscription(self, org_id: str, plan_code: str) -> dict:
+        # Razorpay uses orders + payments, not recurring subscriptions in this simple flow.
+        # We create a stub subscription record and rely on order verification for activation.
+        return {
+            "provider_customer_id": f"cus_rzp_{org_id[:8]}",
+            "provider_sub_id": f"sub_rzp_{uuid_mod.uuid4().hex[:12]}",
+        }
+
+    async def create_razorpay_order(self, amount_cents: int, currency: str = "INR", receipt: str | None = None) -> dict:
+        # Razorpay expects amount in paise (cents for INR), we store cents as paise
+        client = self._client()
+        # Run sync call in thread
+        import asyncio
+
+        def _create():
+            return client.order.create(
+                {
+                    "amount": amount_cents,  # already in paise/cents
+                    "currency": currency,
+                    "receipt": receipt or f"rcpt_{uuid_mod.uuid4().hex[:10]}",
+                }
+            )
+
+        order = await asyncio.to_thread(_create)
+        return order
+
+    async def verify_razorpay_payment(self, order_id: str, payment_id: str, signature: str) -> bool:
+        import hmac
+        import hashlib
+
+        # If webhook secret not set, fall back to key secret for signature check (dev)
+        secret = settings.RAZORPAY_WEBHOOK_SECRET or settings.RAZORPAY_KEY_SECRET
+        if not secret:
+            return True  # no secret configured -> mock success in dev
+        payload = f"{order_id}|{payment_id}"
+        expected = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, signature)
+
+    async def cancel_subscription(self, provider_sub_id: str) -> dict:
+        return {"ok": True, "provider_sub_id": provider_sub_id}
+
+    async def retry_invoice(self, provider_invoice_id: str) -> dict:
+        return {"paid": True, "payment_intent": f"pi_rzp_{provider_invoice_id[:8]}"}
+
+    async def refund_invoice(self, provider_invoice_id: str, amount_cents: int, reason: str) -> dict:
+        # Razorpay refunds via payment_id; for now mock
+        return {"refund_id": f"re_rzp_{provider_invoice_id[:8]}"}
 
 
 class StripeProvider(BillingProvider):
@@ -110,6 +194,8 @@ class StripeProvider(BillingProvider):
 
 
 def get_provider() -> BillingProvider:
+    if settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET:
+        return RazorpayProvider()
     if settings.STRIPE_SECRET_KEY:
         return StripeProvider()
     return MockProvider()

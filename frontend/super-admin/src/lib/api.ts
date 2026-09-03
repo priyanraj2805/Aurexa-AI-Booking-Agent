@@ -27,7 +27,9 @@ export async function apiFetch<T = unknown>(
     ...rest,
   });
 
-  if (response.status === 401) {
+  // Don't mask the backend's specific 401 message on login (e.g. "Wrong password. Please try again.")
+  const isLoginRequest = path.includes("/auth/login");
+  if (response.status === 401 && !isLoginRequest && !skipAuth) {
     if (
       typeof window !== "undefined" &&
       !window.location.pathname.startsWith("/login") &&

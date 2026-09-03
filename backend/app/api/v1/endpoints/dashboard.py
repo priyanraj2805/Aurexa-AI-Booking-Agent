@@ -478,6 +478,10 @@ class BookingPageItem(BaseModel):
     created_at: datetime
     session_id: Optional[str] = None
     session_status: Optional[str] = None
+    meeting_type_snapshot: Optional[str] = None
+    meeting_link_status: Optional[str] = None
+    meeting_link_url: Optional[str] = None
+    meeting_link_provider: Optional[str] = None
 
 
 class BookingPageResponse(BaseModel):
@@ -529,6 +533,7 @@ class AgentConfigResponse(BaseModel):
     business_name: Optional[str] = None
     api_key: str
     require_otp: bool = True
+    require_phone_otp: bool = False
     max_booking_days_ahead: int = 90
     session_retention_days: int = 30
     session_cleanup_frequency: str = "daily"
@@ -554,6 +559,7 @@ class AgentConfigUpdate(BaseModel):
     org_name: Optional[str] = None
     business_name: Optional[str] = None
     require_otp: Optional[bool] = None
+    require_phone_otp: Optional[bool] = None
     max_booking_days_ahead: Optional[int] = None
     session_retention_days: Optional[int] = Field(default=None, ge=7, le=365)
     session_cleanup_frequency: Optional[str] = None
@@ -792,6 +798,10 @@ class CalendarEventItem(BaseModel):
     slot_end: Optional[datetime] = None
     created_at: datetime
     collected_data: dict = {}  # full state_data from ChatSession
+    meeting_type_snapshot: Optional[str] = None
+    meeting_link_status: Optional[str] = None
+    meeting_link_url: Optional[str] = None
+    meeting_link_provider: Optional[str] = None
 
 
 @router.get("/recent-bookings", response_model=List[BookingItem])
@@ -1046,20 +1056,29 @@ async def list_bookings(
         .limit(page_size)
     )
 
-    items = [
-        BookingPageItem(
-            id=str(b.id),
-            customer_name=b.customer_name or "Unknown",
-            customer_email=b.customer_email or "",
-            customer_phone=b.customer_phone,
-            slot_start=slot.start_time if slot else None,
-            slot_end=slot.end_time if slot else None,
-            created_at=b.created_at,
-            session_id=str(s.id) if s else None,
-            session_status=s.session_status if s else None,
+    items = []
+    for b, slot, s in result.all():
+        _mls = b.meeting_link_status
+        _mls_val = _mls.value if _mls is not None and hasattr(_mls, "value") else (str(_mls) if _mls is not None else None)
+        _mlp = b.meeting_link_provider
+        _mlp_val = _mlp.value if _mlp is not None and hasattr(_mlp, "value") else (str(_mlp) if _mlp is not None else None)
+        items.append(
+            BookingPageItem(
+                id=str(b.id),
+                customer_name=b.customer_name or "Unknown",
+                customer_email=b.customer_email or "",
+                customer_phone=b.customer_phone,
+                slot_start=slot.start_time if slot else None,
+                slot_end=slot.end_time if slot else None,
+                created_at=b.created_at,
+                session_id=str(s.id) if s else None,
+                session_status=s.session_status if s else None,
+                meeting_type_snapshot=b.meeting_type_snapshot,
+                meeting_link_status=_mls_val,
+                meeting_link_url=b.meeting_link_url,
+                meeting_link_provider=_mlp_val,
+            )
         )
-        for b, slot, s in result.all()
-    ]
     return BookingPageResponse(items=items, total=total, page=page, page_size=page_size)
 
 
@@ -1191,6 +1210,7 @@ async def get_agent_config(
         business_name=getattr(config, "business_name", None),
         api_key=masked_api_key,
         require_otp=config.require_otp if hasattr(config, "require_otp") else True,
+        require_phone_otp=getattr(config, "require_phone_otp", False),
         max_booking_days_ahead=config.max_booking_days_ahead
         if hasattr(config, "max_booking_days_ahead")
         else 90,
@@ -1242,6 +1262,7 @@ async def update_agent_config(
         "timezone": config.timezone,
         "ui_brand_color": config.ui_brand_color,
         "require_otp": config.require_otp if hasattr(config, "require_otp") else None,
+        "require_phone_otp": getattr(config, "require_phone_otp", False),
         "max_booking_days_ahead": config.max_booking_days_ahead
         if hasattr(config, "max_booking_days_ahead")
         else None,
@@ -1297,6 +1318,8 @@ async def update_agent_config(
         config.ui_brand_color = update.ui_brand_color
     if update.require_otp is not None:
         config.require_otp = update.require_otp
+    if update.require_phone_otp is not None:
+        config.require_phone_otp = update.require_phone_otp
     if update.max_booking_days_ahead is not None:
         config.max_booking_days_ahead = update.max_booking_days_ahead
     if update.session_retention_days is not None:
@@ -1353,6 +1376,7 @@ async def update_agent_config(
             "require_otp": config.require_otp
             if hasattr(config, "require_otp")
             else None,
+            "require_phone_otp": getattr(config, "require_phone_otp", False),
             "max_booking_days_ahead": config.max_booking_days_ahead
             if hasattr(config, "max_booking_days_ahead")
             else None,
@@ -2692,6 +2716,7 @@ async def get_widget_token(
 
 @router.post("/widget-token/regenerate", response_model=WidgetTokenResponse)
 async def regenerate_widget_token(
+    request: Request,
     user: User = Depends(get_current_user),
     _: None = Depends(deny_impersonation),
     db: AsyncSession = Depends(get_db),
@@ -2707,11 +2732,14 @@ async def regenerate_widget_token(
     if not config:
         raise HTTPException(status_code=404, detail="Configuration not found")
 
+    old_masked = (config.widget_token[:8] + "..." + config.widget_token[-4:]) if config.widget_token else "none"
+    logger.info(f"Widget token regenerate for org {user.org_id} user {user.email} old {old_masked} ip {request.client.host if request.client else ''}")
     config.widget_token = _generate_widget_token()
     await db.commit()
     await db.refresh(config)
 
     masked = config.widget_token[:8] + "..." + config.widget_token[-4:]
+    logger.info(f"Widget token regenerated for org {user.org_id} new {masked}")
     return WidgetTokenResponse(
         widget_token=config.widget_token,
         masked_token=masked,
@@ -3324,6 +3352,11 @@ async def get_calendar_events(
     items = []
     for booking, slot, session in rows:
         collected = _filter_collected_data(session.state_data if session and session.state_data else {})
+        # Normalize enums to plain strings for JSON
+        _mls = booking.meeting_link_status
+        _mls_val = _mls.value if _mls is not None and hasattr(_mls, "value") else (str(_mls) if _mls is not None else None)
+        _mlp = booking.meeting_link_provider
+        _mlp_val = _mlp.value if _mlp is not None and hasattr(_mlp, "value") else (str(_mlp) if _mlp is not None else None)
         items.append(
             CalendarEventItem(
                 id=str(booking.id),
@@ -3334,6 +3367,10 @@ async def get_calendar_events(
                 slot_end=slot.end_time if slot else None,
                 created_at=booking.created_at,
                 collected_data=collected,
+                meeting_type_snapshot=booking.meeting_type_snapshot,
+                meeting_link_status=_mls_val,
+                meeting_link_url=booking.meeting_link_url,
+                meeting_link_provider=_mlp_val,
             )
         )
     return items
@@ -3389,6 +3426,10 @@ async def get_upcoming_bookings(
     items = []
     for booking, slot, session in rows:
         collected = _filter_collected_data(session.state_data if session and session.state_data else {})
+        _mls = booking.meeting_link_status
+        _mls_val = _mls.value if _mls is not None and hasattr(_mls, "value") else (str(_mls) if _mls is not None else None)
+        _mlp = booking.meeting_link_provider
+        _mlp_val = _mlp.value if _mlp is not None and hasattr(_mlp, "value") else (str(_mlp) if _mlp is not None else None)
         items.append(
             CalendarEventItem(
                 id=str(booking.id),
@@ -3399,6 +3440,10 @@ async def get_upcoming_bookings(
                 slot_end=slot.end_time if slot else None,
                 created_at=booking.created_at,
                 collected_data=collected,
+                meeting_type_snapshot=booking.meeting_type_snapshot,
+                meeting_link_status=_mls_val,
+                meeting_link_url=booking.meeting_link_url,
+                meeting_link_provider=_mlp_val,
             )
         )
     return items

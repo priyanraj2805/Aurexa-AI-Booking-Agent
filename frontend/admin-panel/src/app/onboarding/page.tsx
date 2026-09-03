@@ -86,7 +86,7 @@ export default function OnboardingPage() {
   const [hours, setHours] = useState<DayRow[]>(defaultHours);
   const [agentName, setAgentName] = useState("Booking Assistant");
   const [greeting, setGreeting] = useState("Hello! How can I help you book an appointment today?");
-  const [tone, setTone] = useState("friendly and professional");
+  const [tone, setTone] = useState("friendly");
   const [requireOtp, setRequireOtp] = useState(true);
 
   // Auth guard + timezone detection + already-completed check
@@ -322,17 +322,16 @@ export default function OnboardingPage() {
               </div>
               <div className="space-y-1.5">
                 <Label>Tone</Label>
-                <Select value={tone} onValueChange={(v) => setTone(v ?? "friendly and professional")}>
+                <Select value={tone} onValueChange={(v) => setTone(v ?? "friendly")}>
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="friendly and professional">
-                      Friendly & Professional
-                    </SelectItem>
-                    <SelectItem value="casual and warm">Casual & Warm</SelectItem>
-                    <SelectItem value="formal and polite">Formal & Polite</SelectItem>
-                    <SelectItem value="concise and direct">Concise & Direct</SelectItem>
+                    <SelectItem value="professional">Professional</SelectItem>
+                    <SelectItem value="friendly">Friendly</SelectItem>
+                    <SelectItem value="casual">Casual</SelectItem>
+                    <SelectItem value="formal">Formal</SelectItem>
+                    <SelectItem value="empathetic">Empathetic</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

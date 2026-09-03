@@ -168,8 +168,16 @@ export function AnnouncementBell() {
       );
       setBookingUnread((prev) => Math.max(0, prev - 1));
     }
+    const highlight = item.resource_id ? `?highlight=${encodeURIComponent(item.resource_id)}` : "";
     if (item.kind === "booking_cancelled") {
-      router.push("/dashboard/bookings/cancelled");
+      router.push(`/dashboard/bookings/cancelled${highlight}`);
+    } else if (item.resource_type === "booking" && item.resource_id) {
+      router.push(`/dashboard/bookings${highlight}`);
+    } else if ((item.resource_type === "conversation" || item.resource_type === "session") && item.resource_id) {
+      router.push(`/dashboard/conversations?highlight=${encodeURIComponent(item.resource_id)}`);
+    } else if (item.resource_id) {
+      // Fallback: try bookings highlight, else conversations
+      router.push(`/dashboard/bookings${highlight}`);
     } else {
       router.push("/dashboard/bookings");
     }

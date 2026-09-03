@@ -116,6 +116,10 @@ export interface BookingItem {
 export interface BookingPageItem extends BookingItem {
   session_id: string | null;
   session_status: string | null;
+  meeting_type_snapshot?: string | null;
+  meeting_link_status?: string | null;
+  meeting_link_url?: string | null;
+  meeting_link_provider?: string | null;
 }
 
 export interface CancelledBookingItem {
@@ -186,6 +190,7 @@ export interface AgentConfig {
   business_name?: string | null;
   api_key: string;
   require_otp: boolean;
+  require_phone_otp: boolean;
   max_booking_days_ahead: number;
   meeting_policy: {
     meeting_mode: "OFFLINE_ONLY" | "ONLINE_ONLY" | "HYBRID";

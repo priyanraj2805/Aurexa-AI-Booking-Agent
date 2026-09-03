@@ -250,6 +250,17 @@ def _build_otp_context_key(
     return f"otp:{chat_session.session_id}:{email}:{date_value}:{time_value}"
 
 
+def _build_phone_otp_context_key(
+    chat_session: ChatSessionState,
+) -> str:
+    if not isinstance(chat_session.collected_data, dict):
+        return f"otp_phone:{chat_session.session_id}:::"
+    phone = str(chat_session.collected_data.get("phone") or "").strip()
+    date_value = _normalize_otp_date_component(chat_session.collected_data.get("date"))
+    time_value = _normalize_otp_time_component(chat_session.collected_data.get("time"))
+    return f"otp_phone:{chat_session.session_id}:{phone}:{date_value}:{time_value}"
+
+
 def _normalize_otp_date_component(raw: Any) -> str:
     text = str(raw or "").strip()
     if not text:
@@ -753,6 +764,7 @@ async def process_message(
         ).strip()
     org_timezone = str(org_config.timezone) if org_config.timezone else "UTC"
     require_otp = getattr(org_config, "require_otp", True)
+    require_phone_otp = getattr(org_config, "require_phone_otp", False)
     max_booking_days = getattr(org_config, "max_booking_days_ahead", 90)
 
     field_definitions = parse_field_definitions(
@@ -878,14 +890,18 @@ async def process_message(
         intent = "EDIT_DATA"
         chat_session.current_intent = intent
 
-    # ── Resend OTP override ───────────────────────────────────
-    if (
-        require_otp
-        and not chat_session.otp_verified
-        and any(kw in user_msg_lower for kw in RESEND_KEYWORDS)
-    ):
+    # ── Resend OTP override (channel-aware) ───────────────────
+    _phone_verified = getattr(chat_session, "phone_otp_verified", False)
+    _email_needs_resend = require_otp and not chat_session.otp_verified
+    _phone_needs_resend = require_phone_otp and not _phone_verified
+    if (_email_needs_resend or _phone_needs_resend) and any(kw in user_msg_lower for kw in RESEND_KEYWORDS):
+        # Determine which channel to resend: email first if pending, else phone
+        _resend_channel = "email" if _email_needs_resend else "phone"
+        # If message explicitly mentions phone/sms, override to phone
+        if "phone" in user_msg_lower or "sms" in user_msg_lower or "mobile" in user_msg_lower:
+            _resend_channel = "phone" if _phone_needs_resend else "email"
         return await _handle_otp_resend(
-            db, org, chat_session, message_text, background_tasks
+            db, org, chat_session, message_text, background_tasks, channel=_resend_channel
         )
 
     # ── Change date override during time selection ────────────
@@ -1011,11 +1027,14 @@ async def process_message(
         )
         return action
 
-    # ── OTP Verification (for channels without modal support like WhatsApp) ─
+    # ── OTP Verification (channel-aware, email then phone) ─
+    _phone_verified = getattr(chat_session, "phone_otp_verified", False)
+    _needs_email_otp = require_otp and not chat_session.otp_verified
+    _needs_phone_otp = require_phone_otp and not _phone_verified
+    _needs_any_otp = _needs_email_otp or _needs_phone_otp
     match = None
     if (
-        require_otp
-        and not chat_session.otp_verified
+        _needs_any_otp
         and chat_session.session_status == "ACTIVE"
         and (not chat_session.missing_fields or len(chat_session.missing_fields) == 0)
     ):
@@ -1028,54 +1047,78 @@ async def process_message(
             otp_code = match.group(1)
             from app.crud.otp import verify_otp as crud_verify_otp
 
-            is_valid = await crud_verify_otp(db, chat_session.session_id, otp_code)
+            # Determine expected channel: email first if pending, else phone
+            _expected_channel = "email" if _needs_email_otp else "phone"
+            # Try expected channel first, then fallback to other channel if both pending
+            is_valid = False
+            _verified_channel = None
+            for _ch in ([_expected_channel] + (["phone"] if _expected_channel == "email" and _needs_phone_otp else ["email"] if _expected_channel == "phone" and _needs_email_otp else [])):
+                try:
+                    if await crud_verify_otp(db, chat_session.session_id, otp_code, channel=_ch):
+                        is_valid = True
+                        _verified_channel = _ch
+                        break
+                except ValueError as ve:
+                    # Too many attempts — propagate as 429 later
+                    raise ve
+                except Exception:
+                    continue
             if is_valid:
-                chat_session.otp_verified = True
-                chat_session.current_intent = "CONFIRM_BOOKING"
-                await crud_chat.update_chat_session(
-                    db, chat_session.session_id, chat_session
-                )
-                logger.info(f"OTP verified for session {chat_session.session_id}")
+                if _verified_channel == "phone":
+                    chat_session.phone_otp_verified = True
+                    logger.info(f"Phone OTP verified for session {chat_session.session_id}")
+                    # If email also required and not yet verified, keep intent pending
+                    if require_otp and not chat_session.otp_verified:
+                        # Need email OTP still — trigger email OTP
+                        from app.crud.otp import get_otp_policy_metadata as _get_meta
+                        _meta = await _get_meta(db, chat_session.session_id, channel="email")
+                        action = ActionPayload(
+                            message="Phone verified! Now please verify your email. I've sent a code to your email.",
+                            widget_directive="REQUIRE_OTP_MODAL",
+                            field_meta={**_meta, "channel": "email"},
+                        )
+                        await _save_transcript(db, chat_session.session_id, message_text, action.message, "REQUIRE_OTP_MODAL")
+                        return action
+                else:
+                    chat_session.otp_verified = True
+                    logger.info(f"Email OTP verified for session {chat_session.session_id}")
+                    # If phone OTP also required, don't mark CONFIRM_BOOKING yet — trigger phone OTP
+                    if require_phone_otp and not _phone_verified:
+                        await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+                        msg, directive, booking_field_meta = await _handle_booking_flow(
+                            db, org, org_config, chat_session, "CONFIRM_BOOKING", require_otp, fd_map, background_tasks, require_phone_otp=require_phone_otp
+                        )
+                        # _handle_booking_flow will emit phone OTP modal
+                        action = ActionPayload(message=msg, widget_directive=directive, field_meta=booking_field_meta)
+                        await _save_transcript(db, chat_session.session_id, message_text, msg, directive, intent="CONFIRM_BOOKING")
+                        return action
+                # If all required verifications done
+                _still_needs_email = require_otp and not chat_session.otp_verified
+                _still_needs_phone = require_phone_otp and not getattr(chat_session, "phone_otp_verified", False)
+                if not _still_needs_email and not _still_needs_phone:
+                    chat_session.current_intent = "CONFIRM_BOOKING"
+                    await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+                    logger.info(f"All OTP verified for session {chat_session.session_id}")
 
-                msg, directive, booking_field_meta = await _handle_booking_flow(
-                    db,
-                    org,
-                    org_config,
-                    chat_session,
-                    "CONFIRM_BOOKING",
-                    require_otp,
-                    fd_map,
-                    background_tasks,
-                )
-                action = ActionPayload(
-                    message=msg,
-                    widget_directive=directive,
-                    field_meta=booking_field_meta,
-                )
-                await _save_transcript(
-                    db,
-                    chat_session.session_id,
-                    message_text,
-                    msg,
-                    directive,
-                    intent="CONFIRM_BOOKING",
-                )
-                return action
+                    msg, directive, booking_field_meta = await _handle_booking_flow(
+                        db, org, org_config, chat_session, "CONFIRM_BOOKING", require_otp, fd_map, background_tasks, require_phone_otp=require_phone_otp
+                    )
+                    action = ActionPayload(message=msg, widget_directive=directive, field_meta=booking_field_meta)
+                    await _save_transcript(db, chat_session.session_id, message_text, msg, directive, intent="CONFIRM_BOOKING")
+                    return action
+                # Fallthrough if still pending other channel (already handled above)
             else:
                 from app.crud.otp import get_otp_policy_metadata
 
+                # Determine which channel's policy to show
+                _fail_channel = _expected_channel
+                _meta = await get_otp_policy_metadata(db, chat_session.session_id, channel=_fail_channel)
                 action = ActionPayload(
                     message="Invalid or expired OTP code. Please try again or say 'resend' to get a new code.",
                     widget_directive="REQUIRE_OTP_MODAL",
-                    field_meta=await get_otp_policy_metadata(db, chat_session.session_id),
+                    field_meta={**_meta, "channel": _fail_channel},
                 )
-                await _save_transcript(
-                    db,
-                    chat_session.session_id,
-                    message_text,
-                    action.message,
-                    "REQUIRE_OTP_MODAL",
-                )
+                await _save_transcript(db, chat_session.session_id, message_text, action.message, "REQUIRE_OTP_MODAL")
                 return action
 
     # ── Data Validation ───────────────────────────────────────
@@ -1126,10 +1169,53 @@ async def process_message(
     logger.info(f"Missing: {chat_session.missing_fields}")
     logger.info("-----------------------------")
 
+    # ── Hybrid meeting type selection (before booking) ──
+    # If all required fields are collected but meeting_type is still missing for HYBRID with choice allowed, ask for it
+    _need_meeting_type = False
+    _meeting_mode_check = _normalize_meeting_mode(getattr(org_config, "meeting_mode", None))
+    _allow_hybrid_check = bool(getattr(org_config, "allow_hybrid_selection", False))
+    if not chat_session.missing_fields and not chat_session.collected_data.get("meeting_type"):
+        if _meeting_mode_check == MeetingMode.HYBRID and _allow_hybrid_check:
+            _need_meeting_type = True
+            # Check if user just provided meeting_type directly (Online/Offline) via select
+            _msg_lower = message_text.strip().lower()
+            if _msg_lower in ("online", "offline"):
+                _norm_type = "ONLINE" if _msg_lower == "online" else "OFFLINE"
+                chat_session.collected_data["meeting_type"] = _norm_type
+                await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+                _need_meeting_type = False
+            else:
+                # Also check LLM extracted entities for meeting_type
+                _maybe_type = None
+                if isinstance(raw_entities, dict):
+                    _maybe_type = raw_entities.get("meeting_type")
+                if isinstance(_maybe_type, str) and _maybe_type.strip().lower() in ("online", "offline"):
+                    _norm_type = "ONLINE" if _maybe_type.strip().lower() == "online" else "OFFLINE"
+                    chat_session.collected_data["meeting_type"] = _norm_type
+                    await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+                    _need_meeting_type = False
+                    # Remove from raw_entities so it doesn't interfere with other validation
+                    raw_entities.pop("meeting_type", None)
+
     # ── Determine next action ─────────────────────────────────
-    next_step = StateEvaluator.determine_next_action(
-        chat_session.missing_fields, chat_session.current_intent, field_definitions
-    )
+    if _need_meeting_type:
+        next_step = {
+            "directive": "REQUIRE_SELECT",
+            "field_meta": {
+                "name": "meeting_type",
+                "type": "select",
+                "label": "Meeting Type",
+                "placeholder": "Choose meeting type",
+                "description": "How would you like to meet?",
+                "icon": "💻",
+                "options": ["Online", "Offline"],
+                "required": True,
+            },
+        }
+    else:
+        next_step = StateEvaluator.determine_next_action(
+            chat_session.missing_fields, chat_session.current_intent, field_definitions
+        )
 
     manual_time_requires_slot_selection = (
         str(getattr(chat_session, "channel", "")).lower() == "web"
@@ -1180,6 +1266,7 @@ async def process_message(
             require_otp,
             fd_map,
             background_tasks,
+            require_phone_otp=require_phone_otp,
         )
     else:
         directive = next_step["directive"]
@@ -1202,9 +1289,31 @@ async def process_message(
                 agent_name=persona.get("agent_name", "Booking Assistant"),
             )
         else:
-            # User didn't provide data (question, complaint, greeting, etc.)
-            # Let the LLM handle the conversation naturally.
-            msg = llm_generated_msg
+            # User didn't provide data (greeting, etc.) -> still enforce one-by-one deterministic ask
+            # to prevent LLM from dumping "provide name, email, phone..." at once.
+            single_field_directives = {
+                "TEXT_INPUT",
+                "REQUIRE_EMAIL_INPUT",
+                "REQUIRE_PHONE_INPUT",
+                "REQUIRE_DATE_PICKER",
+                "REQUIRE_TIME_SLOT_GRID",
+                "REQUIRE_SELECT",
+                "REQUIRE_TEXTAREA",
+                "REQUIRE_NUMBER_INPUT",
+            }
+            if directive in single_field_directives:
+                msg = _build_context_aware_response(
+                    directive=directive,
+                    field_meta=next_step.get("field_meta"),
+                    collected_data=chat_session.collected_data,
+                    valid_data=valid_data,
+                    errors=errors,
+                    llm_generated_msg=llm_generated_msg,
+                    agent_name=persona.get("agent_name", "Booking Assistant"),
+                )
+            else:
+                # For ASK_QUESTION / TEXT_INPUT free chat, let LLM handle naturally
+                msg = llm_generated_msg
 
         # Re-show summary after EDIT_DATA only after an actual field change.
         if intent == "EDIT_DATA" and valid_data and not chat_session.missing_fields:
@@ -1359,46 +1468,80 @@ async def _handle_otp_resend(
     chat_session: ChatSessionState,
     message_text: str,
     background_tasks: Optional[BackgroundTasks] = None,
+    channel: str = "email",
 ) -> ActionPayload:
     from app.crud.otp import generate_otp, get_otp_policy_metadata, OTP_RESEND_CAP
-    from app.core.mail import send_otp_email
 
+    channel = (channel or "email").lower()
+    if channel not in ("email", "phone"):
+        channel = "email"
     try:
-        recipient_email = _resolve_session_email(chat_session)
-        code = await generate_otp(db, chat_session.session_id, resend=True)
-        policy_meta = await get_otp_policy_metadata(db, chat_session.session_id)
-        resend_attempt = OTP_RESEND_CAP - int(policy_meta.get("resends_left", 0))
-        otp_send_key = f"otp:{chat_session.session_id}:resend:{resend_attempt}"
-        if background_tasks:
-            background_tasks.add_task(
-                send_otp_email,
-                recipient_email,
-                code,
-                org_id=org.id,
-                idempotency_key=otp_send_key,
+        if channel == "phone":
+            phone = str(chat_session.collected_data.get("phone") or "").strip()
+            if not phone:
+                action = ActionPayload(
+                    message="I need your phone number to send a verification code. Please share your phone number.",
+                    widget_directive="REQUIRE_PHONE_INPUT",
+                )
+                await _save_transcript(db, chat_session.session_id, message_text, action.message, action.widget_directive)
+                return action
+            # For Firebase, we don't send SMS here — widget handles it via Firebase
+            # Just generate OTP record for rate limiting
+            code = await generate_otp(db, chat_session.session_id, channel="phone", resend=True)
+            policy_meta = await get_otp_policy_metadata(db, chat_session.session_id, channel="phone")
+            policy_meta["channel"] = "phone"
+            resend_attempt = OTP_RESEND_CAP - int(policy_meta.get("resends_left", 0))
+            otp_send_key = f"otp_phone:{chat_session.session_id}:resend:{resend_attempt}"
+            # No SMS sent here — widget handles Firebase SMS
+            action = ActionPayload(
+                message=f"I've sent a new verification code to {phone} via SMS. Please enter it here.",
+                widget_directive="REQUIRE_OTP_MODAL",
+                field_meta=policy_meta,
             )
         else:
-            await send_otp_email(
-                recipient_email,
-                code,
-                org_id=org.id,
-                idempotency_key=otp_send_key,
+            from app.core.mail import send_otp_email
+            recipient_email = _resolve_session_email(chat_session)
+            code = await generate_otp(db, chat_session.session_id, channel="email", resend=True)
+            policy_meta = await get_otp_policy_metadata(db, chat_session.session_id, channel="email")
+            policy_meta["channel"] = "email"
+            resend_attempt = OTP_RESEND_CAP - int(policy_meta.get("resends_left", 0))
+            otp_send_key = f"otp:{chat_session.session_id}:resend:{resend_attempt}"
+            if background_tasks:
+                background_tasks.add_task(
+                    send_otp_email,
+                    recipient_email,
+                    code,
+                    org_id=org.id,
+                    idempotency_key=otp_send_key,
+                )
+            else:
+                await send_otp_email(
+                    recipient_email,
+                    code,
+                    org_id=org.id,
+                    idempotency_key=otp_send_key,
+                )
+            action = ActionPayload(
+                message=f"I've sent a new verification code to {recipient_email}. Please check your inbox.",
+                widget_directive="REQUIRE_OTP_MODAL",
+                field_meta=policy_meta,
             )
-        action = ActionPayload(
-            message=f"I've sent a new verification code to {recipient_email}. Please check your inbox.",
-            widget_directive="REQUIRE_OTP_MODAL",
-            field_meta=policy_meta,
-        )
     except ValueError as otp_err:
+        from app.crud.otp import get_otp_policy_metadata as _gm
+        try:
+            _meta = await _gm(db, chat_session.session_id, channel=channel)
+            _meta["channel"] = channel
+        except Exception:
+            _meta = {"channel": channel}
         action = ActionPayload(
             message=str(otp_err),
             widget_directive="REQUIRE_OTP_MODAL",
-            field_meta=await get_otp_policy_metadata(db, chat_session.session_id),
+            field_meta=_meta,
         )
     except Exception as otp_err:
-        logger.error(f"OTP resend failed: {otp_err}")
+        logger.error(f"OTP resend failed ({channel}): {otp_err}")
         action = ActionPayload(
-            message="I'm still having trouble sending the code. Please verify your email address is correct.",
+            message="I'm still having trouble sending the code. Please verify your contact details are correct.",
             widget_directive="TEXT_INPUT",
         )
     await _save_transcript(
@@ -1422,14 +1565,18 @@ async def _handle_booking_flow(
     background_tasks: Optional[BackgroundTasks] = None,
     *,
     dispatch_notifications: bool = True,
+    require_phone_otp: bool = False,
 ) -> Tuple[str, str, Optional[Dict[str, Any]]]:
-    """Handle the PROCESS_BOOKING directive — OTP, confirmation, slot booking."""
+    """Handle the PROCESS_BOOKING directive — OTP (email/phone), confirmation, slot booking."""
+    # Support caller not passing phone flag explicitly — read from config as fallback
+    if not require_phone_otp:
+        require_phone_otp = bool(getattr(org_config, "require_phone_otp", False))
 
     # Lock the slot BEFORE showing OTP modal or confirmation request
     # This prevents ghost slots during the waiting period
     await _lock_slot_for_booking(db, org, chat_session)
 
-    # OTP gate (if enabled and not yet verified)
+    # ── Email OTP gate ──
     recipient_email = _resolve_session_email(chat_session, fd_map)
 
     if require_otp:
@@ -1447,14 +1594,16 @@ async def _handle_booking_flow(
         otp_send_key = _build_otp_context_key(chat_session, fd_map)
         internal_state = _ensure_internal_state(chat_session)
         if internal_state.get("otp_send_key") == otp_send_key:
+            meta = await get_otp_policy_metadata(db, chat_session.session_id, channel="email")
+            meta["channel"] = "email"
             return (
                 f"Excellent! I have all your details. I've sent a verification code to {recipient_email}. Please enter it here to continue.",
                 "REQUIRE_OTP_MODAL",
-                await get_otp_policy_metadata(db, chat_session.session_id),
+                meta,
             )
 
         try:
-            code = await generate_otp(db, chat_session.session_id, resend=False)
+            code = await generate_otp(db, chat_session.session_id, channel="email", resend=False)
             if background_tasks:
                 background_tasks.add_task(
                     send_otp_email,
@@ -1473,15 +1622,78 @@ async def _handle_booking_flow(
             internal_state["otp_send_key"] = otp_send_key
             internal_state.pop("otp_verified_key", None)
             await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+            meta = await get_otp_policy_metadata(db, chat_session.session_id, channel="email")
+            meta["channel"] = "email"
             return (
                 f"Excellent! I have all your details. I've sent a verification code to {recipient_email}. Please enter it here to continue.",
                 "REQUIRE_OTP_MODAL",
-                await get_otp_policy_metadata(db, chat_session.session_id),
+                meta,
             )
         except Exception as otp_err:
             logger.error(f"OTP email failed: {otp_err}")
             return (
                 "I couldn't send the verification code to your email. Please double-check your email address and try again, or say 'resend' to retry.",
+                "TEXT_INPUT",
+                None,
+            )
+
+    # ── Phone OTP gate (sequential after email) ──
+    _phone_verified = bool(getattr(chat_session, "phone_otp_verified", False))
+    if require_phone_otp:
+        _phone = str(chat_session.collected_data.get("phone") or "").strip()
+        if not _phone:
+            return (
+                "I need your phone number to send a verification code. Please share your phone number.",
+                "REQUIRE_PHONE_INPUT",
+                None,
+            )
+        _phone_context_key = _build_phone_otp_context_key(chat_session)
+        _internal_state = _ensure_internal_state(chat_session)
+        _verified_phone_key = str(_internal_state.get("phone_otp_verified_key") or "")
+        if _phone_verified and _verified_phone_key != _phone_context_key:
+            chat_session.phone_otp_verified = False
+            _phone_verified = False
+            _internal_state.pop("phone_otp_verified_key", None)
+            await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+
+    if require_phone_otp and not _phone_verified:
+        from app.crud.otp import generate_otp as _gen_phone_otp, get_otp_policy_metadata as _get_phone_meta
+        # For Firebase, don't generate via Plivo here — widget will handle SMS via Firebase JS SDK.
+        # Instead, just return the OTP modal with phone in meta so widget knows which number to verify.
+        _phone_send_key = _build_phone_otp_context_key(chat_session)
+        _internal_state = _ensure_internal_state(chat_session)
+        _phone = str(chat_session.collected_data.get("phone") or "").strip()
+        if _internal_state.get("phone_otp_send_key") == _phone_send_key:
+            meta = await _get_phone_meta(db, chat_session.session_id, channel="phone")
+            meta["channel"] = "phone"
+            meta["phone"] = _phone
+            return (
+                f"I've sent a verification code to { _phone } via SMS. Please enter it here to continue.",
+                "REQUIRE_OTP_MODAL",
+                meta,
+            )
+        try:
+            # Generate a placeholder OTP record for rate-limiting, but don't send via Plivo for Firebase
+            # The actual SMS will be sent by the widget via Firebase
+            try:
+                await _gen_phone_otp(db, chat_session.session_id, channel="phone", resend=False)
+            except Exception as gen_err:
+                logger.warning(f"Phone OTP gen (Firebase) fallback: {gen_err}")
+            _internal_state["phone_otp_send_key"] = _phone_send_key
+            _internal_state.pop("phone_otp_verified_key", None)
+            await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+            meta = await _get_phone_meta(db, chat_session.session_id, channel="phone")
+            meta["channel"] = "phone"
+            meta["phone"] = _phone
+            return (
+                f"I've sent a verification code to { _phone } via SMS. Please enter it here to continue.",
+                "REQUIRE_OTP_MODAL",
+                meta,
+            )
+        except Exception as otp_err:
+            logger.error(f"OTP phone SMS failed: {otp_err}")
+            return (
+                "I couldn't send the verification code to your phone. Please double-check your phone number and try again, or say 'resend' to retry.",
                 "TEXT_INPUT",
                 None,
             )
@@ -2596,10 +2808,66 @@ async def _execute_booking(
                         "booking.meeting_link.degraded.alert.failed: %s", alert_err
                     )
         elif user_chose_online and mode == MeetingMode.HYBRID:
-            # HYBRID mode with ONLINE selection: for Phase 16, no link generation yet (D-09)
-            # Just snapshot the meeting type as ONLINE but status NOT_REQUIRED
+            # HYBRID ONLINE: generate link via active provider (same as ONLINE_ONLY)
             meeting_type_snapshot = "ONLINE"
-            meeting_link_status = MeetingLinkStatus.NOT_REQUIRED
+            link_result = await generate_meeting_link(
+                config=live_policy,
+                db=db,
+                booking_id=str(target_slot.id),
+                start_time=canonical_start_utc,
+                end_time=canonical_end_utc,
+                summary=f"Booking with {chat_session.collected_data.get('name', 'Customer')}",
+                attendee_email=customer_email,
+            )
+            if link_result.is_success:
+                meeting_link_url = link_result.meeting_link_url
+                meeting_link_external_id = link_result.external_id
+                meeting_link_status = MeetingLinkStatus.READY
+                meeting_link_provider = live_policy.active_meeting_provider
+            else:
+                meeting_link_status = MeetingLinkStatus.UNAVAILABLE
+                meeting_link_error_code = (
+                    link_result.error_code.value if link_result.error_code else None
+                )
+                meeting_link_degraded = True
+                logger.warning(
+                    f"Meeting link generation failed (degraded) HYBRID: {link_result.error_message}",
+                    extra={
+                        "session_id": chat_session.session_id,
+                        "error_code": meeting_link_error_code,
+                    },
+                )
+                try:
+                    request_id = (
+                        correlation_id.get()
+                        or chat_session.collected_data.get("request_id")
+                    )
+                    trace_id = chat_session.collected_data.get("trace_id")
+                    await create_system_alert(
+                        db,
+                        SystemAlertCreate(
+                            org_id=org.id,
+                            component=AlertComponent.BOOKING,
+                            severity=AlertSeverity.WARNING,
+                            code="HYBRID_MEETING_LINK_UNAVAILABLE",
+                            message="Meeting link generation unavailable during HYBRID ONLINE confirmation",
+                            request_id=request_id,
+                            trace_id=trace_id,
+                            context={
+                                "provider": (
+                                    configured_active_provider.value
+                                    if configured_active_provider
+                                    else active_provider.value
+                                ),
+                                "meeting_link_status": meeting_link_status.value,
+                                "error_code": meeting_link_error_code,
+                            },
+                        ),
+                    )
+                except Exception as alert_err:
+                    logger.warning(
+                        "booking.meeting_link.degraded.alert.failed HYBRID: %s", alert_err
+                    )
         else:
             # OFFLINE or HYBRID with OFFLINE selection
             meeting_type_snapshot = "OFFLINE"
@@ -2779,6 +3047,15 @@ async def _execute_booking(
         if dispatch_notifications:
             from app.core.mail import send_confirmation_emails
 
+            # Explicit: always send confirmation email if email present, even when email OTP was disabled
+            # and booking was verified via phone OTP only. Email OTP toggle controls verification, not confirmation.
+            if customer_email:
+                logger.info(
+                    "Booking confirmation email queued for %s via phone-otp flow (require_otp=%s, dispatched via %s)",
+                    customer_email,
+                    str(getattr(chat_session, 'otp_verified', 'n/a')),
+                    "background_tasks" if background_tasks else "await",
+                )
             email_delivery_failed = False
             try:
                 if background_tasks:

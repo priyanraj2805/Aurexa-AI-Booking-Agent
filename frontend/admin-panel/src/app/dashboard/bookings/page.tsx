@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Loader2, AlertCircle, CalendarCheck, ExternalLink, X } from "lucide-react";
+import { Loader2, AlertCircle, CalendarCheck, ExternalLink, X, Video, Building2, Link2, Radio } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useBookings } from "@/hooks/use-dashboard";
@@ -43,6 +43,44 @@ function statusBadge(status: string | null) {
   }
 }
 
+function MeetingModeBadge({ booking }: { booking: { meeting_type_snapshot?: string | null; meeting_link_status?: string | null; meeting_link_provider?: string | null; meeting_link_url?: string | null } }) {
+  const isOnline = booking.meeting_type_snapshot === "ONLINE";
+  const provider = booking.meeting_link_provider?.replace("_", " ") || "";
+  const status = booking.meeting_link_status;
+  const isReady = status === "READY";
+  const isUnavailable = status === "UNAVAILABLE";
+
+  if (!booking.meeting_type_snapshot) {
+    return <span className="inline-flex items-center px-2 py-1 rounded-full text-[10px] bg-muted text-muted-foreground">—</span>;
+  }
+
+  if (!isOnline) {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold bg-gradient-to-r from-zinc-100 to-zinc-200 dark:from-zinc-800 dark:to-zinc-700 text-zinc-600 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700">
+        <Building2 className="size-3" />
+        Offline
+      </span>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold bg-muted text-muted-foreground border border-border w-fit">
+        <Video className="size-3" />
+        Online
+      </span>
+      {booking.meeting_link_url && booking.meeting_link_status === "READY" && (
+        <a href={booking.meeting_link_url} target="_blank" rel="noopener noreferrer" className="text-[13px] font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400 hover:underline">
+          link
+        </a>
+      )}
+      {booking.meeting_link_status === "UNAVAILABLE" && (
+        <span className="text-[10px] text-amber-600">Link unavailable</span>
+      )}
+    </div>
+  );
+}
+
 export default function BookingsPage() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
@@ -51,6 +89,33 @@ export default function BookingsPage() {
   const [status, setStatus] = useState<string>("");
 
   const searchParams = useSearchParams();
+  const highlightId = searchParams.get("highlight");
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const h = searchParams.get("highlight");
+    if (h) {
+      setHighlightedId(h);
+      // Clear highlight after animation duration
+      const t = setTimeout(() => setHighlightedId(null), 3500);
+      return () => clearTimeout(t);
+    }
+  }, [searchParams]);
+
+  const { data, loading, error } = useBookings(page, 10, { search, status, fromDate, toDate });
+
+  useEffect(() => {
+    if (!highlightedId) return;
+    // Scroll to highlighted booking after data loads
+    const t = setTimeout(() => {
+      const el = document.querySelector(`[data-booking-id="${highlightedId}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [highlightedId, data]);
+
   useEffect(() => {
     const s = searchParams.get("status");
     if (s) setStatus(s);
@@ -61,10 +126,9 @@ export default function BookingsPage() {
     }
   }, [searchParams]);
 
-  const { data, loading, error } = useBookings(page, 10, { search, status, fromDate, toDate });
-
   return (
     <>
+      <style>{`@keyframes highlight { 0% { background-color: hsl(var(--primary) / 0.25); transform: scale(1.01); } 50% { background-color: hsl(var(--primary) / 0.15); } 100% { background-color: transparent; transform: scale(1); } }`}</style>
       <div className="flex items-end justify-between mb-2">
         <div>
           <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">
@@ -131,7 +195,15 @@ export default function BookingsPage() {
               {/* Mobile card view */}
               <div className="md:hidden space-y-3">
                 {data.items.map((b) => (
-                  <div key={b.id} className="flex items-start gap-3 p-4 border border-border rounded-lg bg-background/50">
+                  <div
+                    key={b.id}
+                    data-booking-id={b.id}
+                    className={`flex items-start gap-3 p-4 border rounded-lg bg-background/50 transition-all ${
+                      highlightedId === b.id
+                        ? "border-primary bg-primary/10 ring-2 ring-primary/30 animate-pulse"
+                        : "border-border"
+                    }`}
+                  >
                     <div className="flex items-center justify-center size-8 rounded-full bg-[#27272a] text-xs font-semibold shrink-0">
                       {getInitials(b.customer_name)}
                     </div>
@@ -149,6 +221,7 @@ export default function BookingsPage() {
                       <div className="text-[11px] text-muted-foreground">
                         Meeting: {formatDateTime(b.slot_start)}
                       </div>
+                      <MeetingModeBadge booking={b} />
                       <div className="text-[11px] text-muted-foreground">
                         Booked: {formatDateTime(b.created_at)}
                       </div>
@@ -163,13 +236,20 @@ export default function BookingsPage() {
                     <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Client</th>
                     <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Email</th>
                     <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Meeting Time</th>
+                    <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Mode</th>
                     <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Booked At</th>
                     <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Status</th>
                   </tr>
                 </thead>
                 <tbody>
                   {data.items.map((b) => (
-                    <tr key={b.id} className="hover:bg-secondary/50 transition-colors">
+                    <tr
+                      key={b.id}
+                      data-booking-id={b.id}
+                      className={`hover:bg-secondary/50 transition-colors ${
+                        highlightedId === b.id ? "bg-primary/10 ring-2 ring-inset ring-primary/30 animate-pulse" : ""
+                      }`}
+                    >
                       <td className="px-4 py-4 text-[13px] border-b border-border">
                         <div className="flex items-center gap-3">
                           <div className="flex items-center justify-center size-8 rounded-full bg-[#27272a] text-xs font-semibold">
@@ -187,6 +267,9 @@ export default function BookingsPage() {
                       <td className="px-4 py-4 text-[13px] border-b border-border">
                         {formatDateTime(b.slot_start)}
                         {b.slot_end && <> – {formatDateTime(b.slot_end)}</>}
+                      </td>
+                      <td className="px-4 py-4 text-[13px] border-b border-border">
+                        <MeetingModeBadge booking={b} />
                       </td>
                       <td className="px-4 py-4 text-[13px] border-b border-border">{formatDateTime(b.created_at)}</td>
                       <td className="px-4 py-4 border-b border-border">

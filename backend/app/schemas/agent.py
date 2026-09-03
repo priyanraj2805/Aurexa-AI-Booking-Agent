@@ -225,6 +225,7 @@ class ChatSessionState(BaseModel):
     current_intent: Optional[str] = None
     session_status: str = "ACTIVE"
     otp_verified: bool = False
+    phone_otp_verified: bool = False
     pending_cancel: bool = False
 
 

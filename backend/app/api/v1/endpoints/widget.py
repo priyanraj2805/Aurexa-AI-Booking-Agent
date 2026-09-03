@@ -143,6 +143,8 @@ def _build_config_response(org: Organization, config: Optional[OrgConfig]) -> di
         if isinstance(meeting_provider_default, MeetingProviderDefault)
         else str(meeting_provider_default),
         "available_meeting_types": available_meeting_types,
+        "require_otp": config.require_otp if config else True,
+        "require_phone_otp": config.require_phone_otp if config else False,
     }
 
 
@@ -159,6 +161,8 @@ class WidgetConfigResponse(BaseModel):
     allow_hybrid_selection: bool
     meeting_provider_default: str
     available_meeting_types: list[str]
+    require_otp: bool = True
+    require_phone_otp: bool = False
 
 
 @router.get("/config", response_model=WidgetConfigResponse)
@@ -503,3 +507,37 @@ async def get_widget_availability(
         policy_reason_code=policy_reason_code,
         slots=slots,
     )
+
+
+class ClientLogRequest(BaseModel):
+    event: str
+    session_id: Optional[str] = None
+    channel: Optional[str] = None
+    hasConfirmationResult: Optional[bool] = None
+    detail: Optional[str] = None
+    phone_masked: Optional[str] = None
+
+
+@router.post("/client-log")
+@limiter.limit("60/minute")
+async def widget_client_log(
+    request: Request,
+    payload: ClientLogRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Lightweight client-side telemetry - widget posts verify/send events here so they appear in docker backend logs."""
+    # Mask any phone/detail to avoid PII in logs
+    masked_phone = payload.phone_masked or ""
+    if masked_phone and len(masked_phone) > 6:
+        masked_phone = masked_phone[:3] + "***" + masked_phone[-3:]
+    logger.info(
+        "widget.client_log event=%s session=%s channel=%s hasConfirmationResult=%s phone=%s detail=%s ip=%s",
+        payload.event,
+        (payload.session_id or "")[:8] + "***" if payload.session_id else "",
+        payload.channel or "",
+        str(payload.hasConfirmationResult) if payload.hasConfirmationResult is not None else "",
+        masked_phone,
+        (payload.detail or "")[:200],
+        request.client.host if request.client else "",
+    )
+    return {"ok": True}

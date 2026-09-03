@@ -91,17 +91,110 @@ export default function BillingPage() {
 
   const currentPlanId = data?.plan?.id ?? null;
 
+  const loadRazorpayScript = (): Promise<boolean> => {
+    if (typeof window === "undefined") return Promise.resolve(false);
+    if ((window as unknown as { Razorpay?: unknown }).Razorpay) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const script = document.createElement("script");
+      script.src = "https://checkout.razorpay.com/v1/checkout.js";
+      script.onload = () => resolve(true);
+      script.onerror = () => resolve(false);
+      document.body.appendChild(script);
+    });
+  };
+
   const handleChange = async () => {
     if (!selectedPlan) return;
+    // Free plan — no payment needed
+    if (selectedPlan.monthly_price_cents === 0) {
+      setChanging(true);
+      try {
+        await api.post("/account/plan", { plan_id: selectedPlan.id });
+        toast.success(`Your plan is now ${selectedPlan.name}`);
+        setSelectedPlan(null);
+        await load();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Plan change failed");
+      } finally {
+        setChanging(false);
+        setConfirming(false);
+      }
+      return;
+    }
+
+    // Paid plan — Razorpay flow
     setChanging(true);
     try {
-      await api.post("/account/plan", { plan_id: selectedPlan.id });
-      toast.success(`Your plan is now ${selectedPlan.name}`);
-      setSelectedPlan(null);
-      await load();
+      const order = await api.post<{ order_id: string; amount: number; currency: string; key_id: string; plan_code: string }>(
+        "/account/razorpay/order",
+        { plan_id: selectedPlan.id },
+      );
+
+      // If backend returned a free order (amount 0 or no key), just verify directly
+      if (!order.key_id || order.amount === 0) {
+        await api.post("/account/razorpay/verify", {
+          plan_id: selectedPlan.id,
+          razorpay_order_id: order.order_id,
+          razorpay_payment_id: `pay_free_${Date.now()}`,
+          razorpay_signature: "free",
+        });
+        toast.success(`Payment verified — your plan is now ${selectedPlan.name}`);
+        setSelectedPlan(null);
+        await load();
+        return;
+      }
+
+      const loaded = await loadRazorpayScript();
+      if (!loaded) {
+        toast.error("Failed to load Razorpay. Please try again.");
+        return;
+      }
+
+      const Razorpay = (window as unknown as { Razorpay: new (opts: unknown) => { open: () => void } }).Razorpay;
+      const options = {
+        key: order.key_id,
+        amount: order.amount,
+        currency: order.currency || "INR",
+        name: "DotStark",
+        description: `${selectedPlan.name} — ${selectedPlan.code}`,
+        order_id: order.order_id,
+        prefill: {
+          name: user?.full_name || "",
+          email: user?.email || "",
+        },
+        theme: { color: "#6366f1" },
+        handler: async (response: { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string }) => {
+          try {
+            await api.post("/account/razorpay/verify", {
+              plan_id: selectedPlan.id,
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+            });
+            toast.success(`Payment successful — your plan is now ${selectedPlan.name}`);
+            setSelectedPlan(null);
+            await load();
+          } catch (err) {
+            toast.error(err instanceof Error ? err.message : "Payment verification failed");
+          } finally {
+            setChanging(false);
+            setConfirming(false);
+          }
+        },
+        modal: {
+          ondismiss: () => {
+            setChanging(false);
+            setConfirming(false);
+          },
+        },
+      };
+
+      const rzp = new Razorpay(options);
+      rzp.open();
+      // changing stays true until handler or dismiss
+      return;
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Plan change failed");
-    } finally {
+      toast.error(err instanceof Error ? err.message : "Failed to initiate payment");
       setChanging(false);
       setConfirming(false);
     }
@@ -126,6 +219,14 @@ export default function BillingPage() {
     ));
   };
 
+  const daysUntilExpiry = (() => {
+    const end = data?.subscription?.current_period_end;
+    if (!end) return null;
+    const diff = new Date(end).getTime() - Date.now();
+    const days = Math.ceil(diff / (1000 * 60 * 60 * 24));
+    return days >= 0 && days <= 3 ? days : null;
+  })();
+
   return (
     <div className="mx-auto w-full max-w-5xl space-y-6">
       <div>
@@ -134,6 +235,32 @@ export default function BillingPage() {
           Manage your subscription and choose the plan that fits your business.
         </p>
       </div>
+
+      {daysUntilExpiry !== null && data?.plan && data.plan.monthly_price_cents > 0 && (
+        <div className="flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-amber-500/20 text-amber-600">
+            <CreditCard className="size-4" />
+          </div>
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-amber-700 dark:text-amber-300">
+              Your {data.plan.name} plan expires in {daysUntilExpiry} {daysUntilExpiry === 1 ? "day" : "days"} — {data.subscription?.current_period_end ? new Date(data.subscription.current_period_end).toLocaleDateString() : ""}
+            </p>
+            <p className="mt-1 text-xs text-amber-600/80 dark:text-amber-400/80">
+              Renew now to avoid service interruption. You’ll also get an email reminder and a notification in your dashboard bell.
+            </p>
+          </div>
+          <Button
+            size="sm"
+            className="shrink-0 bg-amber-600 hover:bg-amber-700 text-white"
+            onClick={() => {
+              const el = document.getElementById("plans-grid");
+              el?.scrollIntoView({ behavior: "smooth" });
+            }}
+          >
+            Renew
+          </Button>
+        </div>
+      )}
 
       {loading ? (
         <div className="space-y-6">
@@ -245,7 +372,7 @@ export default function BillingPage() {
           </Card>
 
           {/* ── Plan cards ── */}
-          <div>
+          <div id="plans-grid">
             <h2 className="mb-1 text-lg font-semibold">Plans</h2>
             <p className="mb-4 text-sm text-muted-foreground">
               Upgrade or downgrade anytime. Changes apply immediately.

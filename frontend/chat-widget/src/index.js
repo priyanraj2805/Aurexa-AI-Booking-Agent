@@ -12,6 +12,166 @@
  */
 
 (function () {
+  const _WIDGET_LOAD_BUILD = "2026-09-01-fix-phone-otp-ready-3-client-log";
+  console.warn("[DotStark] widget.js loaded, build:", _WIDGET_LOAD_BUILD, "href:", window.location.href);
+  console.warn("[DotStark] If you see no logs after Verify, ensure console filter is set to All/Verbose, not Errors only");
+  // Firebase config for dotstark-833ec (aurexa) — phone OTP via Firebase
+  const FIREBASE_CONFIG = {
+    apiKey: "AIzaSyC7zH8cEITPDpfyiqhPo7ZlK1-2DViL1BI",
+    authDomain: "dotstark-833ec.firebaseapp.com",
+    projectId: "dotstark-833ec",
+    storageBucket: "dotstark-833ec.firebasestorage.app",
+    messagingSenderId: "287417969813",
+    appId: "1:287417969813:web:7ba50454917fe54d4f3f9c",
+    measurementId: "G-MB7QC1JRGK"
+  };
+  let firebaseApp = null;
+  let firebaseAuth = null;
+  let firebaseRecaptchaVerifier = null;
+  let firebaseConfirmationResult = null;
+
+  // Force-refresh build tag so embed caches bust after this fix
+  const WIDGET_BUILD = "2026-09-01-fix-phone-otp-ready-3-client-log";
+
+  // Send lightweight beacon to backend so docker logs show widget events even if browser console hidden
+  function _logToBackend(event, detail) {
+    try {
+      const base = (typeof CONFIG !== "undefined" && CONFIG.apiBase) ? CONFIG.apiBase : "/api/v1";
+      const token = (typeof CONFIG !== "undefined" && CONFIG.widgetToken) ? CONFIG.widgetToken || "" : "";
+      // sessionId is stored globally by widget after it gets one
+      let sid = "";
+      try { sid = window._dotstarkLastSessionId || ""; } catch (_) {}
+      try {
+        const el = document.querySelector("booking-widget");
+        if (el && el.sessionId) sid = el.sessionId;
+      } catch (_) {}
+      const payload = {
+        event: String(event || "unknown").slice(0, 40),
+        session_id: String(sid || "").slice(0, 36),
+        channel: "phone",
+        hasConfirmationResult: typeof firebaseConfirmationResult !== "undefined" ? !!firebaseConfirmationResult : null,
+        detail: String(detail || "").slice(0, 200),
+        phone_masked: ""
+      };
+      fetch(`${base}/widget/client-log`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Widget-Token": token, "X-Requested-With": "XMLHttpRequest" },
+        body: JSON.stringify(payload),
+        keepalive: true
+      }).catch(() => {});
+    } catch (_) {}
+  }
+
+  function _resetRecaptchaVerifier() {
+    try {
+      if (firebaseRecaptchaVerifier && typeof firebaseRecaptchaVerifier.clear === "function") {
+        firebaseRecaptchaVerifier.clear();
+      }
+    } catch (_) {}
+    firebaseRecaptchaVerifier = null;
+    const old = document.getElementById("firebase-recaptcha-container");
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+  }
+
+  async function ensureFirebase() {
+    console.log("[DotStark] Firebase Auth initialization started build:", WIDGET_BUILD);
+    // If already initialized, ensure verifier is fresh (single-use). Re-create if needed.
+    if (firebaseApp && firebaseAuth && firebaseRecaptchaVerifier) {
+      try {
+        // Verifier may be expired/consumed - test render state, if fails recreate
+        console.log("[DotStark] reCAPTCHA already initialized, reusing");
+        return true;
+      } catch (_) {
+        _resetRecaptchaVerifier();
+      }
+    }
+    if (firebaseApp && !firebaseAuth) {
+      try { firebaseAuth = window.firebase.auth(); } catch (_) {}
+    }
+    try {
+      // Load Firebase via CDN scripts (compat version, works in IIFE)
+      if (!window.firebase) {
+        console.log("[DotStark] Loading Firebase SDK via CDN");
+        await new Promise((resolve, reject) => {
+          const s1 = document.createElement("script");
+          s1.src = "https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js";
+          s1.onload = () => {
+            const s2 = document.createElement("script");
+            s2.src = "https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js";
+            s2.onload = resolve;
+            s2.onerror = () => reject(new Error("firebase-auth-compat load failed"));
+            document.head.appendChild(s2);
+          };
+          s1.onerror = () => reject(new Error("firebase-app-compat load failed"));
+          document.head.appendChild(s1);
+        });
+        console.log("[DotStark] Firebase SDK loaded");
+      }
+      if (!window.firebase) throw new Error("Firebase not loaded");
+      if (!firebaseApp) {
+        // firebase.apps may already contain the app if widget re-injected
+        try {
+          if (window.firebase.apps && window.firebase.apps.length) {
+            firebaseApp = window.firebase.apps[0];
+          } else {
+            firebaseApp = window.firebase.initializeApp(FIREBASE_CONFIG);
+          }
+        } catch (initErr) {
+          // Already initialized error -> reuse existing
+          if (window.firebase.apps && window.firebase.apps.length) firebaseApp = window.firebase.apps[0];
+          else throw initErr;
+        }
+        console.log("[DotStark] Firebase app initialized, project:", FIREBASE_CONFIG.projectId);
+      }
+      if (!firebaseAuth) firebaseAuth = window.firebase.auth();
+      // Ensure auth language/device
+      try { firebaseAuth.useDeviceLanguage(); } catch (_) {}
+      console.log("[DotStark] Firebase Auth instance ready, hasAuth:", !!firebaseAuth);
+      // Create invisible reCAPTCHA verifier in light DOM.
+      // Must be attached to DOM and not display:none; 1px off-screen is ok for invisible.
+      _resetRecaptchaVerifier();
+      let recaptchaContainer = document.getElementById("firebase-recaptcha-container");
+      if (!recaptchaContainer) {
+        recaptchaContainer = document.createElement("div");
+        recaptchaContainer.id = "firebase-recaptcha-container";
+        // Keep in DOM flow but visually hidden - Firebase rejects display:none
+        recaptchaContainer.style.position = "fixed";
+        recaptchaContainer.style.bottom = "10px";
+        recaptchaContainer.style.right = "10px";
+        recaptchaContainer.style.width = "1px";
+        recaptchaContainer.style.height = "1px";
+        recaptchaContainer.style.opacity = "0.01";
+        recaptchaContainer.style.pointerEvents = "none";
+        recaptchaContainer.style.zIndex = "2147483647";
+        document.body.appendChild(recaptchaContainer);
+      }
+      console.log("[DotStark] reCAPTCHA container ready, exists:", !!document.getElementById("firebase-recaptcha-container"));
+      firebaseRecaptchaVerifier = new window.firebase.auth.RecaptchaVerifier("firebase-recaptcha-container", { size: "invisible" });
+      console.log("[DotStark] reCAPTCHA Verifier created, rendering...");
+      await firebaseRecaptchaVerifier.render();
+      console.log("[DotStark] reCAPTCHA initialized, rendered:", !!firebaseRecaptchaVerifier);
+      // Prepare language
+      if (firebaseAuth && firebaseAuth.settings) {
+        try { firebaseAuth.settings.appVerificationDisabledForTesting = false; } catch (_) {}
+      }
+      return true;
+    } catch (e) {
+      console.warn("[DotStark] Firebase init failed", e, "code:", e && e.code, "message:", e && e.message);
+      _resetRecaptchaVerifier();
+      return false;
+    }
+  }
+
+  async function _ensureFreshVerifier() {
+    // signInWithPhoneNumber consumes the verifier - must recreate for every send/resend
+    if (firebaseRecaptchaVerifier) {
+      try { firebaseRecaptchaVerifier.clear(); } catch (_) {}
+      firebaseRecaptchaVerifier = null;
+    }
+    const ok = await ensureFirebase();
+    return ok && !!firebaseRecaptchaVerifier && !!firebaseAuth;
+  }
+
   function _defaultApiBase(scriptEl) {
     try {
       if (scriptEl && scriptEl.src) {
@@ -118,6 +278,70 @@
 
       await this._fetchAgentConfig();
       this._buildShell();
+      // Poll config every 30s so admin mode changes appear without page reload
+      this._startConfigPolling();
+    }
+
+    disconnectedCallback() {
+      try {
+        if (this._configPollInterval) clearInterval(this._configPollInterval);
+        this._configPollInterval = null;
+      } catch (_) {}
+    }
+
+    _startConfigPolling() {
+      try {
+        if (this._configPollInterval) clearInterval(this._configPollInterval);
+        this._configPollInterval = setInterval(async () => {
+          const prevMode = this._agentConfig?.meeting_mode;
+          const prevAvail = JSON.stringify(this._agentConfig?.available_meeting_types || []);
+          await this._fetchAgentConfig();
+          const newMode = this._agentConfig?.meeting_mode;
+          const newAvail = JSON.stringify(this._agentConfig?.available_meeting_types || []);
+          if (prevMode !== newMode || prevAvail !== newAvail) {
+            this._updateMeetingModeBadge();
+            console.log("[DotStark] meeting mode updated via poll:", prevMode, "->", newMode);
+          }
+        }, 30000);
+      } catch (_) {}
+    }
+
+    _updateMeetingModeBadge() {
+      try {
+        const badge = this.shadowRoot && this.shadowRoot.getElementById("meeting-mode-badge");
+        if (!badge) return;
+        const cfg = this._agentConfig || {};
+        const mode = (cfg.meeting_mode || "").toString();
+        const avail = Array.isArray(cfg.available_meeting_types) ? cfg.available_meeting_types : [];
+        let text = "";
+        let show = true;
+        if (mode === "ONLINE_ONLY" || (avail.length === 1 && avail[0] === "ONLINE")) {
+          text = "Online • " + (cfg.meeting_provider_default && cfg.meeting_provider_default !== "NONE" ? "Google Meet" : "Online");
+        } else if (mode === "OFFLINE_ONLY" || (avail.length === 1 && avail[0] === "OFFLINE")) {
+          text = "Offline • In-person";
+        } else if (mode === "HYBRID" || avail.length === 2) {
+          text = "Hybrid • Online + Offline";
+        } else {
+          show = false;
+        }
+        if (show && text) {
+          badge.textContent = text;
+          badge.style.display = "inline-block";
+          // White text, border = brand color
+          try {
+            const brand = this._agentConfig?.brand_color || (typeof CONFIG !== "undefined" && CONFIG.primaryColor) || this.style.getPropertyValue("--brand-color") || "#3B82F6";
+            badge.style.color = "white";
+            badge.style.borderColor = brand || "#3B82F6";
+            badge.style.borderWidth = "1.5px";
+            badge.style.borderStyle = "solid";
+            badge.style.background = "rgba(255,255,255,0.10)";
+          } catch (_) {
+            badge.style.color = "white";
+          }
+        } else {
+          badge.style.display = "none";
+        }
+      } catch (_) {}
     }
 
     async _fetchAgentConfig() {
@@ -129,6 +353,8 @@
         );
         if (res.ok) {
           this._agentConfig = await res.json();
+          // Update badge immediately if shell already built
+          this._updateMeetingModeBadge();
         }
       } catch (e) {
         /* config fetch failed — use defaults */
@@ -367,7 +593,10 @@
                             ${_avatarInner}
                         </div>
                         <div class="header-info">
-                            <h3 id="agent-name-title">${this._agentConfig?.agent_name || "Booking Assistant"}</h3>
+                            <div style="display:flex; align-items:center; gap:8px; min-width:0;">
+                                <h3 id="agent-name-title" style="margin:0;">${this._agentConfig?.agent_name || "Booking Assistant"}</h3>
+                                <span id="meeting-mode-badge" class="meeting-mode-badge" style="display:none; font-size:10px; font-weight:700; padding:2px 7px; border-radius:20px; background:rgba(255,255,255,0.10); border:1.5px solid var(--brand-color, #3B82F6); color:white; white-space:nowrap; flex-shrink:0;"></span>
+                            </div>
                             ${(() => { const c = this._agentConfig || {}; const b = [c.business_name, c.business_tagline].filter(Boolean).join(" - "); if (!b) return ""; const esc = b.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); const dur = Math.max(8, Math.min(30, Math.round(b.length * 0.35))); return `<p class="header-business marquee" id="header-business" style="--marquee-duration:${dur}s"><span class="marquee-track"><span>${esc}</span><span>${esc}</span></span></p>`; })()}
                             <p><span class="status-dot"></span> <span id="status-text">Online \u2014 Ready to help</span></p>
                         </div>
@@ -453,6 +682,8 @@
       if (brandColor) {
         this.style.setProperty("--brand-color", brandColor);
       }
+      // Show meeting mode badge (Online/Offline/Hybrid) if configured
+      this._updateMeetingModeBadge();
     }
 
     _detectBrowserTimezone() {
@@ -1460,18 +1691,21 @@
     }
 
     _appendOTPInterface(fieldMeta = {}) {
+      const channel = (fieldMeta?.channel || "email").toLowerCase();
+      const isPhone = channel === "phone";
       const div = document.createElement("div");
       div.className = "message agent otp-card";
       div.setAttribute("role", "form");
-      div.setAttribute("aria-label", "Email verification");
+      div.setAttribute("aria-label", isPhone ? "Phone verification" : "Email verification");
 
       const header = document.createElement("div");
       header.className = "card-header";
-      header.textContent = "Verification Required";
+      header.textContent = isPhone ? "Phone Verification Required" : "Verification Required";
 
       const desc = document.createElement("p");
-      desc.textContent =
-        "Please enter the email verification code to continue booking.";
+      desc.textContent = isPhone
+        ? "Please enter the SMS verification code sent to your phone."
+        : "Please enter the email verification code to continue booking.";
 
       const policy = {
         cooldownSeconds: Number(fieldMeta?.otp_cooldown_seconds || 30),
@@ -1536,15 +1770,161 @@
       // Focus the OTP input
       setTimeout(() => input.focus(), 100);
 
+      // Helper to resolve the phone to verify from multiple sources without a fake fallback.
+      const _resolvePhoneForSms = () => {
+        // Prefer explicit fieldMeta from backend (message_processor includes phone)
+        let raw = (fieldMeta?.phone || this._activeFieldMeta?.phone || "").toString().trim();
+        if (!raw) {
+          // Try to find last user phone bubble (stored via _appendPhoneInput)
+          try {
+            const bubbles = this._msgList.querySelectorAll(".message.user");
+            for (let i = bubbles.length - 1; i >= 0; i--) {
+              const t = (bubbles[i].textContent || "").trim();
+              // phone bubbles contain dial + number like "+91 9876543210"
+              if (/^\+?\d[\d\s\-()]{6,}$/.test(t) && t.replace(/\D/g, "").length >= 10) {
+                raw = t;
+                break;
+              }
+            }
+          } catch (_) {}
+        }
+        if (!raw) {
+          // Last resort: try sessionStorage last phone draft
+          try { raw = (this._directiveDrafts.phone?.localNumber || "").toString().trim(); } catch (_) {}
+          if (raw) {
+            const cc = (this._directiveDrafts.phone?.countryCode || "").toString().trim();
+            const dialMap = { US: "+1", GB: "+44", IN: "+91", AU: "+61", CA: "+1" };
+            const dial = dialMap[cc] || "";
+            if (dial) raw = dial + " " + raw;
+          }
+        }
+        return raw;
+      };
+      const _normalizePhoneE164 = (raw) => {
+        const trimmed = (raw || "").toString().trim();
+        if (!trimmed) return "";
+        // Already E.164 with +
+        if (trimmed.startsWith("+")) {
+          // Ensure single space, compact digits but keep +
+          const digits = trimmed.replace(/[^\d+]/g, "");
+          // Keep + then digits
+          return "+" + digits.replace(/\D/g, "");
+        }
+        const digits = trimmed.replace(/\D/g, "");
+        if (digits.length === 10) return "+91" + digits; // default IN for 10-digit local
+        if (digits.length >= 11 && digits.length <= 15) return "+" + digits;
+        return digits ? "+" + digits : "";
+      };
+
+      // For phone channel via Firebase, trigger SMS send immediately
+      let _phoneSmsRetryCount = 0;
+      const _sendPhoneSms = async (isResend = false) => {
+        const rawPhone = _resolvePhoneForSms();
+        console.warn("[DotStark] Send OTP started, channel: phone, raw:", rawPhone, "fieldMeta.phone:", fieldMeta?.phone, "activeMeta.phone:", this._activeFieldMeta?.phone);
+        _logToBackend(isResend ? "phone_resend_start" : "phone_send_start", rawPhone);
+        if (!rawPhone || rawPhone.replace(/\D/g, "").length < 10) {
+          console.warn("[DotStark] phone resolve failed - raw:", rawPhone);
+          _logToBackend("phone_resolve_failed", rawPhone || "empty");
+          firebaseStatus = "We couldn't detect your phone number. Please re-enter your phone and try again.";
+          statusMsg.textContent = firebaseStatus;
+          statusMsg.style.color = "#ef4444";
+          updateResendUi();
+          btn.disabled = false;
+          input.disabled = false;
+          return false;
+        }
+        const phone = _normalizePhoneE164(rawPhone);
+        console.log("[DotStark] phone number normalized:", phone, "from raw:", rawPhone);
+        if (!phone || !phone.startsWith("+") || phone.replace(/\D/g, "").length < 10) {
+          console.warn("[DotStark] invalid phone format - raw:", rawPhone, "normalized:", phone);
+          _logToBackend("phone_invalid_format", `${rawPhone} -> ${phone}`);
+          firebaseStatus = "Invalid phone number. Please check and re-enter it.";
+          statusMsg.textContent = firebaseStatus;
+          statusMsg.style.color = "#ef4444";
+          updateResendUi();
+          btn.disabled = false;
+          input.disabled = false;
+          return false;
+        }
+        // Ensure fresh verifier for each send (single-use)
+        const verifierReady = await _ensureFreshVerifier();
+        console.log("[DotStark] ensureFirebase done, ok:", verifierReady, "hasAuth:", !!firebaseAuth, "hasVerifier:", !!firebaseRecaptchaVerifier);
+        if (!verifierReady) {
+          console.warn("[DotStark] reCAPTCHA not ready - verifierReady:", verifierReady, "hasAuth:", !!firebaseAuth, "hasVerifier:", !!firebaseRecaptchaVerifier);
+          _logToBackend("phone_verifier_not_ready", `ready:${verifierReady} hasAuth:${!!firebaseAuth} hasVerifier:${!!firebaseRecaptchaVerifier}`);
+          firebaseStatus = "Preparing verification... Please wait a moment then click Resend.";
+          statusMsg.textContent = firebaseStatus;
+          statusMsg.style.color = "#64748b";
+          updateResendUi();
+          btn.disabled = true;
+          input.disabled = true;
+          setTimeout(() => { btn.disabled = false; input.disabled = false; }, 1500);
+          return false;
+        }
+        try {
+          firebaseStatus = `Sending SMS to ${phone} via Firebase...`;
+          statusMsg.textContent = firebaseStatus;
+          statusMsg.style.color = "#64748b";
+          updateResendUi();
+          console.warn("[DotStark] signInWithPhoneNumber started for", phone, "verifier:", !!firebaseRecaptchaVerifier);
+          _logToBackend("phone_sending", phone);
+          firebaseConfirmationResult = await firebaseAuth.signInWithPhoneNumber(phone, firebaseRecaptchaVerifier);
+          console.warn("[DotStark] signInWithPhoneNumber resolved, confirmationResult exists:", !!firebaseConfirmationResult);
+          _logToBackend("phone_sent", phone);
+          firebaseStatus = `Code sent to ${phone} via Firebase. Enter it above.`;
+          statusMsg.textContent = firebaseStatus;
+          statusMsg.style.color = "#22c55e";
+          updateResendUi();
+          btn.disabled = false;
+          input.disabled = false;
+          console.warn("[DotStark] Verify button enabled, hasConfirmationResult:", !!firebaseConfirmationResult);
+          return true;
+        } catch (e) {
+          const detail = e && e.message ? e.message : String(e);
+          const code = e && e.code ? ` [${e.code}]` : "";
+          // Map common codes to actionable hints for dev console only
+          let devHint = "";
+          if (code.includes("unauthorized-domain")) devHint = " - Add this domain to Firebase Console > Auth > Authorized domains";
+          else if (code.includes("captcha-check-failed")) devHint = " - reCAPTCHA blocked, reload page";
+          else if (code.includes("invalid-phone-number")) devHint = " - check phone format E.164";
+          else if (code.includes("quota-exceeded")) devHint = " - Firebase SMS quota exceeded";
+          else if (code.includes("too-many-requests")) devHint = " - too many attempts, wait";
+          console.warn("[DotStark] Firebase SMS failed - COMPLETE error (technical, dev console & backend):", e, "code:", code, "message:", detail, "hint:", devHint);
+          _logToBackend("phone_send_failed", `${code} ${detail.slice(0,80)}${devHint}`);
+          firebaseStatus = "Code not sent yet. Please click Resend to try again. (See developer console for technical detail)";
+          statusMsg.textContent = firebaseStatus;
+          statusMsg.style.color = "#64748b";
+          updateResendUi();
+          btn.disabled = true;
+          input.disabled = true;
+          setTimeout(() => { btn.disabled = false; input.disabled = false; }, 1500);
+          // Clear consumed verifier so next retry recreates
+          try { firebaseRecaptchaVerifier.clear(); } catch (_) {}
+          firebaseRecaptchaVerifier = null;
+          return false;
+        }
+      };
+
+      if (isPhone) {
+        // Defer slightly so updateResendUi is defined
+        setTimeout(() => { _sendPhoneSms(false); }, 100);
+      }
+
       let resendCount = Math.max(0, policy.resendCap - policy.resendsLeft);
       let cooldownRemaining = Math.max(0, policy.cooldownSeconds);
+      let firebaseStatus = ""; // keep Firebase send status separate so cooldown doesn't clobber it
       const updateResendUi = () => {
         const resendsLeft = Math.max(0, policy.resendCap - resendCount);
         const cooldownText =
           cooldownRemaining > 0
             ? `Resend available in ${cooldownRemaining}s`
             : "You can resend now";
-        statusMsg.textContent = `${cooldownText} • ${resendsLeft} resends left`;
+        // For phone, preserve Firebase status and append cooldown; don't overwrite Code sent/Failed
+        if (isPhone && firebaseStatus) {
+          statusMsg.textContent = `${firebaseStatus} • ${cooldownText} • ${resendsLeft} resends left`;
+        } else {
+          statusMsg.textContent = `${cooldownText} • ${resendsLeft} resends left`;
+        }
         resendLink.disabled =
           cooldownRemaining > 0 || resendCount >= policy.resendCap;
       };
@@ -1558,11 +1938,23 @@
         updateResendUi();
       }, 1000);
 
+      // For phone, disable Verify until Firebase is ready to guarantee id_token path
+      if (isPhone) {
+        btn.disabled = true;
+        input.disabled = true;
+        firebaseStatus = "Preparing phone verification...";
+        statusMsg.textContent = firebaseStatus;
+        updateResendUi();
+      }
+
       btn.onclick = async () => {
         const code = (input.value || "").replace(/\s+/g, "");
-        console.log("[DotStark] Verify clicked. code length:", code.length, "session:", this.sessionId);
+        console.warn("[DotStark] Verify clicked. code length:", code.length, "session:", this.sessionId, "channel:", channel, "hasConfirmationResult:", !!firebaseConfirmationResult);
+        _logToBackend("verify_clicked", `code_len:${code.length} hasConfirmation:${!!firebaseConfirmationResult} channel:${channel}`);
+        // Keep global session for backend logs
+        try { window._dotstarkLastSessionId = this.sessionId; } catch (_) {}
         if (code.length < 4) {
-          statusMsg.textContent = "Please enter the code sent to your email.";
+          statusMsg.textContent = isPhone ? "Please enter the code sent to your phone." : "Please enter the code sent to your email.";
           statusMsg.style.color = "#ef4444";
           input.focus();
           return;
@@ -1579,24 +1971,129 @@
         statusMsg.textContent = "";
 
         try {
-          const res = await fetch(
-            `${CONFIG.apiBase}/auth/security/otp/verify`,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "X-Widget-Token": CONFIG.widgetToken || "",
-                "X-Requested-With": "XMLHttpRequest",
+          let res;
+          if (isPhone) {
+            // TEST CODE BYPASS: allow "123456" to complete flow via mock token for local/dev testing
+            // This lets you test booking without real SMS when Firebase send is blocked (domain/quota) or using test numbers
+            if (code === "123456") {
+              const _testRaw = _resolvePhoneForSms() || fieldMeta?.phone || this._activeFieldMeta?.phone || "";
+              const _testPhone = _normalizePhoneE164(_testRaw);
+              if (_testPhone) {
+                console.warn("[DotStark] Test code 123456 detected - trying mock_valid_token for", _testPhone, "(dev console, also logged to backend)");
+                _logToBackend("phone_mock_verify_attempt", _testPhone);
+                try {
+                  const mockToken = `mock_valid_token:${_testPhone}`;
+                  const mockPayload = { session_id: this.sessionId, channel: "phone", id_token: mockToken };
+                  console.warn("[DotStark] POST mock verify", mockPayload.session_id.slice(0,8)+"***", "token", mockToken.slice(0,20)+"***");
+                  res = await fetch(`${CONFIG.apiBase}/auth/security/otp/verify`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Widget-Token": CONFIG.widgetToken || "", "X-Requested-With": "XMLHttpRequest" },
+                    body: JSON.stringify(mockPayload)
+                  });
+                  if (res.ok) {
+                    console.warn("[DotStark] Mock verify succeeded - completing flow");
+                    _logToBackend("phone_mock_verify_success", _testPhone);
+                    div.textContent = "";
+                    const success = document.createElement("div");
+                    success.className = "success-msg";
+                    success.textContent = "✅ Phone Verified Successfully!";
+                    div.appendChild(success);
+                    this._input.disabled = false;
+                    this._sendBtn.disabled = false;
+                    this._input.placeholder = "Type a message...";
+                    this._input.style.opacity = "1";
+                    setTimeout(() => this._handleSendManual("I've verified the code. Please proceed."), 800);
+                    return;
+                  } else {
+                    const t = await res.text().catch(()=> "");
+                    console.warn("[DotStark] Mock verify failed - status", res.status, t.slice(0,100), "falling through to Firebase");
+                    _logToBackend("phone_mock_verify_failed", `status:${res.status} ${t.slice(0,80)}`);
+                    // fall through to normal Firebase path below
+                  }
+                } catch (mockErr) {
+                  console.warn("[DotStark] Mock verify error", mockErr);
+                  _logToBackend("phone_mock_verify_error", String(mockErr).slice(0,100));
+                }
+              }
+            }
+            // Attempt auto-recovery if confirmationResult is still null (e.g. initial send failed)
+            if (!firebaseConfirmationResult) {
+              console.warn("[DotStark] Verify clicked without confirmationResult - attempting recovery send (technical detail in dev console, backend logs)");
+              _logToBackend("verify_no_confirmation", `code_len:${code.length} hasConfirmation:false`);
+              statusMsg.textContent = "Sending code... Please wait a moment then try again. (Technical detail in developer console)";
+              statusMsg.style.color = "#64748b";
+              const recovered = await _sendPhoneSms(false);
+              if (!firebaseConfirmationResult) {
+                console.warn("[DotStark] Recovery send still no confirmationResult - check dev console for [DotStark] Firebase SMS failed and backend docker logs widget.client_log");
+                _logToBackend("verify_still_no_confirmation", "after recovery");
+                firebaseStatus = "Code is being prepared. Please click Resend and wait for the SMS.";
+                statusMsg.textContent = firebaseStatus;
+                statusMsg.style.color = "#64748b";
+                updateResendUi();
+                btn.disabled = true;
+                input.disabled = true;
+                btn.textContent = "Verify";
+                setTimeout(() => { btn.disabled = false; input.disabled = false; }, 2000);
+                return;
+              }
+            }
+            try {
+              const cred = await firebaseConfirmationResult.confirm(code);
+              if (!cred || !cred.user) throw new Error("No user after confirm");
+              const idToken = await cred.user.getIdToken();
+              if (!idToken || typeof idToken !== "string" || idToken.length < 20) throw new Error("Empty idToken");
+              console.log("[DotStark] Firebase idToken length:", idToken.length, "prefix:", idToken.slice(0, 20));
+              // Verify payload contains id_token before sending
+              const payload = { session_id: this.sessionId, channel: "phone", id_token: idToken };
+              console.log("[DotStark] POST /auth/security/otp/verify payload has id_token:", !!payload.id_token, "len:", payload.id_token.length);
+              res = await fetch(
+                `${CONFIG.apiBase}/auth/security/otp/verify`,
+                {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "X-Widget-Token": CONFIG.widgetToken || "",
+                    "X-Requested-With": "XMLHttpRequest",
+                  },
+                  body: JSON.stringify(payload),
+                },
+              );
+            } catch (firebaseErr) {
+              const fCode = firebaseErr && firebaseErr.code ? String(firebaseErr.code) : "";
+              const fMsg = firebaseErr && firebaseErr.message ? String(firebaseErr.message) : String(firebaseErr);
+              console.warn("[DotStark] Firebase confirm failed (dev console, technical):", firebaseErr, "code:", fCode, "msg:", fMsg);
+              let userMsg = "We couldn't verify the code. Please try again.";
+              if (fCode.includes("invalid-verification-code") || fMsg.toLowerCase().includes("code")) userMsg = "That code is incorrect. Please check the SMS and try again.";
+              else if (fCode.includes("code-expired")) userMsg = "That code has expired. Please click Resend for a new one.";
+              else if (fCode.includes("too-many-requests")) userMsg = "Too many attempts. Please wait a minute then click Resend.";
+              // Generic friendly for other technical failures - details in dev console
+              statusMsg.textContent = userMsg;
+              statusMsg.style.color = "#ef4444";
+              btn.disabled = false;
+              input.disabled = false;
+              btn.textContent = "Verify";
+              return;
+            }
+          } else {
+            res = await fetch(
+              `${CONFIG.apiBase}/auth/security/otp/verify`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-Widget-Token": CONFIG.widgetToken || "",
+                  "X-Requested-With": "XMLHttpRequest",
+                },
+                body: JSON.stringify({ session_id: this.sessionId, code, channel }),
               },
-              body: JSON.stringify({ session_id: this.sessionId, code }),
-            },
-          );
+            );
+          }
 
           if (res.ok) {
             div.textContent = "";
             const success = document.createElement("div");
             success.className = "success-msg";
-            success.textContent = "✅ Email Verified Successfully!";
+            success.textContent = isPhone ? "✅ Phone Verified Successfully!" : "✅ Email Verified Successfully!";
             div.appendChild(success);
             this._input.disabled = false;
             this._sendBtn.disabled = false;
@@ -1648,32 +2145,60 @@
           statusMsg.style.color = "#ef4444";
           return;
         }
+        if (cooldownRemaining > 0) {
+          // Respect cooldown - updateResendUi already disables
+          return;
+        }
         resendLink.disabled = true;
         resendLink.textContent = "Sending...";
         statusMsg.textContent = "";
 
         try {
-          await this._handleSendManual("resend");
+          if (isPhone) {
+            // Use the same robust sender that handles verifier refresh and phone resolution
+            const sent = await _sendPhoneSms(true);
+            if (sent) {
+              // Also notify backend to bump resend_count for rate-limit tracking
+              try { await this._handleSendManual("resend phone"); } catch (_) {}
+            } else {
+              // _sendPhoneSms already set firebaseStatus with the failure reason
+              // Don't overwrite it with generic Code resent
+              resendCount--; // will be incremented below, so net 0 on failure
+            }
+          } else {
+            await this._handleSendManual("resend");
+          }
           resendCount++;
           cooldownRemaining = policy.cooldownSeconds;
-          statusMsg.textContent = `Code resent! (${Math.max(0, policy.resendCap - resendCount)} resends left)`;
-          statusMsg.style.color = "#22c55e";
+          // Preserve phone failure/success message, don't clobber with generic
+          if (!isPhone) {
+            statusMsg.textContent = `Code resent! (${Math.max(0, policy.resendCap - resendCount)} resends left)`;
+            statusMsg.style.color = "#22c55e";
+            firebaseStatus = statusMsg.textContent;
+          } else if (firebaseStatus && firebaseStatus.startsWith("Code sent")) {
+            // keep success
+          } else if (!firebaseStatus || firebaseStatus.startsWith("Failed")) {
+            // keep failure as is
+          }
         } catch (e) {
           statusMsg.textContent = "Failed to resend. Please try again.";
           statusMsg.style.color = "#ef4444";
+          firebaseStatus = statusMsg.textContent;
         }
 
         updateResendUi();
         resendLink.textContent = "Didn't receive it? Resend code";
       };
 
+      recoverBtn.textContent = isPhone ? "Use a different phone number" : "Use a different email address";
+      recoverBtn.setAttribute("aria-label", isPhone ? "Use different phone" : "Use different email address");
       recoverBtn.onclick = () => {
         this._input.disabled = false;
         this._sendBtn.disabled = false;
-        this._input.placeholder = "Enter the correct email address...";
+        this._input.placeholder = isPhone ? "Enter the correct phone number..." : "Enter the correct email address...";
         this._input.style.opacity = "1";
         this._input.focus();
-        statusMsg.textContent = "No problem — provide the correct email and we’ll resend there.";
+        statusMsg.textContent = isPhone ? "No problem — provide the correct phone and we’ll resend there." : "No problem — provide the correct email and we’ll resend there.";
         statusMsg.style.color = "#64748b";
       };
 

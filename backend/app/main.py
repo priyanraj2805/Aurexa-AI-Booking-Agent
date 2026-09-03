@@ -63,6 +63,7 @@ CSRF_EXEMPT_PATHS = {
     "/api/v1/auth/security/otp/generate",
     "/api/v1/auth/otp/verify",
     "/api/v1/auth/otp/generate",
+    "/api/v1/widget/client-log",
 }
 
 
@@ -105,10 +106,11 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://127.0.0.1:5174",
         "http://127.0.0.1:8005",
+        "https://dotstark.tech",
+        "https://www.dotstark.tech",
     ],
-    # Allows any Cloudflare tunnel URL (free tunnels use trycloudflare.com,
-    # permanent tunnels use cfargotunnel.com)
-    allow_origin_regex=r"https://.*\.(trycloudflare\.com|cfargotunnel\.com)",
+    # Allows any Cloudflare tunnel URL + production domain dotstark.tech
+    allow_origin_regex=r"https://.*\.(trycloudflare\.com|cfargotunnel\.com|dotstark\.tech)",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=[

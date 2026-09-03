@@ -31,6 +31,10 @@ interface CalendarEvent {
   slot_end: string | null;
   created_at: string;
   collected_data: Record<string, unknown>;
+  meeting_type_snapshot?: string | null;
+  meeting_link_status?: string | null;
+  meeting_link_url?: string | null;
+  meeting_link_provider?: string | null;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────

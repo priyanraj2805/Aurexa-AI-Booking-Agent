@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     # Firecrawl (for website crawling)
     FIRECRAWL_API_KEY: str = os.getenv("FIRECRAWL_API_KEY", "")
 
+    
+
+    # Firebase Phone Auth (aurexa / dotstark-833ec)
+    FIREBASE_API_KEY: str = os.getenv("FIREBASE_API_KEY", "AIzaSyC7zH8cEITPDpfyiqhPo7ZlK1-2DViL1BI")
+    FIREBASE_AUTH_DOMAIN: str = os.getenv("FIREBASE_AUTH_DOMAIN", "dotstark-833ec.firebaseapp.com")
+    FIREBASE_PROJECT_ID: str = os.getenv("FIREBASE_PROJECT_ID", "dotstark-833ec")
+    FIREBASE_APP_ID: str = os.getenv("FIREBASE_APP_ID", "1:287417969813:web:7ba50454917fe54d4f3f9c")
+
     # WhatsApp
     WHATSAPP_APP_SECRET: str = os.getenv("WHATSAPP_APP_SECRET", "")
 

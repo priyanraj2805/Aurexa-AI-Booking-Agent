@@ -1,6 +1,6 @@
 "use client";
 
-import { X, User, Mail, Phone, Clock, Calendar as CalendarIcon, Info, ShieldCheck } from "lucide-react";
+import { X, User, Mail, Phone, Clock, Calendar as CalendarIcon, Info, ShieldCheck, Video } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -13,6 +13,10 @@ interface CalendarEvent {
   slot_end: string | null;
   created_at: string;
   collected_data: Record<string, unknown>;
+  meeting_type_snapshot?: string | null;
+  meeting_link_status?: string | null;
+  meeting_link_url?: string | null;
+  meeting_link_provider?: string | null;
 }
 
 function fmtTime(iso: string): string {
@@ -134,6 +138,36 @@ export function BookingDialog({
                 {event.slot_start ? fmtTime(event.slot_start) : "—"}
               </div>
             </div>
+          </div>
+
+          {/* Booking Mode */}
+          <div className="space-y-2">
+            <h3 className="text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-foreground px-1">Booking Mode</h3>
+            <div className={`rounded-xl p-4 border flex items-center justify-between ${event.meeting_type_snapshot === "ONLINE" ? "bg-blue-500/10 border-blue-500/20" : "bg-secondary/30 border-border/50"}`}>
+              <div className="flex items-center gap-3">
+                <div className={`size-10 rounded-xl flex items-center justify-center shrink-0 ${event.meeting_type_snapshot === "ONLINE" ? "bg-blue-500 text-white" : "bg-muted text-muted-foreground"}`}>
+                  {event.meeting_type_snapshot === "ONLINE" ? <Video className="size-5" /> : <CalendarIcon className="size-5" />}
+                </div>
+                <div>
+                  <div className="text-sm font-semibold">{event.meeting_type_snapshot === "ONLINE" ? "Online" : "Offline"}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {event.meeting_type_snapshot === "ONLINE" ? (event.meeting_link_provider || "Meeting Provider") : "In-person"}
+                    {event.meeting_link_status ? ` • ${event.meeting_link_status}` : ""}
+                  </div>
+                </div>
+              </div>
+              {event.meeting_type_snapshot === "ONLINE" && event.meeting_link_status === "READY" && event.meeting_link_url && (
+                <a href={event.meeting_link_url} target="_blank" rel="noopener noreferrer" className="text-xs font-semibold px-3 py-1.5 rounded-full bg-blue-500 text-white hover:bg-blue-600 transition-colors">
+                  Join Link
+                </a>
+              )}
+            </div>
+            {event.meeting_type_snapshot === "ONLINE" && event.meeting_link_status === "UNAVAILABLE" && (
+              <p className="text-xs text-amber-600 dark:text-amber-400 px-1">Meeting link temporarily unavailable. Please retry.</p>
+            )}
+            {event.meeting_type_snapshot === "ONLINE" && event.meeting_link_url && (
+              <p className="text-xs text-muted-foreground px-1 break-all">Link: <a href={event.meeting_link_url} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">{event.meeting_link_url}</a></p>
+            )}
           </div>
 
           {/* Core Info */}
