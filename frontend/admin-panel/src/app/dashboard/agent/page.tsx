@@ -1152,7 +1152,11 @@ export default function AgentCorePage() {
             <label className="text-[13px] font-semibold text-foreground mb-1.5 block">Meeting Mode</label>
             <select
               value={meetingMode}
-              onChange={(e) => setMeetingMode(e.target.value as "OFFLINE_ONLY" | "ONLINE_ONLY" | "HYBRID")}
+              onChange={(e) => {
+                const next = e.target.value as "OFFLINE_ONLY" | "ONLINE_ONLY" | "HYBRID";
+                setMeetingMode(next);
+                if (next === "OFFLINE_ONLY") setMeetingProviderDefault("NONE");
+              }}
               className="w-full bg-background border border-border rounded-lg px-4 py-2.5 text-sm"
             >
               <option value="OFFLINE_ONLY">Offline only</option>
@@ -1161,15 +1165,22 @@ export default function AgentCorePage() {
             </select>
           </div>
           <div>
-            <label className="text-[13px] font-semibold text-foreground mb-1.5 block">Default Online Provider</label>
+            <label className="text-[13px] font-semibold text-foreground mb-1.5 block">
+              Default Online Provider {meetingMode === "OFFLINE_ONLY" && <span className="text-[11px] font-normal text-muted-foreground">(disabled for Offline)</span>}
+            </label>
             <select
-              value={meetingProviderDefault}
+              value={meetingMode === "OFFLINE_ONLY" ? "NONE" : meetingProviderDefault}
               onChange={(e) => setMeetingProviderDefault(e.target.value as "NONE" | "GOOGLE_MEET")}
-              className="w-full bg-background border border-border rounded-lg px-4 py-2.5 text-sm"
+              disabled={meetingMode === "OFFLINE_ONLY"}
+              className={`w-full bg-background border border-border rounded-lg px-4 py-2.5 text-sm ${meetingMode === "OFFLINE_ONLY" ? "opacity-50 cursor-not-allowed bg-muted" : ""}`}
+              title={meetingMode === "OFFLINE_ONLY" ? "Enable Online or Hybrid mode to select a provider" : undefined}
             >
               <option value="NONE">None</option>
               <option value="GOOGLE_MEET">Google Meet</option>
             </select>
+            {meetingMode === "OFFLINE_ONLY" && (
+              <p className="text-[11px] text-muted-foreground mt-1">Provider selection is disabled for Offline-only bookings.</p>
+            )}
           </div>
         </div>
         <div className="flex items-center justify-between border border-border rounded-lg px-4 py-3">

@@ -1906,8 +1906,17 @@
       };
 
       if (isPhone) {
-        // Defer slightly so updateResendUi is defined
-        setTimeout(() => { _sendPhoneSms(false); }, 100);
+        // Zavu path: backend already sent SMS via /generate (kd78m7agx48rpyegpfrmhp5rsx8dm8t9 sms_oneway).
+        // Do not auto-trigger Firebase SMS — just enable input and show status.
+        // Keep _sendPhoneSms for manual Resend fallback only.
+        setTimeout(() => {
+          firebaseStatus = "Code sent via SMS. Enter it above.";
+          statusMsg.textContent = firebaseStatus;
+          statusMsg.style.color = "#22c55e";
+          updateResendUi();
+          btn.disabled = false;
+          input.disabled = false;
+        }, 100);
       }
 
       let resendCount = Math.max(0, policy.resendCap - policy.resendsLeft);
@@ -1973,6 +1982,53 @@
         try {
           let res;
           if (isPhone) {
+            // Zavu SMS path (kd78m7agx48rpyegpfrmhp5rsx8dm8t9 sms_oneway) — try 6-digit code verify first
+            // Backend already sent SMS via /generate; this is the primary path. Firebase is fallback.
+            try {
+              const zavuPayload = { session_id: this.sessionId, channel: "phone", code };
+              console.warn("[DotStark] Trying Zavu phone verify with code", code.slice(0,2)+"***");
+              _logToBackend("zavu_verify_attempt", `code_len:${code.length}`);
+              const zavuRes = await fetch(`${CONFIG.apiBase}/auth/security/otp/verify`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "X-Widget-Token": CONFIG.widgetToken || "", "X-Requested-With": "XMLHttpRequest" },
+                body: JSON.stringify(zavuPayload)
+              });
+              if (zavuRes.ok) {
+                console.warn("[DotStark] Zavu phone verify succeeded");
+                _logToBackend("zavu_verify_success", code.slice(0,2)+"***");
+                div.textContent = "";
+                const success = document.createElement("div");
+                success.className = "success-msg";
+                success.textContent = "✅ Phone Verified Successfully!";
+                div.appendChild(success);
+                this._input.disabled = false;
+                this._sendBtn.disabled = false;
+                this._input.placeholder = "Type a message...";
+                this._input.style.opacity = "1";
+                setTimeout(() => this._handleSendManual("I've verified the code. Please proceed."), 800);
+                return;
+              } else {
+                const t = await zavuRes.text().catch(()=> "");
+                const detail = t.slice(0,120);
+                console.warn("[DotStark] Zavu verify failed status", zavuRes.status, detail, " — trying Firebase fallback");
+                _logToBackend("zavu_verify_failed", `status:${zavuRes.status} ${detail.slice(0,60)}`);
+                // If 400 invalid/expired, show error and don't fall through to Firebase (code is wrong, not missing)
+                if (zavuRes.status === 400) {
+                  statusMsg.textContent = detail || "That code is incorrect or has expired. Please try again or resend a new code.";
+                  statusMsg.style.color = "#ef4444";
+                  btn.disabled = false;
+                  input.disabled = false;
+                  btn.textContent = "Verify";
+                  input.value = "";
+                  input.focus();
+                  return;
+                }
+                // For 429, 500 etc, fall through to Firebase
+              }
+            } catch (zavuErr) {
+              console.warn("[DotStark] Zavu verify error, falling back to Firebase", zavuErr);
+              _logToBackend("zavu_verify_error", String(zavuErr).slice(0,80));
+            }
             // TEST CODE BYPASS: allow "123456" to complete flow via mock token for local/dev testing
             // This lets you test booking without real SMS when Firebase send is blocked (domain/quota) or using test numbers
             if (code === "123456") {
@@ -2146,7 +2202,6 @@
           return;
         }
         if (cooldownRemaining > 0) {
-          // Respect cooldown - updateResendUi already disables
           return;
         }
         resendLink.disabled = true;
@@ -2154,39 +2209,38 @@
         statusMsg.textContent = "";
 
         try {
+          // For Zavu, resend via backend chat "resend phone" will create a new OTP card with updated resends_left.
+          // Remove this stale card so user sees only the fresh one with correct count.
+          const thisCard = div;
           if (isPhone) {
-            // Use the same robust sender that handles verifier refresh and phone resolution
-            const sent = await _sendPhoneSms(true);
-            if (sent) {
-              // Also notify backend to bump resend_count for rate-limit tracking
-              try { await this._handleSendManual("resend phone"); } catch (_) {}
-            } else {
-              // _sendPhoneSms already set firebaseStatus with the failure reason
-              // Don't overwrite it with generic Code resent
-              resendCount--; // will be incremented below, so net 0 on failure
-            }
+            try { await this._handleSendManual("resend phone"); } catch (_) {}
           } else {
             await this._handleSendManual("resend");
           }
+          // Increment local counter and immediately update this card before it is replaced
           resendCount++;
           cooldownRemaining = policy.cooldownSeconds;
-          // Preserve phone failure/success message, don't clobber with generic
+          // Update this card's display before it gets replaced by the new card from backend
+          const left = Math.max(0, policy.resendCap - resendCount);
           if (!isPhone) {
-            statusMsg.textContent = `Code resent! (${Math.max(0, policy.resendCap - resendCount)} resends left)`;
+            statusMsg.textContent = `Code resent! (${left} resends left)`;
             statusMsg.style.color = "#22c55e";
             firebaseStatus = statusMsg.textContent;
-          } else if (firebaseStatus && firebaseStatus.startsWith("Code sent")) {
-            // keep success
-          } else if (!firebaseStatus || firebaseStatus.startsWith("Failed")) {
-            // keep failure as is
+          } else {
+            firebaseStatus = `Code resent! (${left} resends left)`;
+            statusMsg.textContent = `${firebaseStatus} • Resend available in ${cooldownRemaining}s • ${left} resends left`;
+            statusMsg.style.color = "#22c55e";
           }
+          updateResendUi();
+          // Hide this stale card after a short delay so the new card (with correct 2 left) is visible at bottom
+          setTimeout(() => { try { thisCard.style.opacity = "0.5"; thisCard.style.pointerEvents = "none"; } catch (_) {} }, 300);
         } catch (e) {
           statusMsg.textContent = "Failed to resend. Please try again.";
           statusMsg.style.color = "#ef4444";
           firebaseStatus = statusMsg.textContent;
+          updateResendUi();
         }
 
-        updateResendUi();
         resendLink.textContent = "Didn't receive it? Resend code";
       };
 

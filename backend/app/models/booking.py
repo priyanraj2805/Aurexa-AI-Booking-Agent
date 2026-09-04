@@ -94,7 +94,23 @@ class Booking(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    __table_args__ = (Index("ix_booking_org_created", "org_id", "created_at"),)
+    # Attendance tracking (online vs offline handled differently)
+    attendance_status = Column(
+        String(20),
+        default="SCHEDULED",
+        server_default="SCHEDULED",
+        nullable=False,
+    )  # SCHEDULED / ATTENDED / NO_SHOW / CANCELLED / RESCHEDULED
+    attended_at = Column(DateTime(timezone=True), nullable=True)
+    attendance_marked_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    attendance_notes = Column(String(500), nullable=True)
+    rescheduled_from_id = Column(UUID(as_uuid=True), ForeignKey("bookings.id", ondelete="SET NULL"), nullable=True)
+    cancellation_reason = Column(String(500), nullable=True)
+
+    __table_args__ = (
+        Index("ix_booking_org_created", "org_id", "created_at"),
+        Index("ix_booking_attendance", "org_id", "attendance_status"),
+    )
 
 
 # ─── Virtual Slot Engine Models ────────────────────────────────────────────────

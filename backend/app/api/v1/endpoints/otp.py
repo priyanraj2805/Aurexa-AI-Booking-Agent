@@ -31,22 +31,37 @@ async def request_otp(
     _: None = Depends(deny_impersonation),
     db: AsyncSession = Depends(get_db)
 ):
-    """Generates an OTP for the given session+channel. Email uses SMTP, phone uses Firebase (widget sends SMS)."""
+    """Generates an OTP for the given session+channel. Email via SMTP, phone via Zavu SMS (kd78m7agx48rpyegpfrmhp5rsx8dm8t9)."""
     channel = (getattr(data, "channel", "email") or "email").lower()
     if channel not in ("email", "phone"):
         channel = "email"
     try:
         code = await generate_otp(db, str(data.session_id), channel=channel)
         logger.info(f"OTP ({channel}) generated for session {data.session_id}")
-        # Dispatch to correct delivery channel
-        # Email: send via SMTP. Phone: widget sends via Firebase, so no SMS sent here.
-        # For phone (Firebase), code is "" and no DB record is created - do not expose demo_code.
         try:
             if channel == "phone":
-                # Phone OTP: widget handles SMS via Firebase, no backend SMS send needed
-                logger.info(f"Phone OTP generated for session {data.session_id} — widget will send via Firebase")
-                # Do not leak demo code for phone; Firebase handles it
-                return OTPGenerateResponse(status="sent", demo_code=None)
+                # Phone OTP via Zavu sms_oneway — fetch phone from session and send SMS
+                from sqlalchemy.future import select as _select2
+                from app.models.session import ChatSession as _CS2
+                import uuid as _uuid3
+
+                sid3 = _uuid3.UUID(str(data.session_id))
+                res3 = await db.execute(_select2(_CS2).where(_CS2.id == sid3))
+                sess3 = res3.scalars().first()
+                phone = ""
+                if sess3 and isinstance(sess3.state_data, dict):
+                    phone = str(sess3.state_data.get("phone") or "").strip()
+                if phone:
+                    from app.core.sms import send_phone_otp_sms
+
+                    try:
+                        await send_phone_otp_sms(phone, code)
+                        logger.info(f"Zavu phone OTP sent to {phone[:6]}*** for session {data.session_id}")
+                    except Exception as sms_err:
+                        logger.error(f"Zavu SMS send failed for {data.session_id}: {sms_err}")
+                        # Keep OTP record; client can retry via resend cooldown
+                else:
+                    logger.warning(f"Phone OTP generate: no phone in session {data.session_id}")
             else:
                 # Email channel — fetch email and send via SMTP
                 from sqlalchemy.future import select as _select
@@ -84,42 +99,43 @@ async def submit_otp(
     data: OTPVerifyRequest,
     db: AsyncSession = Depends(get_db)
 ):
-    """Verifies OTP. Email uses 6-digit code; Phone uses Firebase ID token only.
-
-    Frontend already verifies OTP via Firebase JS SDK (confirmationResult.confirm + getIdToken)
-    and sends Firebase ID token. Backend MUST verify that token via Firebase Admin SDK,
-    extract phone_number, compare with session's stored phone, and mark verified.
-    Raw 6-digit code validation is disabled for phone channel.
-    """
+    """Verifies OTP. Both email and phone (Zavu SMS) use 6-digit code; phone also accepts legacy Firebase id_token."""
     channel = (getattr(data, "channel", "email") or "email").lower()
     if channel not in ("email", "phone"):
         channel = "email"
     id_token = getattr(data, "id_token", None)
 
-    # --- Phone channel: Firebase only, no 6-digit fallback ---
+    # --- Phone channel: Zavu 6-digit code primary, Firebase id_token fallback ---
     if channel == "phone":
-        if not id_token or not str(id_token).strip():
-            raise HTTPException(status_code=400, detail="Firebase ID token required for phone verification. Ensure widget sent id_token after Firebase confirm.")
+        # Prefer Firebase if id_token supplied (legacy widget path)
+        if id_token and str(id_token).strip():
+            try:
+                is_valid = await verify_otp(db, str(data.session_id), code=None, channel="phone", id_token=id_token)
+                if is_valid:
+                    logger.info(f"Phone OTP verified via Firebase for session {data.session_id}")
+                    return OTPVerifyResponse(status="success", message="OTP Verified")
+            except ValueError as e:
+                msg = str(e)
+                low = msg.lower()
+                if any(k in low for k in ("expired", "invalid firebase", "revoked", "missing phone_number", "missing uid", "not configured")):
+                    if "not configured" in low:
+                        msg = msg + " (Check backend logs - FIREBASE_SERVICE_ACCOUNT_JSON missing)"
+                    raise HTTPException(status_code=401, detail=msg)
+                if "too many" in low or "cooldown" in low or "maximum resend" in low:
+                    raise HTTPException(status_code=429, detail=msg)
+                raise HTTPException(status_code=400, detail=msg)
+            # Fall through to code path if token invalid
+        # Zavu 6-digit code path
+        if not data.code or not str(data.code).strip():
+            raise HTTPException(status_code=400, detail="6-digit code required for phone verification (or Firebase id_token).")
         try:
-            is_valid = await verify_otp(db, str(data.session_id), code=None, channel="phone", id_token=id_token)
+            is_valid = await verify_otp(db, str(data.session_id), str(data.code).strip(), channel="phone", id_token=None)
         except ValueError as e:
-            msg = str(e)
-            low = msg.lower()
-            # Map Firebase auth errors to 401 so widget can show them distinctly
-            if any(k in low for k in ("expired", "invalid firebase", "revoked", "missing phone_number", "missing uid", "not configured")):
-                # Include actionable hint for the not-configured case
-                if "not configured" in low:
-                    msg = msg + " (Check backend logs - FIREBASE_SERVICE_ACCOUNT_JSON missing in backend/.env.docker)"
-                raise HTTPException(status_code=401, detail=msg)
-            if "too many" in low or "cooldown" in low or "maximum resend" in low:
-                raise HTTPException(status_code=429, detail=msg)
-            raise HTTPException(status_code=400, detail=msg)
+            raise HTTPException(status_code=429, detail=str(e))
         if is_valid:
-            logger.info(f"Phone OTP verified for session {data.session_id}")
+            logger.info(f"Phone OTP verified via Zavu code for session {data.session_id}")
             return OTPVerifyResponse(status="success", message="OTP Verified")
-        # Token valid but phone mismatch - include expected vs token for debugging (masked)
-        logger.warning(f"Phone number mismatch for session {data.session_id}: session phone vs token phone differ")
-        raise HTTPException(status_code=400, detail="Phone number mismatch - the verified number does not match the booking phone. Please re-enter phone correctly.")
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP code")
 
     # --- Email channel: 6-digit code ---
     try:

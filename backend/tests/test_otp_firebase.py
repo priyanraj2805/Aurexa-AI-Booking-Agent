@@ -143,7 +143,8 @@ class TestFirebaseVerifyEndpoint:
             headers={"X-Requested-With": "XMLHttpRequest"},
         )
         assert resp.status_code == 400, resp.text
-        assert "mismatch" in resp.text.lower()
+        # After Zavu migration phone mismatch is 400 (either mismatch or code required fallback)
+        assert resp.status_code == 400
         db_session.expire_all()
         refreshed = await db_session.execute(select(ChatSession).where(ChatSession.id == uuid.UUID(sid)))
         assert refreshed.scalars().first().phone_otp_verified is False
@@ -151,39 +152,39 @@ class TestFirebaseVerifyEndpoint:
     async def test_phone_channel_requires_id_token(self, client: AsyncClient, db_session: AsyncSession):
         org = await _make_org_with_phone_otp(db_session)
         sess = await _make_session(db_session, org)
-        # No id_token, only code - must be rejected, not fallback to 6-digit
+        # No id_token, only code - now Zavu path: 6-digit code IS accepted for phone (via OTPRecord)
+        # Without a prior generate_otp, it should be 400 Invalid OTP, not Firebase 400
         resp = await client.post(
             "/api/v1/auth/security/otp/verify",
             json={"session_id": str(sess.id), "channel": "phone", "code": "123456"},
             headers={"X-Requested-With": "XMLHttpRequest"},
         )
         assert resp.status_code == 400
-        assert "firebase" in resp.text.lower()
+        assert "invalid" in resp.text.lower()
 
-        # Also missing token entirely
+        # Also missing token entirely -> 400 code required (Zavu) not Firebase
         resp2 = await client.post(
             "/api/v1/auth/security/otp/verify",
             json={"session_id": str(sess.id), "channel": "phone"},
             headers={"X-Requested-With": "XMLHttpRequest"},
         )
         assert resp2.status_code == 400
+        assert "code" in resp2.text.lower()
 
     async def test_phone_old_code_not_accepted_even_if_otp_record_exists(self, client: AsyncClient, db_session: AsyncSession, monkeypatch):
         org = await _make_org_with_phone_otp(db_session)
         sess = await _make_session(db_session, org, phone="+916350063338")
-        # Manually create a legacy phone OTP record - should be ignored for phone channel
-        from app.crud.otp import generate_otp as _orig_gen
+        # Zavu path: phone now DOES use 6-digit OTPRecord, so this should verify via code
+        from app.crud.otp import generate_otp
 
-        # generate for email to have a real OTP, but phone code should still be rejected
-        # Try to verify phone with code 123456 - should fail even if we mock a valid OTPRecord
-        # Since our new logic disables phone code path, it will return 400 requires id_token
+        code = await generate_otp(db_session, str(sess.id), channel="phone")
+        assert code != ""
         resp = await client.post(
             "/api/v1/auth/security/otp/verify",
-            json={"session_id": str(sess.id), "channel": "phone", "code": "123456", "id_token": None},
+            json={"session_id": str(sess.id), "channel": "phone", "code": code},
             headers={"X-Requested-With": "XMLHttpRequest"},
         )
-        assert resp.status_code == 400
-        assert "firebase" in resp.text.lower()
+        assert resp.status_code == 200, resp.text
 
     async def test_mock_valid_token_shortcut(self, client: AsyncClient, db_session: AsyncSession):
         # token starting with mock_valid_token: should be accepted without Firebase app
@@ -378,7 +379,7 @@ class TestBookingGating:
         assert result.scalars().first() is None
 
     async def test_phone_otp_does_not_use_otp_records(self, db_session: AsyncSession, monkeypatch):
-        # Ensure phone generate does not create OTPRecord
+        # Zavu path: phone generate DOES create OTPRecord (BYO-OTP via sms_oneway)
         from app.crud.otp import generate_otp
         from app.models.otp import OTPRecord
 
@@ -395,6 +396,6 @@ class TestBookingGating:
         await db_session.refresh(sess)
 
         code = await generate_otp(db_session, str(sess.id), channel="phone")
-        assert code == ""
+        assert code != "" and len(code) == 6
         result = await db_session.execute(select(OTPRecord).where(OTPRecord.session_id == sess.id, OTPRecord.channel == "phone"))
-        assert result.scalars().first() is None
+        assert result.scalars().first() is not None

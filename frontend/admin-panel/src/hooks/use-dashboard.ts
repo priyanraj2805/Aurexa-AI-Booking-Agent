@@ -120,6 +120,10 @@ export interface BookingPageItem extends BookingItem {
   meeting_link_status?: string | null;
   meeting_link_url?: string | null;
   meeting_link_provider?: string | null;
+  attendance_status?: string | null;
+  attended_at?: string | null;
+  attendance_notes?: string | null;
+  cancellation_reason?: string | null;
 }
 
 export interface CancelledBookingItem {
@@ -368,17 +372,19 @@ export function useRecentBookings(limit = 20) {
 export function useBookings(
   page: number,
   pageSize = 10,
-  filters?: { search?: string; status?: string; fromDate?: string; toDate?: string }
+  filters?: { search?: string; status?: string; attendance_status?: string; meeting_mode?: string; fromDate?: string; toDate?: string }
 ) {
   const rangeOk = isDateRangeValid(filters?.fromDate || "", filters?.toDate || "");
   const qs = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
   if (rangeOk && filters?.search) qs.append("search", filters.search);
   if (rangeOk && filters?.status) qs.append("status", filters.status);
+  if (filters?.attendance_status) qs.append("attendance_status", filters.attendance_status);
+  if (filters?.meeting_mode) qs.append("meeting_mode", filters.meeting_mode);
   if (rangeOk && filters?.fromDate) qs.append("from_date", toApiDate(filters.fromDate) || filters.fromDate);
   if (rangeOk && filters?.toDate) qs.append("to_date", toApiDateTo(filters.toDate) || filters.toDate);
   return useApi<Paginated<BookingPageItem>>(
     rangeOk ? `/dashboard/bookings?${qs.toString()}` : "",
-    [page, pageSize, filters?.search, filters?.status, filters?.fromDate, filters?.toDate, rangeOk]
+    [page, pageSize, filters?.search, filters?.status, filters?.attendance_status, filters?.meeting_mode, filters?.fromDate, filters?.toDate, rangeOk]
   );
 }
 

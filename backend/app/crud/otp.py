@@ -207,23 +207,9 @@ async def generate_otp(
     if resend and resend_count >= OTP_RESEND_CAP:
         raise ValueError("Maximum resend attempts reached. Please try again later.")
 
-    # --- Firebase phone channel: no DB OTPRecord, only policy ---
-    if channel == "phone":
-        if resend:
-            resend_count += 1
-        policy_state["resend_count"] = resend_count
-        policy_state["last_sent_at"] = now.isoformat()
-        session_state = dict(session.state_data) if isinstance(session.state_data, dict) else {}
-        session_state[_channel_policy_key(channel)] = policy_state
-        session.state_data = session_state
-        # Clean any stale OTPRecord for phone that may exist from old flow
-        old = await db.execute(select(OTPRecord).where(OTPRecord.session_id == sid, OTPRecord.channel == "phone"))
-        rec = old.scalars().first()
-        if rec:
-            await db.delete(rec)
-        await db.commit()
-        # Return empty - frontend will use Firebase SMS, not this code
-        return ""
+    # --- Zavu phone channel: create OTPRecord like email (BYO-OTP) ---
+    # Firebase path deprecated — Zavu sms_oneway (kd78m7agx48rpyegpfrmhp5rsx8dm8t9) now delivers code
+    # Fall through to shared 6-digit generation below for channel=="phone" as well
 
     code = f"{secrets.randbelow(1000000):06d}"
     code_hash = _hash_code(code)
@@ -258,54 +244,36 @@ async def generate_otp(
     return code
 
 async def verify_otp(db: AsyncSession, session_id: str, code: Optional[str] = None, channel: str = "email", id_token: Optional[str] = None) -> bool:
-    """Verifies OTP. For channel=phone (Firebase), uses Firebase Admin SDK only.
+    """Verifies OTP. Email and Phone (Zavu SMS) both use 6-digit OTPRecord.
 
-    - Phone channel with id_token: verifies Firebase token, checks phone_number matches session, marks verified.
-    - Phone channel with code (old 6-digit): disabled - returns False, forces Firebase flow.
-    - Email channel: uses 6-digit OTPRecord as before.
+    Phone channel now uses Zavu sms_oneway (kd78m7agx48rpyegpfrmhp5rsx8dm8t9) BYO-OTP:
+    - Generate: 6-digit code stored hashed, expires 900s
+    - Verify: hash compare, then phone_otp_verified=True
+    Firebase id_token path kept as fallback if caller supplies it (legacy).
     """
     channel = (channel or "email").lower().strip()
     if channel not in ("email", "phone"):
         channel = "email"
 
-    # --- Firebase phone channel: MUST use id_token, never code ---
-    if channel == "phone":
-        if not id_token:
-            # Old 6-digit path disabled for phone. Caller must supply Firebase ID token.
-            return False
-        # Load session and expected phone
+    # --- Firebase fallback: if phone channel called with id_token, keep legacy verify (exclusive) ---
+    if channel == "phone" and id_token and str(id_token).strip():
+        # Legacy Firebase path — exclusive when id_token supplied (no fallback to code)
         import uuid as _uuid2
 
-        try:
-            sid2 = _uuid2.UUID(session_id)
-        except Exception:
-            raise ValueError("Invalid session_id")
+        sid2 = _uuid2.UUID(session_id)
         res2 = await db.execute(select(ChatSession).where(ChatSession.id == sid2))
         sess2 = res2.scalars().first()
         if not sess2:
             return False
         expected_phone = str(sess2.state_data.get("phone") or "").strip() if isinstance(sess2.state_data, dict) else ""
-        if not expected_phone:
-            # No phone stored - log for debugging (masked)
-            import logging as _log
-            _log.getLogger(__name__).warning(f"verify_otp phone: no expected_phone for session {session_id}")
-            return False
-
-        # Verify Firebase ID token via Admin SDK - raises ValueError on invalid/expired
         from app.core.firebase import verify_firebase_id_token_admin
 
-        decoded = await verify_firebase_id_token_admin(id_token)
+        decoded = await verify_firebase_id_token_admin(id_token)  # may raise ValueError -> caller maps to 401
         token_phone = decoded.get("phone_number") or ""
-        # Strict E.164 comparison with debug log
         norm_expected = _normalize_phone(expected_phone)
         norm_token = _normalize_phone(token_phone)
         if norm_token != norm_expected:
-            import logging as _log2
-            _log2.getLogger(__name__).warning(
-                f"verify_otp phone mismatch session={session_id} expected={norm_expected[:6]}*** token={norm_token[:6]}***"
-            )
-            return False
-        # Success - mark phone verified, clear policy, bind context_key
+            return False  # mismatch -> endpoint returns 400 mismatch
         sess2.phone_otp_verified = True
         state2 = dict(sess2.state_data) if isinstance(sess2.state_data, dict) else {}
         state2.pop(_channel_policy_key("phone"), None)

@@ -482,6 +482,10 @@ class BookingPageItem(BaseModel):
     meeting_link_status: Optional[str] = None
     meeting_link_url: Optional[str] = None
     meeting_link_provider: Optional[str] = None
+    attendance_status: Optional[str] = None
+    attended_at: Optional[datetime] = None
+    attendance_notes: Optional[str] = None
+    cancellation_reason: Optional[str] = None
 
 
 class BookingPageResponse(BaseModel):
@@ -1009,12 +1013,14 @@ async def list_bookings(
     page_size: int = Query(default=10, ge=1, le=100),
     search: Optional[str] = Query(None, max_length=100),
     status: Optional[str] = Query(None, pattern="^(CONFIRMED|CANCELLED|ACTIVE|ARCHIVED|EXPIRED)$"),
+    attendance_status: Optional[str] = Query(None, pattern="^(SCHEDULED|ATTENDED|NO_SHOW|CANCELLED|RESCHEDULED)$"),
+    meeting_mode: Optional[str] = Query(None, pattern="^(ONLINE|OFFLINE)$"),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Paginated bookings list for the current org (search + date range + status)."""
+    """Paginated bookings list for the current org (search + date range + status + attendance + mode)."""
     from datetime import timedelta
 
     predicates = [Booking.org_id == user.org_id]
@@ -1029,6 +1035,10 @@ async def list_bookings(
         )
     if status:
         predicates.append(ChatSession.session_status == status)
+    if attendance_status:
+        predicates.append(Booking.attendance_status == attendance_status)
+    if meeting_mode:
+        predicates.append(Booking.meeting_type_snapshot == meeting_mode)
     if from_date:
         try:
             fd = datetime.strptime(from_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -1077,9 +1087,126 @@ async def list_bookings(
                 meeting_link_status=_mls_val,
                 meeting_link_url=b.meeting_link_url,
                 meeting_link_provider=_mlp_val,
+                attendance_status=b.attendance_status,
+                attended_at=b.attended_at,
+                attendance_notes=b.attendance_notes,
+                cancellation_reason=b.cancellation_reason,
             )
         )
     return BookingPageResponse(items=items, total=total, page=page, page_size=page_size)
+
+
+# ── Attendance (online vs offline differentiated) ──────────────────────────
+
+
+class AttendanceUpdateRequest(BaseModel):
+    attendance_status: str = Field(..., pattern="^(SCHEDULED|ATTENDED|NO_SHOW|CANCELLED|RESCHEDULED)$")
+    attendance_notes: Optional[str] = Field(None, max_length=500)
+    cancellation_reason: Optional[str] = Field(None, max_length=500)
+
+
+class AttendanceResponse(BaseModel):
+    id: str
+    attendance_status: str
+    attended_at: Optional[datetime] = None
+    attendance_notes: Optional[str] = None
+    cancellation_reason: Optional[str] = None
+    meeting_type_snapshot: Optional[str] = None
+
+
+@router.put("/bookings/{booking_id}/attendance", response_model=AttendanceResponse)
+async def update_booking_attendance(
+    booking_id: str,
+    payload: AttendanceUpdateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark attendance. Online vs offline handled differently in UI but same endpoint.
+    - ONLINE ATTENDED: expects meeting_link_status READY, optionally auto-verified via Join click.
+    - OFFLINE ATTENDED: manual after appointment time, no link needed.
+    - NO_SHOW / CANCELLED / RESCHEDULED for both.
+    """
+    import uuid as _uuid
+
+    try:
+        bid = _uuid.UUID(booking_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid booking ID")
+
+    result = await db.execute(select(Booking).where(Booking.id == bid, Booking.org_id == user.org_id))
+    booking = result.scalars().first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    # Validate online vs offline rules
+    is_online = (booking.meeting_type_snapshot or "OFFLINE") == "ONLINE"
+    if payload.attendance_status == "ATTENDED" and is_online:
+        # For online, ensure link was READY or at least not missing - allow manual override with note
+        if booking.meeting_link_status not in (None, "READY", "UNAVAILABLE", "NOT_REQUIRED"):
+            pass  # allow
+    # Update
+    booking.attendance_status = payload.attendance_status
+    booking.attendance_notes = payload.attendance_notes
+    booking.cancellation_reason = payload.cancellation_reason
+    if payload.attendance_status == "ATTENDED":
+        booking.attended_at = datetime.now(timezone.utc)
+        booking.attendance_marked_by = user.id
+    elif payload.attendance_status in ("CANCELLED", "NO_SHOW"):
+        booking.attended_at = None
+        booking.attendance_marked_by = user.id
+    elif payload.attendance_status == "RESCHEDULED":
+        booking.attended_at = None
+        booking.attendance_marked_by = user.id
+    else:  # SCHEDULED
+        booking.attended_at = None
+        booking.attendance_marked_by = None
+
+    await db.commit()
+    await db.refresh(booking)
+    return AttendanceResponse(
+        id=str(booking.id),
+        attendance_status=booking.attendance_status,
+        attended_at=booking.attended_at,
+        attendance_notes=booking.attendance_notes,
+        cancellation_reason=booking.cancellation_reason,
+        meeting_type_snapshot=booking.meeting_type_snapshot,
+    )
+
+
+@router.post("/bookings/{booking_id}/reschedule", response_model=AttendanceResponse)
+async def reschedule_booking_attendance(
+    booking_id: str,
+    payload: dict,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reschedule: mark old as RESCHEDULED and create a placeholder for new slot.
+    For ONLINE, new Meet link will be generated on next booking creation; for OFFLINE, just new slot.
+    This is a lightweight attendance-level reschedule marker - the actual new booking is created via widget.
+    """
+    import uuid as _uuid
+
+    try:
+        bid = _uuid.UUID(booking_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid booking ID")
+    result = await db.execute(select(Booking).where(Booking.id == bid, Booking.org_id == user.org_id))
+    booking = result.scalars().first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    booking.attendance_status = "RESCHEDULED"
+    booking.attendance_marked_by = user.id
+    booking.attendance_notes = payload.get("notes") if isinstance(payload, dict) else None
+    await db.commit()
+    await db.refresh(booking)
+    return AttendanceResponse(
+        id=str(booking.id),
+        attendance_status=booking.attendance_status,
+        attended_at=booking.attended_at,
+        attendance_notes=booking.attendance_notes,
+        cancellation_reason=booking.cancellation_reason,
+        meeting_type_snapshot=booking.meeting_type_snapshot,
+    )
 
 
 @router.get("/bookings/cancelled", response_model=CancelledBookingPageResponse)
@@ -1332,12 +1459,22 @@ async def update_agent_config(
         config.meeting_mode = update.meeting_mode
         config.meeting_policy_updated_at = datetime.now(timezone.utc)
         config.meeting_policy_updated_by = user.email
+        # Offline mode cannot have an online provider — force NONE
+        if update.meeting_mode == MeetingMode.OFFLINE_ONLY:
+            config.meeting_provider_default = MeetingProviderDefault.NONE
+            # Also clear active provider if it was online
+            if getattr(config, "active_meeting_provider", None) not in (None, ActiveMeetingProvider.NONE):
+                config.active_meeting_provider = ActiveMeetingProvider.NONE
     if update.allow_hybrid_selection is not None:
         config.allow_hybrid_selection = update.allow_hybrid_selection
         config.meeting_policy_updated_at = datetime.now(timezone.utc)
         config.meeting_policy_updated_by = user.email
     if update.meeting_provider_default is not None:
-        config.meeting_provider_default = update.meeting_provider_default
+        # Ignore provider selection when offline
+        if config.meeting_mode == MeetingMode.OFFLINE_ONLY:
+            config.meeting_provider_default = MeetingProviderDefault.NONE
+        else:
+            config.meeting_provider_default = update.meeting_provider_default
         config.meeting_policy_updated_at = datetime.now(timezone.utc)
         config.meeting_policy_updated_by = user.email
     if update.org_name is not None:

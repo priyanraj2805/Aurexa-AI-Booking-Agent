@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     # WhatsApp
     WHATSAPP_APP_SECRET: str = os.getenv("WHATSAPP_APP_SECRET", "")
 
+    # Zavu SMS (phone OTP via Zavu shared/one-way sender)
+    ZAVU_API_KEY: str = os.getenv("ZAVU_API_KEY", "")
+    ZAVU_SENDER_ID: str = os.getenv("ZAVU_SENDER_ID", "kd78m7agx48rpyegpfrmhp5rsx8dm8t9")
+    ZAVU_BASE_URL: str = os.getenv("ZAVU_BASE_URL", "https://api.zavu.dev")
+
     # Phase 2 runtime cutover controls (web channel only)
     RUNTIME_CANARY_FALLBACK_ENABLED: bool = (
         os.getenv("RUNTIME_CANARY_FALLBACK_ENABLED", "false").lower()

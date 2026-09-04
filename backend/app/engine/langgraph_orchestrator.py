@@ -988,10 +988,19 @@ async def process_message_with_graph(
     booking_field_meta: Optional[Dict[str, Any]] = None
     raw_require_otp = getattr(org_config, "require_otp", True)
     require_otp = True if raw_require_otp is None else bool(raw_require_otp)
+    raw_require_phone_otp = getattr(org_config, "require_phone_otp", False)
+    require_phone_otp = bool(raw_require_phone_otp)
     otp_required = (
         require_otp
         and result.get("otp_required") is True
         and not chat_session.otp_verified
+    )
+    # Phone OTP — Zavu sms_oneway (kd78m7agx48rpyegpfrmhp5rsx8dm8t9) BYO-OTP; independent of email gate
+    phone_otp_required = (
+        require_phone_otp
+        and not getattr(chat_session, "phone_otp_verified", False)
+        and str(chat_session.collected_data.get("phone") or "").strip() != ""
+        and not result.get("follow_up_fields")  # all fields collected
     )
     otp_event_key = str(
         result.get("otp_event_key")
@@ -1048,6 +1057,7 @@ async def process_message_with_graph(
         field_meta.update(otp_policy_meta)
         field_meta["otp_required"] = True
         field_meta["otp_event_key"] = otp_event_key
+        field_meta["channel"] = "email"
         if otp_error:
             field_meta["validation_error"] = otp_error
         if recipient_email:
@@ -1057,6 +1067,50 @@ async def process_message_with_graph(
             )
         else:
             assistant_message = "Please verify your OTP code to continue."
+    elif phone_otp_required:
+        # Phone verification to confirm booking — Zavu SMS
+        phone = str(chat_session.collected_data.get("phone") or "").strip()
+        phone_event_key = f"otp_phone:{session_id}:{phone}:{chat_session.collected_data.get('date','')}:{chat_session.collected_data.get('time','')}"
+        effect_state = _active_effect_state(chat_session)
+        sent_keys = effect_state.get("otp_sent_keys")
+        if not isinstance(sent_keys, list):
+            sent_keys = []
+            effect_state["otp_sent_keys"] = sent_keys
+        otp_error = None
+        if phone_event_key not in sent_keys:
+            try:
+                otp_code = await otp_crud.generate_otp(
+                    db, chat_session.session_id, channel="phone", resend=False
+                )
+                # Send via Zavu sms_oneway
+                try:
+                    from app.core.sms import send_phone_otp_sms
+                    await send_phone_otp_sms(phone, otp_code)
+                except Exception as sms_err:
+                    logger.error(f"Zavu phone OTP send failed for {session_id}: {sms_err}")
+                    raise
+                sent_keys.append(phone_event_key)
+                await crud_chat.update_chat_session(db, session_id, chat_session)
+            except Exception as otp_send_error:
+                otp_error = str(otp_send_error)
+        try:
+            otp_policy_meta = await otp_crud.get_otp_policy_metadata(
+                db, chat_session.session_id, channel="phone"
+            )
+        except Exception:
+            otp_policy_meta = {}
+        directive = "REQUIRE_OTP_MODAL"
+        field_meta.update(otp_policy_meta)
+        field_meta["otp_required"] = True
+        field_meta["channel"] = "phone"
+        field_meta["otp_event_key"] = phone_event_key
+        if otp_error:
+            field_meta["validation_error"] = otp_error
+        masked = phone[:4] + "***" + phone[-2:] if len(phone) > 6 else phone[:3] + "***"
+        assistant_message = (
+            f"Perfect! I've sent a verification code to {masked} via SMS. "
+            "Please enter the 6-digit code here to confirm your booking."
+        )
     elif directive == "REQUEST_CONFIRMATION":
         captured_deltas = field_meta.get("captured_deltas") if isinstance(field_meta, dict) else {}
         has_captured_changes = isinstance(captured_deltas, dict) and bool(captured_deltas)

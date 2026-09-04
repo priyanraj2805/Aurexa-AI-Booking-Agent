@@ -1658,8 +1658,7 @@ async def _handle_booking_flow(
 
     if require_phone_otp and not _phone_verified:
         from app.crud.otp import generate_otp as _gen_phone_otp, get_otp_policy_metadata as _get_phone_meta
-        # For Firebase, don't generate via Plivo here — widget will handle SMS via Firebase JS SDK.
-        # Instead, just return the OTP modal with phone in meta so widget knows which number to verify.
+        # Zavu sms_oneway (kd78m7agx48rpyegpfrmhp5rsx8dm8t9) — BYO-OTP via backend SMS
         _phone_send_key = _build_phone_otp_context_key(chat_session)
         _internal_state = _ensure_internal_state(chat_session)
         _phone = str(chat_session.collected_data.get("phone") or "").strip()
@@ -1668,17 +1667,20 @@ async def _handle_booking_flow(
             meta["channel"] = "phone"
             meta["phone"] = _phone
             return (
-                f"I've sent a verification code to { _phone } via SMS. Please enter it here to continue.",
+                f"I've sent a verification code to {_phone} via SMS. Please enter it here to continue.",
                 "REQUIRE_OTP_MODAL",
                 meta,
             )
         try:
-            # Generate a placeholder OTP record for rate-limiting, but don't send via Plivo for Firebase
-            # The actual SMS will be sent by the widget via Firebase
+            code = await _gen_phone_otp(db, chat_session.session_id, channel="phone", resend=False)
+            # Send via Zavu (shares mock logic with sms.py DEBUG handling)
             try:
-                await _gen_phone_otp(db, chat_session.session_id, channel="phone", resend=False)
-            except Exception as gen_err:
-                logger.warning(f"Phone OTP gen (Firebase) fallback: {gen_err}")
+                from app.core.sms import send_phone_otp_sms
+
+                await send_phone_otp_sms(_phone, code)
+            except Exception as sms_err:
+                logger.error(f"Zavu phone OTP send failed: {sms_err}")
+                # Keep record for retry; surface error but still allow modal (resend)
             _internal_state["phone_otp_send_key"] = _phone_send_key
             _internal_state.pop("phone_otp_verified_key", None)
             await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
@@ -1686,7 +1688,7 @@ async def _handle_booking_flow(
             meta["channel"] = "phone"
             meta["phone"] = _phone
             return (
-                f"I've sent a verification code to { _phone } via SMS. Please enter it here to continue.",
+                f"I've sent a verification code to {_phone} via SMS. Please enter it here to continue.",
                 "REQUIRE_OTP_MODAL",
                 meta,
             )
@@ -3090,11 +3092,11 @@ async def _execute_booking(
                     email_phrase = " A confirmation email is being sent now."
                 else:
                     email_phrase = " I've sent a confirmation email to you."
-        # D-03: Response should mention link unavailability for degraded bookings
+        # D-03: Customer-facing degraded link message (hide internal dashboard details)
         if meeting_link_degraded:
             return (
-                "🎉 Your booking is confirmed! The meeting link couldn't be generated right now. "
-                "Please contact support or retry provider connection from the dashboard. Your reservation is saved."
+                "🎉 Your booking is confirmed! The meeting link will be shared via email shortly. "
+                "Your reservation is saved."
                 + email_phrase,
                 "BOOKING_CONFIRMED_CARD",
                 None,

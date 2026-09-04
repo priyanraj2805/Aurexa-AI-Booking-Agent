@@ -1,18 +1,604 @@
-(function(){"use strict";(function(){console.warn("[DotStark] widget.js loaded, build:","2026-09-01-fix-phone-otp-ready-3-client-log","href:",window.location.href),console.warn("[DotStark] If you see no logs after Verify, ensure console filter is set to All/Verbose, not Errors only");const O={apiKey:"AIzaSyC7zH8cEITPDpfyiqhPo7ZlK1-2DViL1BI",authDomain:"dotstark-833ec.firebaseapp.com",projectId:"dotstark-833ec",storageBucket:"dotstark-833ec.firebasestorage.app",messagingSenderId:"287417969813",appId:"1:287417969813:web:7ba50454917fe54d4f3f9c",measurementId:"G-MB7QC1JRGK"};let D=null,S=null,k=null,A=null;const F="2026-09-01-fix-phone-otp-ready-3-client-log";function T(p,e){try{const t=typeof u<"u"&&u.apiBase?u.apiBase:"/api/v1",n=typeof u<"u"&&u.widgetToken&&u.widgetToken||"";let i="";try{i=window._dotstarkLastSessionId||""}catch{}try{const s=document.querySelector("booking-widget");s&&s.sessionId&&(i=s.sessionId)}catch{}const r={event:String(p||"unknown").slice(0,40),session_id:String(i||"").slice(0,36),channel:"phone",hasConfirmationResult:typeof A<"u"?!!A:null,detail:String(e||"").slice(0,200),phone_masked:""};fetch(`${t}/widget/client-log`,{method:"POST",headers:{"Content-Type":"application/json","X-Widget-Token":n,"X-Requested-With":"XMLHttpRequest"},body:JSON.stringify(r),keepalive:!0}).catch(()=>{})}catch{}}function L(){try{k&&typeof k.clear=="function"&&k.clear()}catch{}k=null;const p=document.getElementById("firebase-recaptcha-container");p&&p.parentNode&&p.parentNode.removeChild(p)}async function U(){if(console.log("[DotStark] Firebase Auth initialization started build:",F),D&&S&&k)try{return console.log("[DotStark] reCAPTCHA already initialized, reusing"),!0}catch{L()}if(D&&!S)try{S=window.firebase.auth()}catch{}try{if(window.firebase||(console.log("[DotStark] Loading Firebase SDK via CDN"),await new Promise((e,t)=>{const n=document.createElement("script");n.src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js",n.onload=()=>{const i=document.createElement("script");i.src="https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js",i.onload=e,i.onerror=()=>t(new Error("firebase-auth-compat load failed")),document.head.appendChild(i)},n.onerror=()=>t(new Error("firebase-app-compat load failed")),document.head.appendChild(n)}),console.log("[DotStark] Firebase SDK loaded")),!window.firebase)throw new Error("Firebase not loaded");if(!D){try{window.firebase.apps&&window.firebase.apps.length?D=window.firebase.apps[0]:D=window.firebase.initializeApp(O)}catch(e){if(window.firebase.apps&&window.firebase.apps.length)D=window.firebase.apps[0];else throw e}console.log("[DotStark] Firebase app initialized, project:",O.projectId)}S||(S=window.firebase.auth());try{S.useDeviceLanguage()}catch{}console.log("[DotStark] Firebase Auth instance ready, hasAuth:",!!S),L();let p=document.getElementById("firebase-recaptcha-container");if(p||(p=document.createElement("div"),p.id="firebase-recaptcha-container",p.style.position="fixed",p.style.bottom="10px",p.style.right="10px",p.style.width="1px",p.style.height="1px",p.style.opacity="0.01",p.style.pointerEvents="none",p.style.zIndex="2147483647",document.body.appendChild(p)),console.log("[DotStark] reCAPTCHA container ready, exists:",!!document.getElementById("firebase-recaptcha-container")),k=new window.firebase.auth.RecaptchaVerifier("firebase-recaptcha-container",{size:"invisible"}),console.log("[DotStark] reCAPTCHA Verifier created, rendering..."),await k.render(),console.log("[DotStark] reCAPTCHA initialized, rendered:",!!k),S&&S.settings)try{S.settings.appVerificationDisabledForTesting=!1}catch{}return!0}catch(p){return console.warn("[DotStark] Firebase init failed",p,"code:",p&&p.code,"message:",p&&p.message),L(),!1}}async function H(){if(k){try{k.clear()}catch{}k=null}return await U()&&!!k&&!!S}function $(p){try{return p&&p.src?`${new URL(p.src,window.location.href).origin}/api/v1`:`${window.location.origin}/api/v1`}catch{return"/api/v1"}}function q(){const p=document.querySelectorAll("script[data-widget-token]");if(!p.length){const n=document.querySelectorAll("script[data-api-key]");if(!n.length)return null;const i=n[n.length-1],r=$(i);return{widgetToken:i.getAttribute("data-api-key"),apiBase:i.getAttribute("data-api-base")||r,primaryColor:i.getAttribute("data-color")||null}}const e=p[p.length-1],t=$(e);return{widgetToken:e.getAttribute("data-widget-token"),apiBase:e.getAttribute("data-api-base")||t,primaryColor:e.getAttribute("data-color")||null}}const u=q()||window.DotStarkBookingConfig||{widgetToken:null,apiBase:$(document.currentScript)};class W extends HTMLElement{constructor(){super(),this.attachShadow({mode:"open"}),this.isOpen=!1,this.sessionId=null,this.isLoading=!1,this._messages=[],this._agentConfig=null,this.userTimezone=this._detectBrowserTimezone(),this.timezoneSource="detected",this.selectedSlotId=null,this.timezoneFallbackUsed=!1,this.timezoneFallbackReason=null,this._timezoneNoticeShown=!1,this.orgTimezone=null,this.selectedDate=null,this._directiveDrafts={},this._activeFieldMeta=null,this._skipToken="__DOTSTARK_SKIP__",this._lastMessageTimestamp=null,this._pollInterval=null,this._humanActive=!1,this._ws=null,this._wsReconnectTimer=null,this._wsReconnectAttempts=0,this._wsConnected=!1,this._renderedMessageIds=new Set,this._pendingRefreshSkips=[]}_sessionStorageKey(){const e=(u.widgetToken||"anonymous").trim()||"anonymous",t=(u.apiBase||"").trim()||"default";return`dotstark_session_id:${e}:${t}`}async connectedCallback(){try{const e=this._sessionStorageKey();u.forceNewSession===!0?(sessionStorage.removeItem(e),sessionStorage.removeItem("dotstark_session_id"),this.sessionId=null):this.sessionId=sessionStorage.getItem(e)||null;const t=sessionStorage.getItem("dotstark_user_timezone"),n=sessionStorage.getItem("dotstark_timezone_source");t&&(this.userTimezone=t,this.timezoneSource=n==="user_selected"?"user_selected":"detected")}catch{}await this._fetchAgentConfig(),this._buildShell(),this._startConfigPolling()}disconnectedCallback(){try{this._configPollInterval&&clearInterval(this._configPollInterval),this._configPollInterval=null}catch{}}_startConfigPolling(){try{this._configPollInterval&&clearInterval(this._configPollInterval),this._configPollInterval=setInterval(async()=>{var r,s,c,d;const e=(r=this._agentConfig)==null?void 0:r.meeting_mode,t=JSON.stringify(((s=this._agentConfig)==null?void 0:s.available_meeting_types)||[]);await this._fetchAgentConfig();const n=(c=this._agentConfig)==null?void 0:c.meeting_mode,i=JSON.stringify(((d=this._agentConfig)==null?void 0:d.available_meeting_types)||[]);(e!==n||t!==i)&&(this._updateMeetingModeBadge(),console.log("[DotStark] meeting mode updated via poll:",e,"->",n))},3e4)}catch{}}_updateMeetingModeBadge(){var e;try{const t=this.shadowRoot&&this.shadowRoot.getElementById("meeting-mode-badge");if(!t)return;const n=this._agentConfig||{},i=(n.meeting_mode||"").toString(),r=Array.isArray(n.available_meeting_types)?n.available_meeting_types:[];let s="",c=!0;if(i==="ONLINE_ONLY"||r.length===1&&r[0]==="ONLINE"?s="Online • "+(n.meeting_provider_default&&n.meeting_provider_default!=="NONE"?"Google Meet":"Online"):i==="OFFLINE_ONLY"||r.length===1&&r[0]==="OFFLINE"?s="Offline • In-person":i==="HYBRID"||r.length===2?s="Hybrid • Online + Offline":c=!1,c&&s){t.textContent=s,t.style.display="inline-block";try{const d=((e=this._agentConfig)==null?void 0:e.brand_color)||typeof u<"u"&&u.primaryColor||this.style.getPropertyValue("--brand-color")||"#3B82F6";t.style.color="white",t.style.borderColor=d||"#3B82F6",t.style.borderWidth="1.5px",t.style.borderStyle="solid",t.style.background="rgba(255,255,255,0.10)"}catch{t.style.color="white"}}else t.style.display="none"}catch{}}async _fetchAgentConfig(){if(u.widgetToken)try{const e=u.apiBase.replace(/\/api\/v1\/?$/,"")+"/api/v1",t=await fetch(`${e}/widget/config?widget_token=${encodeURIComponent(u.widgetToken)}`);t.ok&&(this._agentConfig=await t.json(),this._updateMeetingModeBadge())}catch{}}async _loadHistory(e=null){if(!this.sessionId||!u.widgetToken)return!1;try{let n=`${u.apiBase.replace(/\/api\/v1\/?$/,"")+"/api/v1"}/widget/history?session_id=${encodeURIComponent(this.sessionId)}&widget_token=${encodeURIComponent(u.widgetToken)}`;e&&(n+=`&since=${encodeURIComponent(e)}`);const i=await fetch(n);if(!i.ok)return!1;const r=await i.json();if(!r||r.length===0)return!1;for(const s of r){const c=s.metadata&&s.metadata.human_joined,d=s.metadata&&s.metadata.human_left,a=s.role==="agent"?this._resolveAssistantText(s.content):String(s.content||"");if(!c&&!d&&a){const l=!!(s.id&&this._renderedMessageIds.has(s.id)),m=this._pendingRefreshSkips.some(o=>o.role===s.role&&o.content===a);if(!l&&!m){const o=s.sender_type==="human"?{admin_name:s.human_agent_name}:{};s.id&&this._renderedMessageIds.add(s.id),this._appendBubble(s.role,a,o)}}if(s.created_at&&(this._lastMessageTimestamp=s.created_at),s.metadata&&s.metadata.human_left&&this._onHumanLeft(),s.metadata&&s.metadata.human_joined){const l=s.metadata.admin_name||"Support agent";this._updateHumanStatus(l,!0),this._startFastPolling()}s.sender_type==="human"&&this._startFastPolling()}return this._pendingRefreshSkips=[],!0}catch{return!1}}_startPolling(){if(this._pollInterval)return;const e=this._wsConnected?3e4:this._humanActive?3e3:1e4;this._pollInterval=setInterval(()=>{this.isOpen&&this.sessionId&&this._loadHistory(this._lastMessageTimestamp)},e)}_stopPolling(e=!1){this._pollInterval&&(clearInterval(this._pollInterval),this._pollInterval=null),e||(this._humanActive=!1)}_startFastPolling(){this._humanActive||(this._humanActive=!0,this._stopPolling(!0),this._startPolling())}_onHumanLeft(){this._updateHumanStatus(null,!1),this._stopPolling()}_updateHumanStatus(e,t){const n=this.shadowRoot.getElementById("status-text"),i=this.shadowRoot.querySelector(".status-dot");n&&(t&&e?(n.textContent=`👨‍💼 ${e} is now assisting you`,i&&(i.style.background="#f59e0b")):(n.textContent="Online — Ready to help",i&&(i.style.background="#22c55e")))}_wsBaseUrl(){const e=(u.apiBase||"").replace(/\/+$/,"");return e.startsWith("https://")?"wss://"+e.slice(8):e.startsWith("http://")?"ws://"+e.slice(7):e}_connectWebSocket(){if(!(!this.sessionId||!u.widgetToken)&&!(this._ws&&this._ws.readyState<=1))try{const e=`${this._wsBaseUrl()}/ws/widget?widget_token=${encodeURIComponent(u.widgetToken)}&session_id=${encodeURIComponent(this.sessionId)}`,t=new WebSocket(e);this._ws=t,t.onopen=()=>{this._wsConnected=!0,this._wsReconnectAttempts=0,this._pollInterval&&(this._stopPolling(!0),this._startPolling())},t.onmessage=n=>{let i;try{i=JSON.parse(n.data)}catch{return}this._handleWsEvent(i)},t.onclose=()=>{this._wsConnected=!1,this._ws=null;const n=Math.min(3e4,1e3*Math.pow(2,this._wsReconnectAttempts));this._wsReconnectAttempts++,this._wsReconnectTimer&&clearTimeout(this._wsReconnectTimer),this._wsReconnectTimer=setTimeout(()=>this._connectWebSocket(),n),this._pollInterval&&(this._stopPolling(!0),this._startPolling())},t.onerror=()=>{}}catch{this._wsConnected=!1,this._wsReconnectTimer&&clearTimeout(this._wsReconnectTimer),this._wsReconnectTimer=setTimeout(()=>this._connectWebSocket(),3e3)}}_handleWsEvent(e){switch(e.type){case"connected":break;case"human_joined":this._updateHumanStatus(e.admin_name||"Support agent",!0),this._startFastPolling(),this._humanJoinedShownFor||(this._humanJoinedShownFor=e.session_id,this._appendSystem(`👨‍💼 ${e.admin_name||"Support agent"} joined the chat`));break;case"human_left":this._updateHumanStatus(null,!1),this._humanJoinedShownFor=null,this._appendSystem("👨‍💼 Support agent left. AI assistant resumed."),this._stopPolling(),this._startPolling();break;case"human_message":if(e.message_id&&this._renderedMessageIds.has(e.message_id))return;this._appendHumanBubble(e),e.message_id&&(this._renderedMessageIds.add(e.message_id),this._lastMessageTimestamp=e.created_at||this._lastMessageTimestamp);break}}_buildShell(){var r,s,c,d;const e=((r=this._agentConfig)==null?void 0:r.logo_url)||null;let t=null;if(e)try{t=e.startsWith("http")?e:new URL(e,u.apiBase).href}catch{t=e}const n=t?`<img src="${t}" alt="logo" style="width:100%;height:100%;object-fit:cover;border-radius:12px;display:block;" onerror="this.style.display='none';this.nextElementSibling&& (this.nextElementSibling.style.display='block')"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" style="display:none"><path d="M12 2a3 3 0 0 0-3 3v1a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10H5a2 2 0 0 0-2 2v1a7 7 0 0 0 14 0v-1a2 2 0 0 0-2-2z"/><line x1="12" y1="18" x2="12" y2="22"/></svg>`:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v1a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10H5a2 2 0 0 0-2 2v1a7 7 0 0 0 14 0v-1a2 2 0 0 0-2-2z"/><line x1="12" y1="18" x2="12" y2="22"/></svg>';if(this.shadowRoot.innerHTML=`
+/**
+ * DotStark Booking Widget — Kilo Code Design v2
+ * Shadow DOM web component with rich micro-interactions.
+ *
+ * Embedding (production):
+ *   <script src="https://your-domain/static/widget/widget.js"
+ *     data-widget-token="ds_wid_xxx" data-api-base="https://your-domain/api/v1"
+ *     data-color="#FF6B00" defer></script>
+ *
+ * Embedding (dev):
+ *   window.DotStarkBookingConfig = { widgetToken, apiBase, primaryColor };
+ */
+
+(function () {
+  const _WIDGET_LOAD_BUILD = "2026-09-01-fix-phone-otp-ready-3-client-log";
+  console.warn("[DotStark] widget.js loaded, build:", _WIDGET_LOAD_BUILD, "href:", window.location.href);
+  console.warn("[DotStark] If you see no logs after Verify, ensure console filter is set to All/Verbose, not Errors only");
+  // Firebase config for dotstark-833ec (aurexa) — phone OTP via Firebase
+  const FIREBASE_CONFIG = {
+    apiKey: "AIzaSyC7zH8cEITPDpfyiqhPo7ZlK1-2DViL1BI",
+    authDomain: "dotstark-833ec.firebaseapp.com",
+    projectId: "dotstark-833ec",
+    storageBucket: "dotstark-833ec.firebasestorage.app",
+    messagingSenderId: "287417969813",
+    appId: "1:287417969813:web:7ba50454917fe54d4f3f9c",
+    measurementId: "G-MB7QC1JRGK"
+  };
+  let firebaseApp = null;
+  let firebaseAuth = null;
+  let firebaseRecaptchaVerifier = null;
+  let firebaseConfirmationResult = null;
+
+  // Force-refresh build tag so embed caches bust after this fix
+  const WIDGET_BUILD = "2026-09-01-fix-phone-otp-ready-3-client-log";
+
+  // Send lightweight beacon to backend so docker logs show widget events even if browser console hidden
+  function _logToBackend(event, detail) {
+    try {
+      const base = (typeof CONFIG !== "undefined" && CONFIG.apiBase) ? CONFIG.apiBase : "/api/v1";
+      const token = (typeof CONFIG !== "undefined" && CONFIG.widgetToken) ? CONFIG.widgetToken || "" : "";
+      // sessionId is stored globally by widget after it gets one
+      let sid = "";
+      try { sid = window._dotstarkLastSessionId || ""; } catch (_) {}
+      try {
+        const el = document.querySelector("booking-widget");
+        if (el && el.sessionId) sid = el.sessionId;
+      } catch (_) {}
+      const payload = {
+        event: String(event || "unknown").slice(0, 40),
+        session_id: String(sid || "").slice(0, 36),
+        channel: "phone",
+        hasConfirmationResult: typeof firebaseConfirmationResult !== "undefined" ? !!firebaseConfirmationResult : null,
+        detail: String(detail || "").slice(0, 200),
+        phone_masked: ""
+      };
+      fetch(`${base}/widget/client-log`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Widget-Token": token, "X-Requested-With": "XMLHttpRequest" },
+        body: JSON.stringify(payload),
+        keepalive: true
+      }).catch(() => {});
+    } catch (_) {}
+  }
+
+  function _resetRecaptchaVerifier() {
+    try {
+      if (firebaseRecaptchaVerifier && typeof firebaseRecaptchaVerifier.clear === "function") {
+        firebaseRecaptchaVerifier.clear();
+      }
+    } catch (_) {}
+    firebaseRecaptchaVerifier = null;
+    const old = document.getElementById("firebase-recaptcha-container");
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+  }
+
+  async function ensureFirebase() {
+    console.log("[DotStark] Firebase Auth initialization started build:", WIDGET_BUILD);
+    // If already initialized, ensure verifier is fresh (single-use). Re-create if needed.
+    if (firebaseApp && firebaseAuth && firebaseRecaptchaVerifier) {
+      try {
+        // Verifier may be expired/consumed - test render state, if fails recreate
+        console.log("[DotStark] reCAPTCHA already initialized, reusing");
+        return true;
+      } catch (_) {
+        _resetRecaptchaVerifier();
+      }
+    }
+    if (firebaseApp && !firebaseAuth) {
+      try { firebaseAuth = window.firebase.auth(); } catch (_) {}
+    }
+    try {
+      // Load Firebase via CDN scripts (compat version, works in IIFE)
+      if (!window.firebase) {
+        console.log("[DotStark] Loading Firebase SDK via CDN");
+        await new Promise((resolve, reject) => {
+          const s1 = document.createElement("script");
+          s1.src = "https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js";
+          s1.onload = () => {
+            const s2 = document.createElement("script");
+            s2.src = "https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js";
+            s2.onload = resolve;
+            s2.onerror = () => reject(new Error("firebase-auth-compat load failed"));
+            document.head.appendChild(s2);
+          };
+          s1.onerror = () => reject(new Error("firebase-app-compat load failed"));
+          document.head.appendChild(s1);
+        });
+        console.log("[DotStark] Firebase SDK loaded");
+      }
+      if (!window.firebase) throw new Error("Firebase not loaded");
+      if (!firebaseApp) {
+        // firebase.apps may already contain the app if widget re-injected
+        try {
+          if (window.firebase.apps && window.firebase.apps.length) {
+            firebaseApp = window.firebase.apps[0];
+          } else {
+            firebaseApp = window.firebase.initializeApp(FIREBASE_CONFIG);
+          }
+        } catch (initErr) {
+          // Already initialized error -> reuse existing
+          if (window.firebase.apps && window.firebase.apps.length) firebaseApp = window.firebase.apps[0];
+          else throw initErr;
+        }
+        console.log("[DotStark] Firebase app initialized, project:", FIREBASE_CONFIG.projectId);
+      }
+      if (!firebaseAuth) firebaseAuth = window.firebase.auth();
+      // Ensure auth language/device
+      try { firebaseAuth.useDeviceLanguage(); } catch (_) {}
+      console.log("[DotStark] Firebase Auth instance ready, hasAuth:", !!firebaseAuth);
+      // Create invisible reCAPTCHA verifier in light DOM.
+      // Must be attached to DOM and not display:none; 1px off-screen is ok for invisible.
+      _resetRecaptchaVerifier();
+      let recaptchaContainer = document.getElementById("firebase-recaptcha-container");
+      if (!recaptchaContainer) {
+        recaptchaContainer = document.createElement("div");
+        recaptchaContainer.id = "firebase-recaptcha-container";
+        // Keep in DOM flow but visually hidden - Firebase rejects display:none
+        recaptchaContainer.style.position = "fixed";
+        recaptchaContainer.style.bottom = "10px";
+        recaptchaContainer.style.right = "10px";
+        recaptchaContainer.style.width = "1px";
+        recaptchaContainer.style.height = "1px";
+        recaptchaContainer.style.opacity = "0.01";
+        recaptchaContainer.style.pointerEvents = "none";
+        recaptchaContainer.style.zIndex = "2147483647";
+        document.body.appendChild(recaptchaContainer);
+      }
+      console.log("[DotStark] reCAPTCHA container ready, exists:", !!document.getElementById("firebase-recaptcha-container"));
+      firebaseRecaptchaVerifier = new window.firebase.auth.RecaptchaVerifier("firebase-recaptcha-container", { size: "invisible" });
+      console.log("[DotStark] reCAPTCHA Verifier created, rendering...");
+      await firebaseRecaptchaVerifier.render();
+      console.log("[DotStark] reCAPTCHA initialized, rendered:", !!firebaseRecaptchaVerifier);
+      // Prepare language
+      if (firebaseAuth && firebaseAuth.settings) {
+        try { firebaseAuth.settings.appVerificationDisabledForTesting = false; } catch (_) {}
+      }
+      return true;
+    } catch (e) {
+      console.warn("[DotStark] Firebase init failed", e, "code:", e && e.code, "message:", e && e.message);
+      _resetRecaptchaVerifier();
+      return false;
+    }
+  }
+
+  async function _ensureFreshVerifier() {
+    // signInWithPhoneNumber consumes the verifier - must recreate for every send/resend
+    if (firebaseRecaptchaVerifier) {
+      try { firebaseRecaptchaVerifier.clear(); } catch (_) {}
+      firebaseRecaptchaVerifier = null;
+    }
+    const ok = await ensureFirebase();
+    return ok && !!firebaseRecaptchaVerifier && !!firebaseAuth;
+  }
+
+  function _defaultApiBase(scriptEl) {
+    try {
+      if (scriptEl && scriptEl.src) {
+        const srcUrl = new URL(scriptEl.src, window.location.href);
+        return `${srcUrl.origin}/api/v1`;
+      }
+      return `${window.location.origin}/api/v1`;
+    } catch (e) {
+      return "/api/v1";
+    }
+  }
+
+  // Auto-detect config from <script data-widget-token="..."> attributes
+  function _readScriptAttrs() {
+    const scripts = document.querySelectorAll("script[data-widget-token]");
+    if (!scripts.length) {
+      // Fallback: try legacy data-api-key for backward compat
+      const legacy = document.querySelectorAll("script[data-api-key]");
+      if (!legacy.length) return null;
+      const s = legacy[legacy.length - 1];
+      const defaultApiBase = _defaultApiBase(s);
+      return {
+        widgetToken: s.getAttribute("data-api-key"),
+        apiBase: s.getAttribute("data-api-base") || defaultApiBase,
+        primaryColor: s.getAttribute("data-color") || null,
+      };
+    }
+    const s = scripts[scripts.length - 1];
+    const defaultApiBase = _defaultApiBase(s);
+    return {
+      widgetToken: s.getAttribute("data-widget-token"),
+      apiBase: s.getAttribute("data-api-base") || defaultApiBase,
+      primaryColor: s.getAttribute("data-color") || null,
+    };
+  }
+
+  const CONFIG = _readScriptAttrs() ||
+    window.DotStarkBookingConfig || {
+      widgetToken: null,
+      apiBase: _defaultApiBase(document.currentScript),
+    };
+
+  class BookingWidget extends HTMLElement {
+    constructor() {
+      super();
+      this.attachShadow({ mode: "open" });
+      this.isOpen = false;
+      this.sessionId = null;
+      this.isLoading = false;
+      this._messages = [];
+      this._agentConfig = null;
+      this.userTimezone = this._detectBrowserTimezone();
+      this.timezoneSource = "detected";
+      this.selectedSlotId = null;
+      this.timezoneFallbackUsed = false;
+      this.timezoneFallbackReason = null;
+      this._timezoneNoticeShown = false;
+      this.orgTimezone = null;
+      this.selectedDate = null;
+      this._directiveDrafts = {};
+      this._activeFieldMeta = null;
+      this._skipToken = "__DOTSTARK_SKIP__";
+      this._lastMessageTimestamp = null;
+      this._pollInterval = null;
+      this._humanActive = false;
+      // Phase 4: WebSocket lifecycle state
+      this._ws = null;
+      this._wsReconnectTimer = null;
+      this._wsReconnectAttempts = 0;
+      this._wsConnected = false;
+      // Phase 6/9: track rendered message ids to avoid duplicates when WS + poll overlap
+      this._renderedMessageIds = new Set();
+      // Bubbles just rendered locally during a send; the post-send history
+      // refresh must skip re-rendering these (they have no DB ids yet).
+      this._pendingRefreshSkips = [];
+    }
+
+    _sessionStorageKey() {
+      const tokenPart = (CONFIG.widgetToken || "anonymous").trim() || "anonymous";
+      const basePart = (CONFIG.apiBase || "").trim() || "default";
+      return `dotstark_session_id:${tokenPart}:${basePart}`;
+    }
+
+    async connectedCallback() {
+      try {
+        const sessionKey = this._sessionStorageKey();
+        if (CONFIG.forceNewSession === true) {
+          sessionStorage.removeItem(sessionKey);
+          sessionStorage.removeItem("dotstark_session_id");
+          this.sessionId = null;
+        } else {
+          this.sessionId = sessionStorage.getItem(sessionKey) || null;
+        }
+        const storedTimezone = sessionStorage.getItem("dotstark_user_timezone");
+        const storedSource = sessionStorage.getItem("dotstark_timezone_source");
+        if (storedTimezone) {
+          this.userTimezone = storedTimezone;
+          this.timezoneSource =
+            storedSource === "user_selected" ? "user_selected" : "detected";
+        }
+      } catch (e) {
+        /* sessionStorage unavailable */
+      }
+
+      await this._fetchAgentConfig();
+      this._buildShell();
+      // Poll config every 30s so admin mode changes appear without page reload
+      this._startConfigPolling();
+    }
+
+    disconnectedCallback() {
+      try {
+        if (this._configPollInterval) clearInterval(this._configPollInterval);
+        this._configPollInterval = null;
+      } catch (_) {}
+    }
+
+    _startConfigPolling() {
+      try {
+        if (this._configPollInterval) clearInterval(this._configPollInterval);
+        this._configPollInterval = setInterval(async () => {
+          const prevMode = this._agentConfig?.meeting_mode;
+          const prevAvail = JSON.stringify(this._agentConfig?.available_meeting_types || []);
+          await this._fetchAgentConfig();
+          const newMode = this._agentConfig?.meeting_mode;
+          const newAvail = JSON.stringify(this._agentConfig?.available_meeting_types || []);
+          if (prevMode !== newMode || prevAvail !== newAvail) {
+            this._updateMeetingModeBadge();
+            console.log("[DotStark] meeting mode updated via poll:", prevMode, "->", newMode);
+          }
+        }, 30000);
+      } catch (_) {}
+    }
+
+    _updateMeetingModeBadge() {
+      try {
+        const badge = this.shadowRoot && this.shadowRoot.getElementById("meeting-mode-badge");
+        if (!badge) return;
+        const cfg = this._agentConfig || {};
+        const mode = (cfg.meeting_mode || "").toString();
+        const avail = Array.isArray(cfg.available_meeting_types) ? cfg.available_meeting_types : [];
+        let text = "";
+        let show = true;
+        if (mode === "ONLINE_ONLY" || (avail.length === 1 && avail[0] === "ONLINE")) {
+          text = "Online • " + (cfg.meeting_provider_default && cfg.meeting_provider_default !== "NONE" ? "Google Meet" : "Online");
+        } else if (mode === "OFFLINE_ONLY" || (avail.length === 1 && avail[0] === "OFFLINE")) {
+          text = "Offline • In-person";
+        } else if (mode === "HYBRID" || avail.length === 2) {
+          text = "Hybrid • Online + Offline";
+        } else {
+          show = false;
+        }
+        if (show && text) {
+          badge.textContent = text;
+          badge.style.display = "inline-block";
+          // White text, border = brand color
+          try {
+            const brand = this._agentConfig?.brand_color || (typeof CONFIG !== "undefined" && CONFIG.primaryColor) || this.style.getPropertyValue("--brand-color") || "#3B82F6";
+            badge.style.color = "white";
+            badge.style.borderColor = brand || "#3B82F6";
+            badge.style.borderWidth = "1.5px";
+            badge.style.borderStyle = "solid";
+            badge.style.background = "rgba(255,255,255,0.10)";
+          } catch (_) {
+            badge.style.color = "white";
+          }
+        } else {
+          badge.style.display = "none";
+        }
+      } catch (_) {}
+    }
+
+    async _fetchAgentConfig() {
+      if (!CONFIG.widgetToken) return;
+      try {
+        const base = CONFIG.apiBase.replace(/\/api\/v1\/?$/, "") + "/api/v1";
+        const res = await fetch(
+          `${base}/widget/config?widget_token=${encodeURIComponent(CONFIG.widgetToken)}`,
+        );
+        if (res.ok) {
+          this._agentConfig = await res.json();
+          // Update badge immediately if shell already built
+          this._updateMeetingModeBadge();
+        }
+      } catch (e) {
+        /* config fetch failed — use defaults */
+      }
+    }
+
+    async _loadHistory(sinceTimestamp = null) {
+      if (!this.sessionId || !CONFIG.widgetToken) return false;
+      try {
+        const base = CONFIG.apiBase.replace(/\/api\/v1\/?$/, "") + "/api/v1";
+        let url = `${base}/widget/history?session_id=${encodeURIComponent(this.sessionId)}&widget_token=${encodeURIComponent(CONFIG.widgetToken)}`;
+        if (sinceTimestamp) {
+          url += `&since=${encodeURIComponent(sinceTimestamp)}`;
+        }
+        const res = await fetch(url);
+        if (!res.ok) return false;
+        const messages = await res.json();
+        if (!messages || messages.length === 0) return false;
+        for (const m of messages) {
+          const isHumanJoined = m.metadata && m.metadata.human_joined;
+          const isHumanLeft = m.metadata && m.metadata.human_left;
+          const content =
+            m.role === "agent"
+              ? this._resolveAssistantText(m.content)
+              : String(m.content || "");
+          // Skip appending human_joined/human_left system messages (we show them in header instead)
+          if (!isHumanJoined && !isHumanLeft && content) {
+            const alreadyRendered = !!(m.id && this._renderedMessageIds.has(m.id));
+            const justRendered = this._pendingRefreshSkips.some(
+              (j) => j.role === m.role && j.content === content,
+            );
+            if (!alreadyRendered && !justRendered) {
+              const meta = m.sender_type === "human" ? { admin_name: m.human_agent_name } : {};
+              if (m.id) this._renderedMessageIds.add(m.id);
+              this._appendBubble(m.role, content, meta);
+            }
+          }
+          // Track the latest message timestamp for incremental polling
+          if (m.created_at) {
+            this._lastMessageTimestamp = m.created_at;
+          }
+          // Check for human_left in metadata
+          if (m.metadata && m.metadata.human_left) {
+            this._onHumanLeft();
+          }
+          // Check for human_joined in metadata
+          if (m.metadata && m.metadata.human_joined) {
+            const adminName = m.metadata.admin_name || "Support agent";
+            this._updateHumanStatus(adminName, true);
+            this._startFastPolling();
+          }
+          // Also trigger fast polling if a human agent sent a message
+          if (m.sender_type === "human") {
+            this._startFastPolling();
+          }
+        }
+        this._pendingRefreshSkips = [];
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    /* ─────────── POLLING (fallback only when WS is down) ─────────── */
+    _startPolling() {
+      if (this._pollInterval) return;
+      // Slow polling (10s) when WS is connected, fast polling (3s) when
+      // human is active and WS is down (recovery path).
+      const baseInterval = this._wsConnected ? 30000 : (this._humanActive ? 3000 : 10000);
+      this._pollInterval = setInterval(() => {
+        if (this.isOpen && this.sessionId) {
+          this._loadHistory(this._lastMessageTimestamp);
+        }
+      }, baseInterval);
+    }
+
+    _stopPolling(preserveHumanActive = false) {
+      if (this._pollInterval) {
+        clearInterval(this._pollInterval);
+        this._pollInterval = null;
+      }
+      if (!preserveHumanActive) {
+        this._humanActive = false;
+      }
+    }
+
+    _startFastPolling() {
+      if (this._humanActive) return;
+      this._humanActive = true;
+      this._stopPolling(true);
+      this._startPolling();
+    }
+
+    _onHumanLeft() {
+      this._updateHumanStatus(null, false);
+      this._stopPolling();
+    }
+
+    _updateHumanStatus(adminName, isActive) {
+      const statusText = this.shadowRoot.getElementById("status-text");
+      const statusDot = this.shadowRoot.querySelector(".status-dot");
+      if (!statusText) return;
+
+      if (isActive && adminName) {
+        statusText.textContent = `👨‍💼 ${adminName} is now assisting you`;
+        if (statusDot) statusDot.style.background = "#f59e0b"; // amber for human agent
+      } else {
+        statusText.textContent = "Online \u2014 Ready to help";
+        if (statusDot) statusDot.style.background = "#22c55e"; // green for AI
+      }
+    }
+
+    /* ─────────── WEBSOCKET (real-time channel; Phase 4) ─────────── */
+
+    _wsBaseUrl() {
+      // Convert http(s) → ws(s) and strip /api/v1 suffix because the WS
+      // endpoint lives at /ws/widget (under api/v1).
+      const base = (CONFIG.apiBase || "").replace(/\/+$/, "");
+      if (base.startsWith("https://")) return "wss://" + base.slice(8);
+      if (base.startsWith("http://")) return "ws://" + base.slice(7);
+      return base;
+    }
+
+    _connectWebSocket() {
+      if (!this.sessionId || !CONFIG.widgetToken) return;
+      if (this._ws && this._ws.readyState <= 1) return; // CONNECTING or OPEN
+      try {
+        const url = `${this._wsBaseUrl()}/ws/widget?widget_token=${encodeURIComponent(CONFIG.widgetToken)}&session_id=${encodeURIComponent(this.sessionId)}`;
+        const ws = new WebSocket(url);
+        this._ws = ws;
+
+        ws.onopen = () => {
+          this._wsConnected = true;
+          this._wsReconnectAttempts = 0;
+          // Restart polling with the slow "WS-connected" cadence so it
+          // exists as a recovery safety net but doesn't hammer the server.
+          if (this._pollInterval) {
+            this._stopPolling(true);
+            this._startPolling();
+          }
+        };
+
+        ws.onmessage = (e) => {
+          let event;
+          try { event = JSON.parse(e.data); } catch { return; }
+          this._handleWsEvent(event);
+        };
+
+        ws.onclose = () => {
+          this._wsConnected = false;
+          this._ws = null;
+          // Reconnect with exponential backoff (capped at 30s)
+          const delay = Math.min(30000, 1000 * Math.pow(2, this._wsReconnectAttempts));
+          this._wsReconnectAttempts++;
+          if (this._wsReconnectTimer) clearTimeout(this._wsReconnectTimer);
+          this._wsReconnectTimer = setTimeout(() => this._connectWebSocket(), delay);
+          // While WS is down, ensure polling is active at the human-aware rate
+          if (this._pollInterval) {
+            this._stopPolling(true);
+            this._startPolling();
+          }
+        };
+
+        ws.onerror = () => {
+          // onclose will fire after; nothing extra to do here.
+        };
+      } catch (e) {
+        // Construction failure → retry via onclose path on next tick
+        this._wsConnected = false;
+        if (this._wsReconnectTimer) clearTimeout(this._wsReconnectTimer);
+        this._wsReconnectTimer = setTimeout(() => this._connectWebSocket(), 3000);
+      }
+    }
+
+    _handleWsEvent(event) {
+      switch (event.type) {
+        case "connected":
+          // Server confirmed registration; nothing else to do.
+          break;
+        case "human_joined":
+          this._updateHumanStatus(event.admin_name || "Support agent", true);
+          this._startFastPolling();
+          // Idempotent: skip if a system message for this join already shown
+          if (!this._humanJoinedShownFor) {
+            this._humanJoinedShownFor = event.session_id;
+            this._appendSystem(`👨‍💼 ${event.admin_name || "Support agent"} joined the chat`);
+          }
+          break;
+        case "human_left":
+          this._updateHumanStatus(null, false);
+          this._humanJoinedShownFor = null;
+          this._appendSystem("👨‍💼 Support agent left. AI assistant resumed.");
+          this._stopPolling();
+          // Reconnect polling at slow cadence
+          this._startPolling();
+          break;
+        case "human_message":
+          // Phase 6/9: render as a distinct human bubble
+          if (event.message_id && this._renderedMessageIds.has(event.message_id)) {
+            return; // de-dupe
+          }
+          this._appendHumanBubble(event);
+          if (event.message_id) {
+            this._renderedMessageIds.add(event.message_id);
+            this._lastMessageTimestamp = event.created_at || this._lastMessageTimestamp;
+          }
+          break;
+        case "customer_message":
+          // Echo of our own message; no-op (already shown via _handleSend)
+          break;
+        default:
+          break;
+      }
+    }
+
+    /* ─────────── BUILD ONCE ─────────── */
+    _buildShell() {
+      const _logoUrl = this._agentConfig?.logo_url || null;
+      let _logoSrc = null;
+      if (_logoUrl) {
+        try {
+          _logoSrc = _logoUrl.startsWith("http") ? _logoUrl : new URL(_logoUrl, CONFIG.apiBase).href;
+        } catch (e) {
+          _logoSrc = _logoUrl;
+        }
+      }
+      const _avatarInner = _logoSrc
+        ? `<img src="${_logoSrc}" alt="logo" style="width:100%;height:100%;object-fit:cover;border-radius:12px;display:block;" onerror="this.style.display='none';this.nextElementSibling&& (this.nextElementSibling.style.display='block')">` + `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" style="display:none"><path d="M12 2a3 3 0 0 0-3 3v1a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10H5a2 2 0 0 0-2 2v1a7 7 0 0 0 14 0v-1a2 2 0 0 0-2-2z"/><line x1="12" y1="18" x2="12" y2="22"/></svg>`
+        : `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v1a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10H5a2 2 0 0 0-2 2v1a7 7 0 0 0 14 0v-1a2 2 0 0 0-2-2z"/><line x1="12" y1="18" x2="12" y2="22"/></svg>`;
+      this.shadowRoot.innerHTML = `
                 <style>${this._css()}</style>
 
                 <div class="chat-container" id="chat-box" role="dialog" aria-label="Booking Assistant Chat" aria-hidden="true">
                     <div class="header">
                         <div class="header-avatar" id="avatar" aria-hidden="true">
-                            ${n}
+                            ${_avatarInner}
                         </div>
                         <div class="header-info">
                             <div style="display:flex; align-items:center; gap:8px; min-width:0;">
-                                <h3 id="agent-name-title" style="margin:0;">${((s=this._agentConfig)==null?void 0:s.agent_name)||"Booking Assistant"}</h3>
+                                <h3 id="agent-name-title" style="margin:0;">${this._agentConfig?.agent_name || "Booking Assistant"}</h3>
                                 <span id="meeting-mode-badge" class="meeting-mode-badge" style="display:none; font-size:10px; font-weight:700; padding:2px 7px; border-radius:20px; background:rgba(255,255,255,0.10); border:1.5px solid var(--brand-color, #3B82F6); color:white; white-space:nowrap; flex-shrink:0;"></span>
                             </div>
-                            ${(()=>{const a=this._agentConfig||{},l=[a.business_name,a.business_tagline].filter(Boolean).join(" - ");if(!l)return"";const m=l.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");return`<p class="header-business marquee" id="header-business" style="--marquee-duration:${Math.max(8,Math.min(30,Math.round(l.length*.35)))}s"><span class="marquee-track"><span>${m}</span><span>${m}</span></span></p>`})()}
-                            <p><span class="status-dot"></span> <span id="status-text">Online — Ready to help</span></p>
+                            ${(() => { const c = this._agentConfig || {}; const b = [c.business_name, c.business_tagline].filter(Boolean).join(" - "); if (!b) return ""; const esc = b.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); const dur = Math.max(8, Math.min(30, Math.round(b.length * 0.35))); return `<p class="header-business marquee" id="header-business" style="--marquee-duration:${dur}s"><span class="marquee-track"><span>${esc}</span><span>${esc}</span></span></p>`; })()}
+                            <p><span class="status-dot"></span> <span id="status-text">Online \u2014 Ready to help</span></p>
                         </div>
                         <button class="header-close" id="close-btn" title="Close chat">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -34,20 +620,1839 @@
                     <svg class="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                     <span class="ripple-ring"></span>
                 </div>
-            `,this._launcher=this.shadowRoot.getElementById("launcher"),this._chatBox=this.shadowRoot.getElementById("chat-box"),this._input=this.shadowRoot.getElementById("user-input"),this._sendBtn=this.shadowRoot.getElementById("send-trigger"),this._msgList=this.shadowRoot.getElementById("message-list"),this._inlineValidation=this.shadowRoot.getElementById("widget-inline-validation"),this._launcher.onclick=()=>this._toggle(),this._launcher.onkeydown=a=>{(a.key==="Enter"||a.key===" ")&&(a.preventDefault(),this._toggle())},this.shadowRoot.getElementById("close-btn").onclick=()=>this._toggle(),this._sendBtn.onclick=()=>this._handleSend(),this._input.onkeydown=a=>{a.key==="Enter"&&!a.shiftKey&&(a.preventDefault(),this._handleSend()),a.key==="Escape"&&this._toggle()},this._chatBox.onkeydown=a=>{a.key==="Escape"&&this.isOpen&&this._toggle()},this.sessionId)this._loadHistory().then(a=>{var l;if(!a){const m=((l=this._agentConfig)==null?void 0:l.greeting_message)||"Hello! 👋 I'm your booking assistant. How can I help you schedule an appointment today?";this._appendBubble("agent",m)}this._connectWebSocket(),this._startPolling()});else{const a=((c=this._agentConfig)==null?void 0:c.greeting_message)||"Hello! 👋 I'm your booking assistant. How can I help you schedule an appointment today?";this._appendBubble("agent",a)}const i=((d=this._agentConfig)==null?void 0:d.brand_color)||u.primaryColor;i&&this.style.setProperty("--brand-color",i),this._updateMeetingModeBadge()}_detectBrowserTimezone(){try{return Intl.DateTimeFormat().resolvedOptions().timeZone||null}catch{return null}}_persistTimezonePreference(){try{this.userTimezone?(sessionStorage.setItem("dotstark_user_timezone",this.userTimezone),sessionStorage.setItem("dotstark_timezone_source",this.timezoneSource)):(sessionStorage.removeItem("dotstark_user_timezone"),sessionStorage.removeItem("dotstark_timezone_source"))}catch{}}_buildAvailabilityRequestUrl(e){const t=new URLSearchParams;return t.set("date",e),u.widgetToken&&t.set("widget_token",u.widgetToken),this.userTimezone&&t.set("tz",this.userTimezone),this.timezoneSource&&t.set("timezone_source",this.timezoneSource),`${u.apiBase}/widget/availability?${t.toString()}`}_formatTimezoneSource(e){return e==="user_selected"?"you selected":e==="fallback_org"?"business fallback":"browser detected"}_formatTimezoneDisplayName(e){var n;if(!e)return"UTC";const t=(n=e.split("/").pop())==null?void 0:n.replace(/_/g," ");return t?`${e} (${t})`:e}_isValidTimezone(e){if(!e||typeof e!="string")return!1;try{return new Intl.DateTimeFormat("en-US",{timeZone:e}).format(new Date),!0}catch{return!1}}_formatClockTime(e,t=null){const n={hour:"numeric",minute:"2-digit",hour12:!0};t&&this._isValidTimezone(t)&&(n.timeZone=t);try{return new Intl.DateTimeFormat([],n).format(e)}catch{return e.toLocaleTimeString([],{hour:"numeric",minute:"2-digit",hour12:!0})}}_currentDateISO(e=null){var s,c,d;const t=new Date;if(e&&this._isValidTimezone(e))try{const a=new Intl.DateTimeFormat("en-US",{timeZone:e,year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(t),l=(s=a.find(v=>v.type==="year"))==null?void 0:s.value,m=(c=a.find(v=>v.type==="month"))==null?void 0:c.value,o=(d=a.find(v=>v.type==="day"))==null?void 0:d.value;if(l&&m&&o)return`${l}-${m}-${o}`}catch{}const n=t.getFullYear(),i=String(t.getMonth()+1).padStart(2,"0"),r=String(t.getDate()).padStart(2,"0");return`${n}-${i}-${r}`}_getTimezoneOptions(){let e=[];try{const t=Intl.supportedValuesOf("timeZone");Array.isArray(t)&&t.length>0&&(e=[...t].sort())}catch{}return e.length===0&&(e=["UTC","Africa/Abidjan","Africa/Cairo","Africa/Casablanca","Africa/Johannesburg","Africa/Lagos","Africa/Nairobi","America/Argentina/Buenos_Aires","America/Bogota","America/Caracas","America/Chicago","America/Denver","America/Halifax","America/Lima","America/Los_Angeles","America/Mexico_City","America/New_York","America/Phoenix","America/Santiago","America/Sao_Paulo","America/Toronto","America/Vancouver","Asia/Almaty","Asia/Baghdad","Asia/Bangkok","Asia/Beirut","Asia/Dhaka","Asia/Dubai","Asia/Hong_Kong","Asia/Istanbul","Asia/Jakarta","Asia/Jerusalem","Asia/Karachi","Asia/Kathmandu","Asia/Kolkata","Asia/Kuala_Lumpur","Asia/Manila","Asia/Riyadh","Asia/Seoul","Asia/Shanghai","Asia/Singapore","Asia/Taipei","Asia/Tashkent","Asia/Tehran","Asia/Tokyo","Asia/Yangon","Australia/Adelaide","Australia/Brisbane","Australia/Melbourne","Australia/Perth","Australia/Sydney","Europe/Amsterdam","Europe/Athens","Europe/Berlin","Europe/Brussels","Europe/Bucharest","Europe/Budapest","Europe/Copenhagen","Europe/Dublin","Europe/Helsinki","Europe/Lisbon","Europe/London","Europe/Madrid","Europe/Moscow","Europe/Oslo","Europe/Paris","Europe/Prague","Europe/Rome","Europe/Stockholm","Europe/Vienna","Europe/Warsaw","Europe/Zurich","Pacific/Auckland","Pacific/Fiji","Pacific/Honolulu"]),Array.from(new Set([this.userTimezone,this.orgTimezone,this._detectBrowserTimezone(),...e].filter(Boolean)))}_buildTimezoneContextBanner(e=null){const t=document.createElement("div");t.className="timezone-context-banner";const n=document.createElement("div");n.className="timezone-context-text",n.textContent=`Times shown in ${this._formatTimezoneDisplayName(this.userTimezone)} (${this._formatTimezoneSource(this.timezoneSource)})`,t.appendChild(n);const i=document.createElement("div");i.className="timezone-override-row";const r=document.createElement("label");r.className="timezone-override-label",r.textContent="Timezone",i.appendChild(r);const s=document.createElement("select");return s.className="timezone-override-select",this._getTimezoneOptions().forEach(c=>{const d=document.createElement("option");d.value=c,d.textContent=c,c===this.userTimezone&&(d.selected=!0),s.appendChild(d)}),s.onchange=async()=>{const c=s.value;!c||c===this.userTimezone||(this.selectedSlotId=null,this._isValidTimezone(c)?(this.userTimezone=c,this.timezoneSource="user_selected",this.timezoneFallbackUsed=!1,this.timezoneFallbackReason=null):(this.userTimezone=this.orgTimezone||this.userTimezone,this.timezoneSource="fallback_org",this.timezoneFallbackUsed=!0,this.timezoneFallbackReason="invalid_tz"),this._persistTimezonePreference(),this._showTimezoneFallbackNoticeIfNeeded(),e&&await this._appendTimeSlotGrid({icon:"⏰",label:"Select a Time Slot",options:[]}))},i.appendChild(s),t.appendChild(i),t}_normalizeAvailabilitySlots(e){return Array.isArray(e)?e.filter(t=>t&&t.slot_id&&t.label_user_tz).map(t=>{const n=t.start_user_tz?new Date(t.start_user_tz):null,i=t.start_org_tz?new Date(t.start_org_tz):null;return{id:t.slot_id,label:i?this._formatClockTime(i,this.orgTimezone):t.label_user_tz,userLabel:n?this._formatClockTime(n,this.userTimezone):null,sortKey:n?n.getTime():Number.MAX_SAFE_INTEGER,available:t.available!==!1,reason:t.reason||null,raw:t}}).sort((t,n)=>t.sortKey-n.sortKey):[]}_availabilityStatusMessage(e){return e==="closed_day"||e==="exception_closed"?"No availability on this date (closed day/holiday). Please choose another date.":e==="fully_booked"?"This date is fully booked. Please choose another date.":e==="no_schedule"||e==="no_slots_in_window"?"No configured availability for this date yet. Please choose another date.":"No available time slots for this date. Please try another date."}_availabilityRecoveryMessage(e,t=null){const n=this._availabilityStatusMessage(e),i=t||this.timezoneFallbackReason;if(!i)return n;const r=this._formatTimezoneDisplayName(this.orgTimezone||this.userTimezone);return i==="invalid_tz"?`${n} We are using ${r} while you pick another date.`:i==="missing_tz"?`${n} We could not detect your timezone, so we are using ${r} while you pick another date.`:`${n} Please pick another date.`}_showTimezoneFallbackNoticeIfNeeded(){!this.timezoneFallbackUsed||this._timezoneNoticeShown||(this._timezoneNoticeShown=!0,this._appendSystem("We couldn't detect your timezone, so times are shown in the business timezone for now."))}_toggle(){this.isOpen=!this.isOpen,this._launcher.classList.toggle("open",this.isOpen),this._launcher.setAttribute("aria-expanded",String(this.isOpen)),this._launcher.setAttribute("aria-label",this.isOpen?"Close chat":"Open booking chat"),this._chatBox.setAttribute("aria-hidden",String(!this.isOpen)),this.isOpen?(this._chatBox.classList.add("visible"),this._chatBox.classList.remove("hiding"),setTimeout(()=>{this._input.focus(),this._applyHeaderMarquee()},200)):(this._chatBox.classList.add("hiding"),setTimeout(()=>{this._chatBox.classList.remove("visible","hiding")},250))}async _handleSend(){var n,i,r;const e=this._input.value.trim();if(!e||this.isLoading)return;this._clearSkipAction(),this._sendBtn.classList.add("sending"),setTimeout(()=>this._sendBtn.classList.remove("sending"),400),this._appendBubble("user",e),this._input.value="",this._input.disabled=!0,this._sendBtn.disabled=!0,this.isLoading=!0,this._pendingRefreshSkips=[{role:"user",content:e}];const t=this._appendTyping();try{const s={message:e};this.sessionId&&(s.session_id=this.sessionId),this.sessionId||(this.selectedSlotId=null,this.timezoneFallbackUsed=!1,this.timezoneFallbackReason=null,this._timezoneNoticeShown=!1),this.selectedSlotId&&(s.selected_slot_id=this.selectedSlotId),this.userTimezone&&(s.user_timezone=this.userTimezone),this.timezoneSource&&(s.timezone_source=this.timezoneSource),this.timezoneFallbackUsed&&(s.timezone_fallback_used=!0,this.timezoneFallbackReason&&(s.timezone_fallback_reason=this.timezoneFallbackReason));const c=await fetch(`${u.apiBase}/chat/message/dispatch`,{method:"POST",headers:{"Content-Type":"application/json","X-Widget-Token":u.widgetToken||""},body:JSON.stringify(s)});if(!c.ok){const v=await c.json().catch(()=>({}));throw new Error(v.detail||`Server error ${c.status}`)}const d=await c.json();if(d.session_id){this.sessionId=d.session_id;try{sessionStorage.setItem(this._sessionStorageKey(),d.session_id),sessionStorage.removeItem("dotstark_session_id")}catch{}this._connectWebSocket(),this._startPolling()}const a=this._resolveAssistantText(((n=d.action)==null?void 0:n.message)||d.agent_response),l=(i=d.action)==null?void 0:i.widget_directive,m=l==="REQUEST_CONFIRMATION"||l==="BOOKING_SUMMARY_CARD"||l==="BOOKING_CONFIRMED_CARD";t.remove(),m||(a?(this._appendBubble("agent",a),this._pendingRefreshSkips.push({role:"agent",content:a})):this._appendBubble("agent","I received your message, but something went wrong with the reply."));const o=(r=d.action)==null?void 0:r.field_meta;this._activeFieldMeta=o||null,this._setInlineValidation((o==null?void 0:o.validation_error)||""),l==="REQUIRE_DATE_PICKER"?this._appendDatePicker(o):l==="REQUIRE_TIME_SLOT_GRID"?await this._appendTimeSlotGrid(o):l==="REQUIRE_PHONE_INPUT"?this._appendPhoneInput(o):l==="REQUIRE_EMAIL_INPUT"?(this._clearDirectiveCards(),this._updateInputMode("email",(o==null?void 0:o.placeholder)||"Enter email address..."),this._renderSkipAction(o)):l==="REQUIRE_NUMBER_INPUT"?(this._clearDirectiveCards(),this._updateInputMode("number",(o==null?void 0:o.placeholder)||"Enter a number..."),this._renderSkipAction(o)):l==="REQUIRE_SELECT"?this._appendSelectInput(o):l==="REQUIRE_TEXTAREA"?(this._clearDirectiveCards(),this._appendSystem(`${(o==null?void 0:o.icon)||"📄"} ${(o==null?void 0:o.description)||"Please provide details."}`),this._renderSkipAction(o)):l==="TEXT_INPUT"&&o?(this._clearDirectiveCards(),this._updateInputMode("text",o.placeholder||"Type a message..."),this._renderSkipAction(o)):l==="REQUIRE_OTP_MODAL"?(this._clearDirectiveCards(),this._appendOTPInterface(o||{}),this._clearSkipAction()):l==="REQUEST_CONFIRMATION"||l==="BOOKING_SUMMARY_CARD"?(this._clearDirectiveCards(),this._appendSummaryCard(a||"Please review your booking details before confirming."),this._clearSkipAction()):l==="BOOKING_CONFIRMED_CARD"?(this._clearDirectiveCards(),this._appendConfirmedCard(a||"Your booking has been confirmed.",o||{}),this._clearSkipAction()):l==="HUMAN_ACTIVE"?(this._clearDirectiveCards(),this._appendSystem("👨‍💼 Support agent joined the chat"),this._updateInputMode("text","Type a message..."),this._clearSkipAction(),this._humanActive=!0,this._startPolling()):(this._clearDirectiveCards(),this._updateInputMode("text","Type a message..."),this._clearSkipAction())}catch(s){console.error("Widget Error:",s),t.remove(),this._appendBubble("agent",`Couldn't reach the server. Make sure the backend is running on ${u.apiBase}`)}finally{this.isLoading=!1,this._input.disabled=!1,this._sendBtn.disabled=!1,this._input.focus(),this.sessionId&&this._loadHistory(this._lastMessageTimestamp)}}_appendBubble(e,t){const n=document.createElement("div");n.className=`message ${e}`,n.setAttribute("role","log"),e==="agent"?this._renderMarkdown(n,t):n.textContent=t;const i=document.createElement("span");i.className="msg-time";const r=new Date;return i.textContent=r.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),n.appendChild(i),this._msgList.appendChild(n),this._scrollToBottom(),this._announceToSR(e==="agent"?"Agent: "+t:""),n}_appendHumanBubble(e){const t=document.createElement("div");t.className="message human-agent",t.setAttribute("role","log");const n=document.createElement("div");n.className="human-label",n.textContent=e.admin_name||"Support agent",t.appendChild(n);const i=document.createElement("div");i.className="human-text",i.textContent=e.content||"",t.appendChild(i);const r=document.createElement("span");r.className="msg-time";try{const s=e.created_at?new Date(e.created_at):new Date;r.textContent=s.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}catch{r.textContent=new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}return t.appendChild(r),this._msgList.appendChild(t),this._scrollToBottom(),this._announceToSR(`Support agent: ${e.content||""}`),t}_renderMarkdown(e,t){t.split(`
-`).forEach((i,r)=>{r>0&&e.appendChild(document.createElement("br"));const s=i.trim();if(s){if(/^[-•]\s/.test(s)){const c=document.createElement("span");c.className="md-bullet",this._parseInline(c,s.replace(/^[-•]\s*/,"")),e.appendChild(c);return}this._parseInline(e,s)}})}_parseInline(e,t){t.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g).forEach(i=>{if(/^\*\*(.+)\*\*$/.test(i)){const r=document.createElement("strong");r.textContent=i.slice(2,-2),e.appendChild(r)}else if(/^\*(.+)\*$/.test(i)){const r=document.createElement("em");r.textContent=i.slice(1,-1),e.appendChild(r)}else i&&e.appendChild(document.createTextNode(i))})}_announceToSR(e){if(!e)return;let t=this.shadowRoot.getElementById("sr-live");t||(t=document.createElement("div"),t.id="sr-live",t.setAttribute("role","status"),t.setAttribute("aria-live","polite"),t.className="sr-only",this.shadowRoot.appendChild(t)),t.textContent=e}_appendTyping(){const e=document.createElement("div");return e.className="message agent typing-msg",e.innerHTML=`
+            `;
+
+      // Attach events
+      this._launcher = this.shadowRoot.getElementById("launcher");
+      this._chatBox = this.shadowRoot.getElementById("chat-box");
+      this._input = this.shadowRoot.getElementById("user-input");
+      this._sendBtn = this.shadowRoot.getElementById("send-trigger");
+      this._msgList = this.shadowRoot.getElementById("message-list");
+      this._inlineValidation = this.shadowRoot.getElementById(
+        "widget-inline-validation",
+      );
+
+      this._launcher.onclick = () => this._toggle();
+      this._launcher.onkeydown = (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          this._toggle();
+        }
+      };
+      this.shadowRoot.getElementById("close-btn").onclick = () =>
+        this._toggle();
+      this._sendBtn.onclick = () => this._handleSend();
+      this._input.onkeydown = (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          this._handleSend();
+        }
+        if (e.key === "Escape") this._toggle();
+      };
+      // Global Escape key to close widget
+      this._chatBox.onkeydown = (e) => {
+        if (e.key === "Escape" && this.isOpen) this._toggle();
+      };
+
+      // Add initial greeting OR restore history from a previous session.
+      // When a session exists, also start polling so the widget picks up
+      // human takeover events and human-sent messages in real time.
+      if (this.sessionId) {
+        this._loadHistory().then((restored) => {
+          if (!restored) {
+            const greeting =
+              this._agentConfig?.greeting_message ||
+              "Hello! 👋 I'm your booking assistant. How can I help you schedule an appointment today?";
+            this._appendBubble("agent", greeting);
+          }
+          // Phase 4: open WebSocket first (real-time channel); polling acts
+          // as a safety net that auto-disables when WS is connected.
+          this._connectWebSocket();
+          this._startPolling();
+        });
+      } else {
+        const greeting =
+          this._agentConfig?.greeting_message ||
+          "Hello! 👋 I'm your booking assistant. How can I help you schedule an appointment today?";
+        this._appendBubble("agent", greeting);
+      }
+
+      // Apply brand color if configured
+      const brandColor = this._agentConfig?.brand_color || CONFIG.primaryColor;
+      if (brandColor) {
+        this.style.setProperty("--brand-color", brandColor);
+      }
+      // Show meeting mode badge (Online/Offline/Hybrid) if configured
+      this._updateMeetingModeBadge();
+    }
+
+    _detectBrowserTimezone() {
+      try {
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        return tz || null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    _persistTimezonePreference() {
+      try {
+        if (this.userTimezone) {
+          sessionStorage.setItem("dotstark_user_timezone", this.userTimezone);
+          sessionStorage.setItem("dotstark_timezone_source", this.timezoneSource);
+        } else {
+          sessionStorage.removeItem("dotstark_user_timezone");
+          sessionStorage.removeItem("dotstark_timezone_source");
+        }
+      } catch (e) {
+        /* sessionStorage unavailable */
+      }
+    }
+
+    _buildAvailabilityRequestUrl(dateValue) {
+      const params = new URLSearchParams();
+      params.set("date", dateValue);
+      if (CONFIG.widgetToken) {
+        params.set("widget_token", CONFIG.widgetToken);
+      }
+      if (this.userTimezone) {
+        params.set("tz", this.userTimezone);
+      }
+      if (this.timezoneSource) {
+        params.set("timezone_source", this.timezoneSource);
+      }
+      return `${CONFIG.apiBase}/widget/availability?${params.toString()}`;
+    }
+
+    _formatTimezoneSource(source) {
+      if (source === "user_selected") return "you selected";
+      if (source === "fallback_org") return "business fallback";
+      return "browser detected";
+    }
+
+    _formatTimezoneDisplayName(timezone) {
+      if (!timezone) return "UTC";
+      const city = timezone.split("/").pop()?.replace(/_/g, " ");
+      return city ? `${timezone} (${city})` : timezone;
+    }
+
+    _isValidTimezone(tz) {
+      if (!tz || typeof tz !== "string") return false;
+      try {
+        new Intl.DateTimeFormat("en-US", { timeZone: tz }).format(new Date());
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    _formatClockTime(dateValue, timezone = null) {
+      const opts = {
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      };
+      if (timezone && this._isValidTimezone(timezone)) {
+        opts.timeZone = timezone;
+      }
+      try {
+        return new Intl.DateTimeFormat([], opts).format(dateValue);
+      } catch (e) {
+        return dateValue.toLocaleTimeString([], {
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+        });
+      }
+    }
+
+    _currentDateISO(timezone = null) {
+      const now = new Date();
+      if (timezone && this._isValidTimezone(timezone)) {
+        try {
+          const parts = new Intl.DateTimeFormat("en-US", {
+            timeZone: timezone,
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+          }).formatToParts(now);
+          const year = parts.find((part) => part.type === "year")?.value;
+          const month = parts.find((part) => part.type === "month")?.value;
+          const day = parts.find((part) => part.type === "day")?.value;
+          if (year && month && day) {
+            return `${year}-${month}-${day}`;
+          }
+        } catch (e) {
+          // fallback to local date formatting below
+        }
+      }
+      const year = now.getFullYear();
+      const month = String(now.getMonth() + 1).padStart(2, "0");
+      const day = String(now.getDate()).padStart(2, "0");
+      return `${year}-${month}-${day}`;
+    }
+
+    _getTimezoneOptions() {
+      // Full IANA timezone list at runtime (every zone the browser supports),
+      // with a curated fallback for engines without Intl.supportedValuesOf.
+      let all = [];
+      try {
+        const supported = Intl.supportedValuesOf("timeZone");
+        if (Array.isArray(supported) && supported.length > 0) {
+          all = [...supported].sort();
+        }
+      } catch (e) {
+        // fall back to the curated list below
+      }
+      if (all.length === 0) {
+        all = [
+          "UTC", "Africa/Abidjan", "Africa/Cairo", "Africa/Casablanca", "Africa/Johannesburg",
+          "Africa/Lagos", "Africa/Nairobi", "America/Argentina/Buenos_Aires", "America/Bogota",
+          "America/Caracas", "America/Chicago", "America/Denver", "America/Halifax", "America/Lima",
+          "America/Los_Angeles", "America/Mexico_City", "America/New_York", "America/Phoenix",
+          "America/Santiago", "America/Sao_Paulo", "America/Toronto", "America/Vancouver",
+          "Asia/Almaty", "Asia/Baghdad", "Asia/Bangkok", "Asia/Beirut", "Asia/Dhaka", "Asia/Dubai",
+          "Asia/Hong_Kong", "Asia/Istanbul", "Asia/Jakarta", "Asia/Jerusalem", "Asia/Karachi",
+          "Asia/Kathmandu", "Asia/Kolkata", "Asia/Kuala_Lumpur", "Asia/Manila", "Asia/Riyadh",
+          "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Taipei", "Asia/Tashkent",
+          "Asia/Tehran", "Asia/Tokyo", "Asia/Yangon", "Australia/Adelaide", "Australia/Brisbane",
+          "Australia/Melbourne", "Australia/Perth", "Australia/Sydney", "Europe/Amsterdam",
+          "Europe/Athens", "Europe/Berlin", "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest",
+          "Europe/Copenhagen", "Europe/Dublin", "Europe/Helsinki", "Europe/Lisbon", "Europe/London",
+          "Europe/Madrid", "Europe/Moscow", "Europe/Oslo", "Europe/Paris", "Europe/Prague",
+          "Europe/Rome", "Europe/Stockholm", "Europe/Vienna", "Europe/Warsaw", "Europe/Zurich",
+          "Pacific/Auckland", "Pacific/Fiji", "Pacific/Honolulu",
+        ];
+      }
+      return Array.from(
+        new Set(
+          [this.userTimezone, this.orgTimezone, this._detectBrowserTimezone(), ...all].filter(Boolean),
+        ),
+      );
+    }
+
+    _buildTimezoneContextBanner(selectedDate = null) {
+      const wrap = document.createElement("div");
+      wrap.className = "timezone-context-banner";
+
+      const summary = document.createElement("div");
+      summary.className = "timezone-context-text";
+      summary.textContent = `Times shown in ${this._formatTimezoneDisplayName(this.userTimezone)} (${this._formatTimezoneSource(this.timezoneSource)})`;
+      wrap.appendChild(summary);
+
+      const selectorRow = document.createElement("div");
+      selectorRow.className = "timezone-override-row";
+
+      const selectorLabel = document.createElement("label");
+      selectorLabel.className = "timezone-override-label";
+      selectorLabel.textContent = "Timezone";
+      selectorRow.appendChild(selectorLabel);
+
+      const selector = document.createElement("select");
+      selector.className = "timezone-override-select";
+      this._getTimezoneOptions().forEach((tz) => {
+        const option = document.createElement("option");
+        option.value = tz;
+        option.textContent = tz;
+        if (tz === this.userTimezone) option.selected = true;
+        selector.appendChild(option);
+      });
+
+      selector.onchange = async () => {
+        const nextTz = selector.value;
+        if (!nextTz || nextTz === this.userTimezone) return;
+        this.selectedSlotId = null;
+        if (this._isValidTimezone(nextTz)) {
+          this.userTimezone = nextTz;
+          this.timezoneSource = "user_selected";
+          this.timezoneFallbackUsed = false;
+          this.timezoneFallbackReason = null;
+        } else {
+          this.userTimezone = this.orgTimezone || this.userTimezone;
+          this.timezoneSource = "fallback_org";
+          this.timezoneFallbackUsed = true;
+          this.timezoneFallbackReason = "invalid_tz";
+        }
+        this._persistTimezonePreference();
+        this._showTimezoneFallbackNoticeIfNeeded();
+
+        if (selectedDate) {
+          await this._appendTimeSlotGrid({
+            icon: "⏰",
+            label: "Select a Time Slot",
+            options: [],
+          });
+        }
+      };
+
+      selectorRow.appendChild(selector);
+      wrap.appendChild(selectorRow);
+      return wrap;
+    }
+
+    _normalizeAvailabilitySlots(slots) {
+      if (!Array.isArray(slots)) return [];
+      return slots
+        .filter((slot) => slot && slot.slot_id && slot.label_user_tz)
+        .map((slot) => {
+          const userDate = slot.start_user_tz ? new Date(slot.start_user_tz) : null;
+          const orgDate = slot.start_org_tz ? new Date(slot.start_org_tz) : null;
+          return {
+            id: slot.slot_id,
+            label:
+              orgDate
+                ? this._formatClockTime(orgDate, this.orgTimezone)
+                : slot.label_user_tz,
+            userLabel: userDate
+              ? this._formatClockTime(userDate, this.userTimezone)
+              : null,
+            sortKey: userDate ? userDate.getTime() : Number.MAX_SAFE_INTEGER,
+            available: slot.available !== false,
+            reason: slot.reason || null,
+            raw: slot,
+          };
+        })
+        .sort((a, b) => a.sortKey - b.sortKey);
+    }
+
+    _availabilityStatusMessage(status) {
+      if (status === "closed_day" || status === "exception_closed") {
+        return "No availability on this date (closed day/holiday). Please choose another date.";
+      }
+      if (status === "fully_booked") {
+        return "This date is fully booked. Please choose another date.";
+      }
+      if (status === "no_schedule" || status === "no_slots_in_window") {
+        return "No configured availability for this date yet. Please choose another date.";
+      }
+      return "No available time slots for this date. Please try another date.";
+    }
+
+    _availabilityRecoveryMessage(status, fallbackReason = null) {
+      const statusMessage = this._availabilityStatusMessage(status);
+      const reason = fallbackReason || this.timezoneFallbackReason;
+      if (!reason) return statusMessage;
+      const orgDisplay = this._formatTimezoneDisplayName(
+        this.orgTimezone || this.userTimezone,
+      );
+      if (reason === "invalid_tz") {
+        return `${statusMessage} We are using ${orgDisplay} while you pick another date.`;
+      }
+      if (reason === "missing_tz") {
+        return `${statusMessage} We could not detect your timezone, so we are using ${orgDisplay} while you pick another date.`;
+      }
+      return `${statusMessage} Please pick another date.`;
+    }
+
+    _showTimezoneFallbackNoticeIfNeeded() {
+      if (!this.timezoneFallbackUsed || this._timezoneNoticeShown) return;
+      this._timezoneNoticeShown = true;
+      this._appendSystem(
+        "We couldn't detect your timezone, so times are shown in the business timezone for now.",
+      );
+    }
+
+    /* ─────────── TOGGLE ─────────── */
+    _toggle() {
+      this.isOpen = !this.isOpen;
+      this._launcher.classList.toggle("open", this.isOpen);
+      this._launcher.setAttribute("aria-expanded", String(this.isOpen));
+      this._launcher.setAttribute(
+        "aria-label",
+        this.isOpen ? "Close chat" : "Open booking chat",
+      );
+      this._chatBox.setAttribute("aria-hidden", String(!this.isOpen));
+
+      if (this.isOpen) {
+        this._chatBox.classList.add("visible");
+        this._chatBox.classList.remove("hiding");
+        setTimeout(() => { this._input.focus(); this._applyHeaderMarquee(); }, 200);
+      } else {
+        this._chatBox.classList.add("hiding");
+        setTimeout(() => {
+          this._chatBox.classList.remove("visible", "hiding");
+        }, 250);
+      }
+    }
+
+    /* ─────────── SEND ─────────── */
+    async _handleSend() {
+      const text = this._input.value.trim();
+      if (!text || this.isLoading) return;
+      this._clearSkipAction();
+
+      // Send animation
+      this._sendBtn.classList.add("sending");
+      setTimeout(() => this._sendBtn.classList.remove("sending"), 400);
+
+      this._appendBubble("user", text);
+      this._input.value = "";
+      this._input.disabled = true;
+      this._sendBtn.disabled = true;
+      this.isLoading = true;
+      this._pendingRefreshSkips = [{ role: "user", content: text }];
+
+      const thinkingEl = this._appendTyping();
+
+      try {
+        const payload = { message: text };
+        if (this.sessionId) payload.session_id = this.sessionId;
+        if (!this.sessionId) {
+          this.selectedSlotId = null;
+          this.timezoneFallbackUsed = false;
+          this.timezoneFallbackReason = null;
+          this._timezoneNoticeShown = false;
+        }
+        if (this.selectedSlotId) payload.selected_slot_id = this.selectedSlotId;
+        if (this.userTimezone) payload.user_timezone = this.userTimezone;
+        if (this.timezoneSource) payload.timezone_source = this.timezoneSource;
+        if (this.timezoneFallbackUsed) {
+          payload.timezone_fallback_used = true;
+          if (this.timezoneFallbackReason) {
+            payload.timezone_fallback_reason = this.timezoneFallbackReason;
+          }
+        }
+
+        const response = await fetch(
+          `${CONFIG.apiBase}/chat/message/dispatch`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Widget-Token": CONFIG.widgetToken || "",
+            },
+            body: JSON.stringify(payload),
+          },
+        );
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.detail || `Server error ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (data.session_id) {
+          this.sessionId = data.session_id;
+          try {
+            sessionStorage.setItem(this._sessionStorageKey(), data.session_id);
+            // Cleanup legacy global key to prevent stale cross-widget reuse.
+            sessionStorage.removeItem("dotstark_session_id");
+          } catch (e) {}
+          // Fresh sessions (created on the first message) never had a channel:
+          // open the WebSocket and start polling now so messages sent by a
+          // human agent after takeover arrive in real time.
+          this._connectWebSocket();
+          this._startPolling();
+        }
+
+        const agentMessage = this._resolveAssistantText(
+          data.action?.message || data.agent_response,
+        );
+        const directive = data.action?.widget_directive;
+        const rendersCardOnly =
+          directive === "REQUEST_CONFIRMATION" ||
+          directive === "BOOKING_SUMMARY_CARD" ||
+          directive === "BOOKING_CONFIRMED_CARD";
+
+        thinkingEl.remove();
+
+        if (!rendersCardOnly) {
+          if (agentMessage) {
+            this._appendBubble("agent", agentMessage);
+            this._pendingRefreshSkips.push({ role: "agent", content: agentMessage });
+          } else {
+            this._appendBubble(
+              "agent",
+              "I received your message, but something went wrong with the reply.",
+            );
+          }
+        }
+
+        const fieldMeta = data.action?.field_meta;
+        this._activeFieldMeta = fieldMeta || null;
+        this._setInlineValidation(fieldMeta?.validation_error || "");
+
+        if (directive === "REQUIRE_DATE_PICKER") {
+          this._appendDatePicker(fieldMeta);
+        } else if (directive === "REQUIRE_TIME_SLOT_GRID") {
+          await this._appendTimeSlotGrid(fieldMeta);
+        } else if (directive === "REQUIRE_PHONE_INPUT") {
+          this._appendPhoneInput(fieldMeta);
+        } else if (directive === "REQUIRE_EMAIL_INPUT") {
+          this._clearDirectiveCards();
+          this._updateInputMode(
+            "email",
+            fieldMeta?.placeholder || "Enter email address...",
+          );
+          this._renderSkipAction(fieldMeta);
+        } else if (directive === "REQUIRE_NUMBER_INPUT") {
+          this._clearDirectiveCards();
+          this._updateInputMode(
+            "number",
+            fieldMeta?.placeholder || "Enter a number...",
+          );
+          this._renderSkipAction(fieldMeta);
+        } else if (directive === "REQUIRE_SELECT") {
+          this._appendSelectInput(fieldMeta);
+        } else if (directive === "REQUIRE_TEXTAREA") {
+          this._clearDirectiveCards();
+          this._appendSystem(
+            `${fieldMeta?.icon || "📄"} ${fieldMeta?.description || "Please provide details."}`,
+          );
+          this._renderSkipAction(fieldMeta);
+        } else if (directive === "TEXT_INPUT" && fieldMeta) {
+          this._clearDirectiveCards();
+          this._updateInputMode(
+            "text",
+            fieldMeta.placeholder || "Type a message...",
+          );
+          this._renderSkipAction(fieldMeta);
+        } else if (directive === "REQUIRE_OTP_MODAL") {
+          this._clearDirectiveCards();
+          this._appendOTPInterface(fieldMeta || {});
+          this._clearSkipAction();
+        } else if (
+          directive === "REQUEST_CONFIRMATION" ||
+          directive === "BOOKING_SUMMARY_CARD"
+        ) {
+          this._clearDirectiveCards();
+          this._appendSummaryCard(
+            agentMessage || "Please review your booking details before confirming.",
+          );
+          this._clearSkipAction();
+        } else if (directive === "BOOKING_CONFIRMED_CARD") {
+          this._clearDirectiveCards();
+          this._appendConfirmedCard(
+            agentMessage || "Your booking has been confirmed.",
+            fieldMeta || {},
+          );
+          this._clearSkipAction();
+        } else if (directive === "HUMAN_ACTIVE") {
+          // Human agent has taken over - show notification and start polling
+          this._clearDirectiveCards();
+          this._appendSystem("👨‍💼 Support agent joined the chat");
+          this._updateInputMode("text", "Type a message...");
+          this._clearSkipAction();
+          this._humanActive = true;
+          this._startPolling();
+        } else {
+          // Reset input to default mode for unknown directives
+          this._clearDirectiveCards();
+          this._updateInputMode("text", "Type a message...");
+          this._clearSkipAction();
+        }
+      } catch (err) {
+        console.error("Widget Error:", err);
+        thinkingEl.remove();
+        this._appendBubble(
+          "agent",
+          `Couldn't reach the server. Make sure the backend is running on ${CONFIG.apiBase}`,
+        );
+      } finally {
+        this.isLoading = false;
+        this._input.disabled = false;
+        this._sendBtn.disabled = false;
+        this._input.focus();
+        // Refresh incrementally after every send so messages written by a
+        // human agent (takeover) show up even if WS/poll hadn't started yet.
+        // Dedupe by message id prevents re-rendering our own just-sent bubble.
+        if (this.sessionId) {
+          this._loadHistory(this._lastMessageTimestamp);
+        }
+      }
+    }
+
+    /* ─────────── DOM HELPERS ─────────── */
+  _appendBubble(sender, text) {
+      const div = document.createElement("div");
+      div.className = `message ${sender}`;
+      div.setAttribute("role", "log");
+
+      // Parse simple markdown for agent messages (safe DOM — no innerHTML)
+      if (sender === "agent") {
+        this._renderMarkdown(div, text);
+      } else {
+        div.textContent = text;
+      }
+
+      // Timestamp
+      const ts = document.createElement("span");
+      ts.className = "msg-time";
+      const now = new Date();
+      ts.textContent = now.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      div.appendChild(ts);
+
+      this._msgList.appendChild(div);
+      this._scrollToBottom();
+
+      // Screen reader announcement
+      this._announceToSR(sender === "agent" ? "Agent: " + text : "");
+      return div;
+    }
+
+    /* Phase 6/9: distinct bubble for human agent messages */
+    _appendHumanBubble(event) {
+      const div = document.createElement("div");
+      div.className = "message human-agent";
+      div.setAttribute("role", "log");
+
+      const label = document.createElement("div");
+      label.className = "human-label";
+      label.textContent = event.admin_name || "Support agent";
+      div.appendChild(label);
+
+      const text = document.createElement("div");
+      text.className = "human-text";
+      text.textContent = event.content || "";
+      div.appendChild(text);
+
+      const ts = document.createElement("span");
+      ts.className = "msg-time";
+      try {
+        const dt = event.created_at ? new Date(event.created_at) : new Date();
+        ts.textContent = dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      } catch {
+        ts.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      }
+      div.appendChild(ts);
+
+      this._msgList.appendChild(div);
+      this._scrollToBottom();
+      this._announceToSR(`Support agent: ${event.content || ""}`);
+      return div;
+    }
+
+    _renderMarkdown(container, text) {
+      // Split by newlines, then parse inline markdown
+      const lines = text.split("\n");
+      lines.forEach((line, i) => {
+        if (i > 0) container.appendChild(document.createElement("br"));
+        const trimmed = line.trim();
+        if (!trimmed) return;
+
+        // Bullet list item
+        if (/^[-•]\s/.test(trimmed)) {
+          const li = document.createElement("span");
+          li.className = "md-bullet";
+          this._parseInline(li, trimmed.replace(/^[-•]\s*/, ""));
+          container.appendChild(li);
+          return;
+        }
+
+        this._parseInline(container, trimmed);
+      });
+    }
+
+    _parseInline(container, text) {
+      // Parse **bold**, *italic*, and ✏️ markers safely via DOM
+      const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g);
+      parts.forEach((part) => {
+        if (/^\*\*(.+)\*\*$/.test(part)) {
+          const strong = document.createElement("strong");
+          strong.textContent = part.slice(2, -2);
+          container.appendChild(strong);
+        } else if (/^\*(.+)\*$/.test(part)) {
+          const em = document.createElement("em");
+          em.textContent = part.slice(1, -1);
+          container.appendChild(em);
+        } else if (part) {
+          container.appendChild(document.createTextNode(part));
+        }
+      });
+    }
+
+    _announceToSR(text) {
+      if (!text) return;
+      let region = this.shadowRoot.getElementById("sr-live");
+      if (!region) {
+        region = document.createElement("div");
+        region.id = "sr-live";
+        region.setAttribute("role", "status");
+        region.setAttribute("aria-live", "polite");
+        region.className = "sr-only";
+        this.shadowRoot.appendChild(region);
+      }
+      region.textContent = text;
+    }
+
+    _appendTyping() {
+      const div = document.createElement("div");
+      div.className = "message agent typing-msg";
+      div.innerHTML = `
                 <div class="typing-dots">
                     <span></span><span></span><span></span>
                 </div>
-            `,this._msgList.appendChild(e),this._scrollToBottom(),e}_appendSystem(e){const t=document.createElement("div");t.className="message system";const n=document.createElement("span");n.textContent=e,t.appendChild(n),this._msgList.appendChild(t),this._scrollToBottom()}_updateInputMode(e,t){this._input&&(this._input.type=e||"text",this._input.placeholder=t||"Type a message...")}_setInlineValidation(e){this._inlineValidation&&(this._inlineValidation.textContent=e||"",this._inlineValidation.style.display=e?"block":"none")}_clearDirectiveCards(){this._msgList.querySelectorAll(".directive-card").forEach(e=>e.remove())}_clearSkipAction(){if(!this._sendBtn)return;const e=this.shadowRoot.getElementById("widget-skip-btn");e&&e.remove()}_renderSkipAction(e){var n;if(this._clearSkipAction(),!e||e.required!==!1)return;const t=document.createElement("button");t.id="widget-skip-btn",t.className="widget-skip-btn",t.textContent="Skip",t.onclick=()=>{t.disabled=!0,this._handleSendManual(this._skipToken)},(n=this._sendBtn.parentElement)==null||n.appendChild(t)}_defaultCountryCode(){var t;try{const i=(t=(Intl.DateTimeFormat().resolvedOptions().locale||"").split("-").pop())==null?void 0:t.toUpperCase();if(i&&i.length===2)return i}catch{}const e=this.userTimezone||"";return e.includes("London")?"GB":e.includes("Kolkata")?"IN":e.includes("Sydney")?"AU":"US"}_appendPhoneInput(e){this._clearDirectiveCards(),this._updateInputMode("text","Type a message..."),this._clearSkipAction();const t=(e==null?void 0:e.name)||"phone",n=this._directiveDrafts[t]||{},i=((e==null?void 0:e.country_code)||n.countryCode||this._defaultCountryCode()).toUpperCase(),r=(e==null?void 0:e.raw_input)||n.localNumber||"",s=[{code:"US",dial:"+1"},{code:"GB",dial:"+44"},{code:"IN",dial:"+91"},{code:"AU",dial:"+61"},{code:"CA",dial:"+1"}],c=document.createElement("div");c.className="message agent field-input-card directive-card";const d=document.createElement("div");d.className="card-header",d.textContent=`${(e==null?void 0:e.icon)||"📞"} ${(e==null?void 0:e.label)||"Phone Number"}`,c.appendChild(d);const a=document.createElement("div");a.className="widget-phone-row";const l=document.createElement("select");l.className="widget-phone-country",s.forEach(w=>{const B=document.createElement("option");B.value=w.code,B.textContent=`${w.code} (${w.dial})`,w.code===i&&(B.selected=!0),l.appendChild(B)});const m=document.createElement("input");if(m.type="tel",m.className="widget-phone-local",m.placeholder=(e==null?void 0:e.placeholder)||"Enter local phone number",m.value=r,a.appendChild(l),a.appendChild(m),c.appendChild(a),e!=null&&e.validation_error){const w=document.createElement("div");w.className="field-inline-error",w.textContent=e.validation_error,c.appendChild(w)}const o=document.createElement("div");o.className="widget-field-actions";const v=document.createElement("button");if(v.className="widget-field-btn",v.textContent="Submit Phone",v.onclick=()=>{var z;const w=l.value||this._defaultCountryCode(),P=`${((z=s.find(N=>N.code===w))==null?void 0:z.dial)||"+1"} ${m.value.trim()}`.trim();this._directiveDrafts[t]={countryCode:w,localNumber:m.value.trim()},v.disabled=!0,m.disabled=!0,l.disabled=!0,this._handleSendManual(P)},o.appendChild(v),(e==null?void 0:e.required)===!1){const w=document.createElement("button");w.className="widget-field-btn widget-secondary-btn",w.textContent="Skip",w.onclick=()=>{w.disabled=!0,v.disabled=!0,this._handleSendManual(this._skipToken)},o.appendChild(w)}c.appendChild(o),this._msgList.appendChild(c),this._scrollToBottom()}_appendDatePicker(e){this._clearDirectiveCards(),this._clearSkipAction();const t=document.createElement("div");t.className="message agent field-input-card directive-card";const n=document.createElement("div");n.className="card-header",n.textContent=`${(e==null?void 0:e.icon)||"📅"} ${(e==null?void 0:e.label)||"Select a Date"}`,t.appendChild(n),t.appendChild(this._buildTimezoneContextBanner(null));const i=document.createElement("input");i.type="date",i.className="widget-date-input",i.min=this._currentDateISO(this.userTimezone),this.selectedDate?i.value=this.selectedDate:i.value=i.min,t.appendChild(i);const r=document.createElement("button");if(r.className="widget-field-btn",r.textContent="Confirm Date",r.onclick=()=>{i.value&&(r.disabled=!0,i.disabled=!0,this.selectedSlotId=null,this.selectedDate=i.value,this._handleSendManual(i.value))},t.appendChild(r),(e==null?void 0:e.required)===!1){const s=document.createElement("button");s.className="widget-field-btn widget-secondary-btn",s.textContent="Skip",s.onclick=()=>this._handleSendManual(this._skipToken),t.appendChild(s)}this._msgList.appendChild(t),this._scrollToBottom()}_appendSelectInput(e){if(this._clearDirectiveCards(),this._clearSkipAction(),!e||!e.options||e.options.length===0){this._appendSystem(`Please type your choice for: ${(e==null?void 0:e.label)||"selection"}`);return}const t=document.createElement("div");t.className="message agent field-input-card directive-card";const n=document.createElement("div");if(n.className="card-header",n.textContent=`${e.icon||"📋"} ${e.label||"Choose an option"}`,t.appendChild(n),e.description){const r=document.createElement("p");r.className="field-description",r.textContent=e.description,t.appendChild(r)}const i=document.createElement("div");if(i.className="select-options-grid",e.options.forEach(r=>{const s=document.createElement("button");s.className="select-option-btn",s.textContent=r,s.onclick=()=>{i.querySelectorAll(".select-option-btn").forEach(c=>{c.disabled=!0,c.classList.remove("selected")}),s.classList.add("selected"),this._handleSendManual(r)},i.appendChild(s)}),t.appendChild(i),(e==null?void 0:e.required)===!1){const r=document.createElement("button");r.className="widget-field-btn widget-secondary-btn",r.textContent="Skip",r.onclick=()=>this._handleSendManual(this._skipToken),t.appendChild(r)}this._msgList.appendChild(t),this._scrollToBottom()}async _appendTimeSlotGrid(e){var d;this._clearDirectiveCards(),this._clearSkipAction(),e!=null&&e.slot_unavailable&&(this.selectedSlotId=null);const t=this._extractLatestIsoDate();this.selectedDate=t||this.selectedDate;let n=[],i=null;if(t){const a=await this._fetchAvailabilityOptions(t);n=a.options,i=a.status}if(!n.length&&((d=e==null?void 0:e.options)!=null&&d.length)&&(n=e.options.map(a=>({id:null,label:a,available:!0,reason:null})),i=(e==null?void 0:e.availability_status)||i),!n.length){const a=(e==null?void 0:e.timezone_fallback_reason)||this.timezoneFallbackReason||null;this._appendSystem(`${(e==null?void 0:e.icon)||"⏰"} ${this._availabilityRecoveryMessage(i,a)}`),this.selectedSlotId=null,this.selectedDate=null,this._appendDatePicker({icon:"📅",label:"Choose another date",required:e==null?void 0:e.required});return}const r=document.createElement("div");r.className="message agent field-input-card directive-card";const s=document.createElement("div");if(s.className="card-header",s.textContent=`${e.icon||"⏰"} ${e.label||"Select a Time Slot"}`,r.appendChild(s),r.appendChild(this._buildTimezoneContextBanner(t)),e.description){const a=document.createElement("p");a.className="field-description",a.textContent=e.description,r.appendChild(a)}if(e!=null&&e.validation_error){const a=document.createElement("p");a.className="field-inline-error",a.textContent=e.validation_error,r.appendChild(a)}const c=document.createElement("div");c.className="select-options-grid",n.forEach(a=>{const l=document.createElement("button");l.className="select-option-btn time-slot-btn";const m=document.createElement("span");if(m.className="slot-local-time",m.textContent=a.label,l.appendChild(m),a.userLabel){const o=document.createElement("span");o.className="slot-org-time",o.textContent=`Your time: ${a.userLabel}`,l.appendChild(o)}a.available||(l.disabled=!0,l.classList.add("unavailable"),a.reason&&(l.title=`Unavailable (${a.reason})`)),l.onclick=()=>{a.available&&(c.querySelectorAll(".time-slot-btn").forEach(o=>{o.disabled=!0,o.classList.remove("selected")}),l.classList.add("selected"),this.selectedSlotId=a.id||null,this._handleSendManual(a.label))},c.appendChild(l)}),r.appendChild(c),this._msgList.appendChild(r),this._scrollToBottom()}_extractLatestIsoDate(){if(this.selectedDate)return this.selectedDate;const e=this._msgList.querySelectorAll(".message.user");for(let t=e.length-1;t>=0;t--){const i=(e[t].textContent||"").trim().match(/\d{4}-\d{2}-\d{2}/);if(i)return i[0]}return null}async _fetchAvailabilityOptions(e){try{const t=await fetch(this._buildAvailabilityRequestUrl(e));if(!t.ok)return{options:[],status:null};const n=await t.json();return this.orgTimezone=n.org_timezone||this.orgTimezone,n.user_timezone&&(this.userTimezone=n.user_timezone),n.timezone_source&&(this.timezoneSource=n.timezone_source),this.timezoneFallbackUsed=!!n.timezone_fallback_used,this.timezoneFallbackReason=n.timezone_fallback_reason||null,this._persistTimezonePreference(),this._showTimezoneFallbackNoticeIfNeeded(),{options:this._normalizeAvailabilitySlots(n.slots),status:n.availability_status||null}}catch{return{options:[],status:null}}}_appendOTPInterface(e={}){const t=((e==null?void 0:e.channel)||"email").toLowerCase(),n=t==="phone",i=document.createElement("div");i.className="message agent otp-card",i.setAttribute("role","form"),i.setAttribute("aria-label",n?"Phone verification":"Email verification");const r=document.createElement("div");r.className="card-header",r.textContent=n?"Phone Verification Required":"Verification Required";const s=document.createElement("p");s.textContent=n?"Please enter the SMS verification code sent to your phone.":"Please enter the email verification code to continue booking.";const c={cooldownSeconds:Number((e==null?void 0:e.otp_cooldown_seconds)||30),resendCap:Number((e==null?void 0:e.resend_cap)||3),resendsLeft:Number(typeof(e==null?void 0:e.resends_left)=="number"?e.resends_left:(e==null?void 0:e.resend_cap)||3)},d=document.createElement("div");d.className="otp-input-group";const a=document.createElement("input");a.type="text",a.maxLength=8,a.placeholder="Enter code",a.id="otp-field",a.setAttribute("aria-label","Verification code"),a.setAttribute("autocomplete","one-time-code");const l=document.createElement("button");l.id="verify-otp-btn",l.textContent="Verify",l.setAttribute("aria-label","Verify code"),d.appendChild(a),d.appendChild(l);const m=document.createElement("button");m.className="otp-resend-link",m.textContent="Didn't receive it? Resend code",m.setAttribute("aria-label","Resend verification code");const o=document.createElement("div");o.className="otp-status",o.setAttribute("aria-live","polite"),o.textContent=`Resend available in ${c.cooldownSeconds}s • ${c.resendsLeft} resends left`;const v=document.createElement("button");v.className="otp-resend-link",v.textContent="Use a different email address",v.setAttribute("aria-label","Use different email address"),i.appendChild(r),i.appendChild(s),i.appendChild(d),i.appendChild(m),i.appendChild(v),i.appendChild(o),this._msgList.appendChild(i),this._scrollToBottom(),this._input.disabled=!0,this._sendBtn.disabled=!0,this._input.placeholder="Enter the verification code above...",this._input.style.opacity="0.5",setTimeout(()=>a.focus(),100);const w=()=>{var x,h,g;let f=((e==null?void 0:e.phone)||((x=this._activeFieldMeta)==null?void 0:x.phone)||"").toString().trim();if(!f)try{const b=this._msgList.querySelectorAll(".message.user");for(let _=b.length-1;_>=0;_--){const C=(b[_].textContent||"").trim();if(/^\+?\d[\d\s\-()]{6,}$/.test(C)&&C.replace(/\D/g,"").length>=10){f=C;break}}}catch{}if(!f){try{f=(((h=this._directiveDrafts.phone)==null?void 0:h.localNumber)||"").toString().trim()}catch{}if(f){const b=(((g=this._directiveDrafts.phone)==null?void 0:g.countryCode)||"").toString().trim(),C={US:"+1",GB:"+44",IN:"+91",AU:"+61",CA:"+1"}[b]||"";C&&(f=C+" "+f)}}return f},B=f=>{const x=(f||"").toString().trim();if(!x)return"";if(x.startsWith("+"))return"+"+x.replace(/[^\d+]/g,"").replace(/\D/g,"");const h=x.replace(/\D/g,"");return h.length===10?"+91"+h:h.length>=11&&h.length<=15||h?"+"+h:""},P=async(f=!1)=>{var b;const x=w();if(console.warn("[DotStark] Send OTP started, channel: phone, raw:",x,"fieldMeta.phone:",e==null?void 0:e.phone,"activeMeta.phone:",(b=this._activeFieldMeta)==null?void 0:b.phone),T(f?"phone_resend_start":"phone_send_start",x),!x||x.replace(/\D/g,"").length<10)return console.warn("[DotStark] phone resolve failed - raw:",x),T("phone_resolve_failed",x||"empty"),y="We couldn't detect your phone number. Please re-enter your phone and try again.",o.textContent=y,o.style.color="#ef4444",I(),l.disabled=!1,a.disabled=!1,!1;const h=B(x);if(console.log("[DotStark] phone number normalized:",h,"from raw:",x),!h||!h.startsWith("+")||h.replace(/\D/g,"").length<10)return console.warn("[DotStark] invalid phone format - raw:",x,"normalized:",h),T("phone_invalid_format",`${x} -> ${h}`),y="Invalid phone number. Please check and re-enter it.",o.textContent=y,o.style.color="#ef4444",I(),l.disabled=!1,a.disabled=!1,!1;const g=await H();if(console.log("[DotStark] ensureFirebase done, ok:",g,"hasAuth:",!!S,"hasVerifier:",!!k),!g)return console.warn("[DotStark] reCAPTCHA not ready - verifierReady:",g,"hasAuth:",!!S,"hasVerifier:",!!k),T("phone_verifier_not_ready",`ready:${g} hasAuth:${!!S} hasVerifier:${!!k}`),y="Preparing verification... Please wait a moment then click Resend.",o.textContent=y,o.style.color="#64748b",I(),l.disabled=!0,a.disabled=!0,setTimeout(()=>{l.disabled=!1,a.disabled=!1},1500),!1;try{return y=`Sending SMS to ${h} via Firebase...`,o.textContent=y,o.style.color="#64748b",I(),console.warn("[DotStark] signInWithPhoneNumber started for",h,"verifier:",!!k),T("phone_sending",h),A=await S.signInWithPhoneNumber(h,k),console.warn("[DotStark] signInWithPhoneNumber resolved, confirmationResult exists:",!!A),T("phone_sent",h),y=`Code sent to ${h} via Firebase. Enter it above.`,o.textContent=y,o.style.color="#22c55e",I(),l.disabled=!1,a.disabled=!1,console.warn("[DotStark] Verify button enabled, hasConfirmationResult:",!!A),!0}catch(_){const C=_&&_.message?_.message:String(_),E=_&&_.code?` [${_.code}]`:"";let R="";E.includes("unauthorized-domain")?R=" - Add this domain to Firebase Console > Auth > Authorized domains":E.includes("captcha-check-failed")?R=" - reCAPTCHA blocked, reload page":E.includes("invalid-phone-number")?R=" - check phone format E.164":E.includes("quota-exceeded")?R=" - Firebase SMS quota exceeded":E.includes("too-many-requests")&&(R=" - too many attempts, wait"),console.warn("[DotStark] Firebase SMS failed - COMPLETE error (technical, dev console & backend):",_,"code:",E,"message:",C,"hint:",R),T("phone_send_failed",`${E} ${C.slice(0,80)}${R}`),y="Code not sent yet. Please click Resend to try again. (See developer console for technical detail)",o.textContent=y,o.style.color="#64748b",I(),l.disabled=!0,a.disabled=!0,setTimeout(()=>{l.disabled=!1,a.disabled=!1},1500);try{k.clear()}catch{}return k=null,!1}};n&&setTimeout(()=>{P(!1)},100);let z=Math.max(0,c.resendCap-c.resendsLeft),N=Math.max(0,c.cooldownSeconds),y="";const I=()=>{const f=Math.max(0,c.resendCap-z),x=N>0?`Resend available in ${N}s`:"You can resend now";n&&y?o.textContent=`${y} • ${x} • ${f} resends left`:o.textContent=`${x} • ${f} resends left`,m.disabled=N>0||z>=c.resendCap};I();const j=window.setInterval(()=>{if(N<=0){window.clearInterval(j);return}N-=1,I()},1e3);n&&(l.disabled=!0,a.disabled=!0,y="Preparing phone verification...",o.textContent=y,I()),l.onclick=async()=>{var x;const f=(a.value||"").replace(/\s+/g,"");console.warn("[DotStark] Verify clicked. code length:",f.length,"session:",this.sessionId,"channel:",t,"hasConfirmationResult:",!!A),T("verify_clicked",`code_len:${f.length} hasConfirmation:${!!A} channel:${t}`);try{window._dotstarkLastSessionId=this.sessionId}catch{}if(f.length<4){o.textContent=n?"Please enter the code sent to your phone.":"Please enter the code sent to your email.",o.style.color="#ef4444",a.focus();return}if(!this.sessionId){o.textContent="Session expired. Please refresh and start again.",o.style.color="#ef4444";return}l.disabled=!0,a.disabled=!0,l.textContent="...",o.textContent="";try{let h;if(n){if(f==="123456"){const g=w()||(e==null?void 0:e.phone)||((x=this._activeFieldMeta)==null?void 0:x.phone)||"",b=B(g);if(b){console.warn("[DotStark] Test code 123456 detected - trying mock_valid_token for",b,"(dev console, also logged to backend)"),T("phone_mock_verify_attempt",b);try{const _=`mock_valid_token:${b}`,C={session_id:this.sessionId,channel:"phone",id_token:_};if(console.warn("[DotStark] POST mock verify",C.session_id.slice(0,8)+"***","token",_.slice(0,20)+"***"),h=await fetch(`${u.apiBase}/auth/security/otp/verify`,{method:"POST",headers:{"Content-Type":"application/json","X-Widget-Token":u.widgetToken||"","X-Requested-With":"XMLHttpRequest"},body:JSON.stringify(C)}),h.ok){console.warn("[DotStark] Mock verify succeeded - completing flow"),T("phone_mock_verify_success",b),i.textContent="";const E=document.createElement("div");E.className="success-msg",E.textContent="✅ Phone Verified Successfully!",i.appendChild(E),this._input.disabled=!1,this._sendBtn.disabled=!1,this._input.placeholder="Type a message...",this._input.style.opacity="1",setTimeout(()=>this._handleSendManual("I've verified the code. Please proceed."),800);return}else{const E=await h.text().catch(()=>"");console.warn("[DotStark] Mock verify failed - status",h.status,E.slice(0,100),"falling through to Firebase"),T("phone_mock_verify_failed",`status:${h.status} ${E.slice(0,80)}`)}}catch(_){console.warn("[DotStark] Mock verify error",_),T("phone_mock_verify_error",String(_).slice(0,100))}}}if(!A){console.warn("[DotStark] Verify clicked without confirmationResult - attempting recovery send (technical detail in dev console, backend logs)"),T("verify_no_confirmation",`code_len:${f.length} hasConfirmation:false`),o.textContent="Sending code... Please wait a moment then try again. (Technical detail in developer console)",o.style.color="#64748b";const g=await P(!1);if(!A){console.warn("[DotStark] Recovery send still no confirmationResult - check dev console for [DotStark] Firebase SMS failed and backend docker logs widget.client_log"),T("verify_still_no_confirmation","after recovery"),y="Code is being prepared. Please click Resend and wait for the SMS.",o.textContent=y,o.style.color="#64748b",I(),l.disabled=!0,a.disabled=!0,l.textContent="Verify",setTimeout(()=>{l.disabled=!1,a.disabled=!1},2e3);return}}try{const g=await A.confirm(f);if(!g||!g.user)throw new Error("No user after confirm");const b=await g.user.getIdToken();if(!b||typeof b!="string"||b.length<20)throw new Error("Empty idToken");console.log("[DotStark] Firebase idToken length:",b.length,"prefix:",b.slice(0,20));const _={session_id:this.sessionId,channel:"phone",id_token:b};console.log("[DotStark] POST /auth/security/otp/verify payload has id_token:",!!_.id_token,"len:",_.id_token.length),h=await fetch(`${u.apiBase}/auth/security/otp/verify`,{method:"POST",headers:{"Content-Type":"application/json","X-Widget-Token":u.widgetToken||"","X-Requested-With":"XMLHttpRequest"},body:JSON.stringify(_)})}catch(g){const b=g&&g.code?String(g.code):"",_=g&&g.message?String(g.message):String(g);console.warn("[DotStark] Firebase confirm failed (dev console, technical):",g,"code:",b,"msg:",_);let C="We couldn't verify the code. Please try again.";b.includes("invalid-verification-code")||_.toLowerCase().includes("code")?C="That code is incorrect. Please check the SMS and try again.":b.includes("code-expired")?C="That code has expired. Please click Resend for a new one.":b.includes("too-many-requests")&&(C="Too many attempts. Please wait a minute then click Resend."),o.textContent=C,o.style.color="#ef4444",l.disabled=!1,a.disabled=!1,l.textContent="Verify";return}}else h=await fetch(`${u.apiBase}/auth/security/otp/verify`,{method:"POST",headers:{"Content-Type":"application/json","X-Widget-Token":u.widgetToken||"","X-Requested-With":"XMLHttpRequest"},body:JSON.stringify({session_id:this.sessionId,code:f,channel:t})});if(h.ok){i.textContent="";const g=document.createElement("div");g.className="success-msg",g.textContent=n?"✅ Phone Verified Successfully!":"✅ Email Verified Successfully!",i.appendChild(g),this._input.disabled=!1,this._sendBtn.disabled=!1,this._input.placeholder="Type a message...",this._input.style.opacity="1",setTimeout(()=>this._handleSendManual("I've verified the code. Please proceed."),1e3)}else{let g="";try{const b=await h.json();g=b&&b.detail?String(b.detail):""}catch{}o.textContent=h.status===429?g||"Too many attempts. Please request a new code.":g||"That code is incorrect or has expired. Please try again or resend a new code.",o.style.color="#ef4444",l.disabled=!1,a.disabled=!1,l.textContent="Verify",a.value="",a.focus()}}catch{o.textContent="Couldn't reach the server to verify. Please check your connection and try again.",o.style.color="#ef4444",l.disabled=!1,a.disabled=!1,l.textContent="Verify"}},a.onkeydown=f=>{f.key==="Enter"&&l.click()},m.onclick=async()=>{if(z>=c.resendCap){o.textContent="Maximum resend attempts reached. Please try again later.",o.style.color="#ef4444";return}if(!(N>0)){m.disabled=!0,m.textContent="Sending...",o.textContent="";try{if(n)if(await P(!0))try{await this._handleSendManual("resend phone")}catch{}else z--;else await this._handleSendManual("resend");z++,N=c.cooldownSeconds,n?y&&y.startsWith("Code sent")||!y||y.startsWith("Failed"):(o.textContent=`Code resent! (${Math.max(0,c.resendCap-z)} resends left)`,o.style.color="#22c55e",y=o.textContent)}catch{o.textContent="Failed to resend. Please try again.",o.style.color="#ef4444",y=o.textContent}I(),m.textContent="Didn't receive it? Resend code"}},v.textContent=n?"Use a different phone number":"Use a different email address",v.setAttribute("aria-label",n?"Use different phone":"Use different email address"),v.onclick=()=>{this._input.disabled=!1,this._sendBtn.disabled=!1,this._input.placeholder=n?"Enter the correct phone number...":"Enter the correct email address...",this._input.style.opacity="1",this._input.focus(),o.textContent=n?"No problem — provide the correct phone and we’ll resend there.":"No problem — provide the correct email and we’ll resend there.",o.style.color="#64748b"},this._scrollToBottom(),a.focus()}_appendSummaryCard(e){const t=document.createElement("div");t.className="message agent summary-card";const n=document.createElement("div");n.className="card-header",n.textContent="📋 Booking Summary";const i=document.createElement("div");i.className="summary-content",this._renderMarkdown(i,e);const r=document.createElement("div");r.className="card-actions";const s=document.createElement("button");s.className="confirm-btn",s.textContent="Confirm Booking",s.setAttribute("aria-label","Confirm booking");const c=document.createElement("button");c.className="edit-btn",c.textContent="✎ Change Details",c.setAttribute("aria-label","Edit booking details"),r.appendChild(s),r.appendChild(c),t.appendChild(n),t.appendChild(i),t.appendChild(r),this._msgList.appendChild(t),s.onclick=()=>{s.disabled=!0,c.disabled=!0,this._handleSendManual("Yes, please confirm the booking.")},c.onclick=()=>{s.disabled=!0,c.disabled=!0,this._handleSendManual("I need to change some details.")},this._scrollToBottom()}_appendConfirmedCard(e,t={}){const n=document.createElement("div");n.className="message agent confirmed-card",n.setAttribute("role","alert");const i=document.createElement("div");i.className="conf-icon",i.textContent="🎉";const r=document.createElement("h3");r.textContent="Booking Confirmed!",r.style.cssText="font-size:16px;font-weight:700;color:var(--success);margin:8px 0;";const s=document.createElement("p");s.style.cssText="font-size:13px;color:var(--text-sec);line-height:1.5;",this._renderMarkdown(s,e);const c=document.createElement("div");c.className="conf-footer",c.textContent=(t==null?void 0:t.email_retrying)===!0?"📧 Booking confirmed. Confirmation email delivery is retrying in the background.":"📧 A confirmation email is on its way.";const d=document.createElement("button");d.textContent="🔄 Start New Booking",d.style.cssText=`
+            `;
+      this._msgList.appendChild(div);
+      this._scrollToBottom();
+      return div;
+    }
+
+    _appendSystem(text) {
+      const div = document.createElement("div");
+      div.className = "message system";
+      const span = document.createElement("span");
+      span.textContent = text;
+      div.appendChild(span);
+      this._msgList.appendChild(div);
+      this._scrollToBottom();
+    }
+
+    _updateInputMode(type, placeholder) {
+      if (this._input) {
+        this._input.type = type || "text";
+        this._input.placeholder = placeholder || "Type a message...";
+      }
+    }
+
+    _setInlineValidation(message) {
+      if (!this._inlineValidation) return;
+      this._inlineValidation.textContent = message || "";
+      this._inlineValidation.style.display = message ? "block" : "none";
+    }
+
+    _clearDirectiveCards() {
+      this._msgList
+        .querySelectorAll(".directive-card")
+        .forEach((node) => node.remove());
+    }
+
+    _clearSkipAction() {
+      if (!this._sendBtn) return;
+      const existing = this.shadowRoot.getElementById("widget-skip-btn");
+      if (existing) existing.remove();
+    }
+
+    _renderSkipAction(fieldMeta) {
+      this._clearSkipAction();
+      if (!fieldMeta || fieldMeta.required !== false) return;
+      const skipBtn = document.createElement("button");
+      skipBtn.id = "widget-skip-btn";
+      skipBtn.className = "widget-skip-btn";
+      skipBtn.textContent = "Skip";
+      skipBtn.onclick = () => {
+        skipBtn.disabled = true;
+        this._handleSendManual(this._skipToken);
+      };
+      this._sendBtn.parentElement?.appendChild(skipBtn);
+    }
+
+    _defaultCountryCode() {
+      try {
+        const locale = Intl.DateTimeFormat().resolvedOptions().locale || "";
+        const country = locale.split("-").pop()?.toUpperCase();
+        if (country && country.length === 2) return country;
+      } catch (e) {}
+      const tz = this.userTimezone || "";
+      if (tz.includes("London")) return "GB";
+      if (tz.includes("Kolkata")) return "IN";
+      if (tz.includes("Sydney")) return "AU";
+      return "US";
+    }
+
+    _appendPhoneInput(fieldMeta) {
+      this._clearDirectiveCards();
+      this._updateInputMode("text", "Type a message...");
+      this._clearSkipAction();
+      const fieldName = fieldMeta?.name || "phone";
+      const previous = this._directiveDrafts[fieldName] || {};
+      const countryCode =
+        (fieldMeta?.country_code || previous.countryCode || this._defaultCountryCode()).toUpperCase();
+      const localNumber = fieldMeta?.raw_input || previous.localNumber || "";
+
+      const countries = [
+        { code: "US", dial: "+1" },
+        { code: "GB", dial: "+44" },
+        { code: "IN", dial: "+91" },
+        { code: "AU", dial: "+61" },
+        { code: "CA", dial: "+1" },
+      ];
+
+      const div = document.createElement("div");
+      div.className = "message agent field-input-card directive-card";
+
+      const label = document.createElement("div");
+      label.className = "card-header";
+      label.textContent = `${fieldMeta?.icon || "📞"} ${fieldMeta?.label || "Phone Number"}`;
+      div.appendChild(label);
+
+      const row = document.createElement("div");
+      row.className = "widget-phone-row";
+
+      const countrySelect = document.createElement("select");
+      countrySelect.className = "widget-phone-country";
+      countries.forEach((entry) => {
+        const opt = document.createElement("option");
+        opt.value = entry.code;
+        opt.textContent = `${entry.code} (${entry.dial})`;
+        if (entry.code === countryCode) opt.selected = true;
+        countrySelect.appendChild(opt);
+      });
+
+      const localInput = document.createElement("input");
+      localInput.type = "tel";
+      localInput.className = "widget-phone-local";
+      localInput.placeholder = fieldMeta?.placeholder || "Enter local phone number";
+      localInput.value = localNumber;
+
+      row.appendChild(countrySelect);
+      row.appendChild(localInput);
+      div.appendChild(row);
+
+      if (fieldMeta?.validation_error) {
+        const error = document.createElement("div");
+        error.className = "field-inline-error";
+        error.textContent = fieldMeta.validation_error;
+        div.appendChild(error);
+      }
+
+      const actions = document.createElement("div");
+      actions.className = "widget-field-actions";
+
+      const submitBtn = document.createElement("button");
+      submitBtn.className = "widget-field-btn";
+      submitBtn.textContent = "Submit Phone";
+      submitBtn.onclick = () => {
+        const selectedCode = countrySelect.value || this._defaultCountryCode();
+        const dial = countries.find((entry) => entry.code === selectedCode)?.dial || "+1";
+        const normalized = `${dial} ${localInput.value.trim()}`.trim();
+        this._directiveDrafts[fieldName] = {
+          countryCode: selectedCode,
+          localNumber: localInput.value.trim(),
+        };
+        submitBtn.disabled = true;
+        localInput.disabled = true;
+        countrySelect.disabled = true;
+        this._handleSendManual(normalized);
+      };
+      actions.appendChild(submitBtn);
+
+      if (fieldMeta?.required === false) {
+        const skipBtn = document.createElement("button");
+        skipBtn.className = "widget-field-btn widget-secondary-btn";
+        skipBtn.textContent = "Skip";
+        skipBtn.onclick = () => {
+          skipBtn.disabled = true;
+          submitBtn.disabled = true;
+          this._handleSendManual(this._skipToken);
+        };
+        actions.appendChild(skipBtn);
+      }
+
+      div.appendChild(actions);
+      this._msgList.appendChild(div);
+      this._scrollToBottom();
+    }
+
+    _appendDatePicker(fieldMeta) {
+      this._clearDirectiveCards();
+      this._clearSkipAction();
+      const div = document.createElement("div");
+      div.className = "message agent field-input-card directive-card";
+
+      const label = document.createElement("div");
+      label.className = "card-header";
+      label.textContent = `${fieldMeta?.icon || "📅"} ${fieldMeta?.label || "Select a Date"}`;
+      div.appendChild(label);
+      div.appendChild(this._buildTimezoneContextBanner(null));
+
+      const input = document.createElement("input");
+      input.type = "date";
+      input.className = "widget-date-input";
+      input.min = this._currentDateISO(this.userTimezone);
+      if (this.selectedDate) {
+        input.value = this.selectedDate;
+      } else {
+        input.value = input.min;
+      }
+      div.appendChild(input);
+
+      const btn = document.createElement("button");
+      btn.className = "widget-field-btn";
+      btn.textContent = "Confirm Date";
+      btn.onclick = () => {
+        if (!input.value) return;
+        btn.disabled = true;
+        input.disabled = true;
+        this.selectedSlotId = null;
+        this.selectedDate = input.value;
+        this._handleSendManual(input.value);
+      };
+      div.appendChild(btn);
+      if (fieldMeta?.required === false) {
+        const skipBtn = document.createElement("button");
+        skipBtn.className = "widget-field-btn widget-secondary-btn";
+        skipBtn.textContent = "Skip";
+        skipBtn.onclick = () => this._handleSendManual(this._skipToken);
+        div.appendChild(skipBtn);
+      }
+
+      this._msgList.appendChild(div);
+      this._scrollToBottom();
+    }
+
+    _appendSelectInput(fieldMeta) {
+      this._clearDirectiveCards();
+      this._clearSkipAction();
+      if (!fieldMeta || !fieldMeta.options || fieldMeta.options.length === 0) {
+        this._appendSystem(
+          `Please type your choice for: ${fieldMeta?.label || "selection"}`,
+        );
+        return;
+      }
+
+      const div = document.createElement("div");
+      div.className = "message agent field-input-card directive-card";
+
+      const label = document.createElement("div");
+      label.className = "card-header";
+      label.textContent = `${fieldMeta.icon || "📋"} ${fieldMeta.label || "Choose an option"}`;
+      div.appendChild(label);
+
+      if (fieldMeta.description) {
+        const desc = document.createElement("p");
+        desc.className = "field-description";
+        desc.textContent = fieldMeta.description;
+        div.appendChild(desc);
+      }
+
+      const optionsContainer = document.createElement("div");
+      optionsContainer.className = "select-options-grid";
+
+      fieldMeta.options.forEach((opt) => {
+        const btn = document.createElement("button");
+        btn.className = "select-option-btn";
+        btn.textContent = opt;
+        btn.onclick = () => {
+          optionsContainer
+            .querySelectorAll(".select-option-btn")
+            .forEach((b) => {
+              b.disabled = true;
+              b.classList.remove("selected");
+            });
+          btn.classList.add("selected");
+          this._handleSendManual(opt);
+        };
+        optionsContainer.appendChild(btn);
+      });
+
+      div.appendChild(optionsContainer);
+      if (fieldMeta?.required === false) {
+        const skipBtn = document.createElement("button");
+        skipBtn.className = "widget-field-btn widget-secondary-btn";
+        skipBtn.textContent = "Skip";
+        skipBtn.onclick = () => this._handleSendManual(this._skipToken);
+        div.appendChild(skipBtn);
+      }
+      this._msgList.appendChild(div);
+      this._scrollToBottom();
+    }
+
+    async _appendTimeSlotGrid(fieldMeta) {
+      this._clearDirectiveCards();
+      this._clearSkipAction();
+      if (fieldMeta?.slot_unavailable) {
+        this.selectedSlotId = null;
+      }
+      const selectedDate = this._extractLatestIsoDate();
+      this.selectedDate = selectedDate || this.selectedDate;
+      let options = [];
+      let availabilityStatus = null;
+      if (selectedDate) {
+        const availability = await this._fetchAvailabilityOptions(selectedDate);
+        options = availability.options;
+        availabilityStatus = availability.status;
+      }
+      if (!options.length && fieldMeta?.options?.length) {
+        options = fieldMeta.options.map((label) => ({
+          id: null,
+          label,
+          available: true,
+          reason: null,
+        }));
+        availabilityStatus = fieldMeta?.availability_status || availabilityStatus;
+      }
+      if (!options.length) {
+        const fallbackReason =
+          fieldMeta?.timezone_fallback_reason || this.timezoneFallbackReason || null;
+        this._appendSystem(
+          `${fieldMeta?.icon || "⏰"} ${this._availabilityRecoveryMessage(availabilityStatus, fallbackReason)}`,
+        );
+        this.selectedSlotId = null;
+        this.selectedDate = null;
+        this._appendDatePicker({
+          icon: "📅",
+          label: "Choose another date",
+          required: fieldMeta?.required,
+        });
+        return;
+      }
+
+      const div = document.createElement("div");
+      div.className = "message agent field-input-card directive-card";
+
+      const label = document.createElement("div");
+      label.className = "card-header";
+      label.textContent = `${fieldMeta.icon || "⏰"} ${fieldMeta.label || "Select a Time Slot"}`;
+      div.appendChild(label);
+      div.appendChild(this._buildTimezoneContextBanner(selectedDate));
+
+      if (fieldMeta.description) {
+        const desc = document.createElement("p");
+        desc.className = "field-description";
+        desc.textContent = fieldMeta.description;
+        div.appendChild(desc);
+      }
+      if (fieldMeta?.validation_error) {
+        const error = document.createElement("p");
+        error.className = "field-inline-error";
+        error.textContent = fieldMeta.validation_error;
+        div.appendChild(error);
+      }
+
+      const optionsContainer = document.createElement("div");
+      optionsContainer.className = "select-options-grid";
+
+      options.forEach((opt) => {
+        const btn = document.createElement("button");
+        btn.className = "select-option-btn time-slot-btn";
+        const localText = document.createElement("span");
+        localText.className = "slot-local-time";
+        localText.textContent = opt.label;
+        btn.appendChild(localText);
+        if (opt.userLabel) {
+          const orgText = document.createElement("span");
+          orgText.className = "slot-org-time";
+          orgText.textContent = `Your time: ${opt.userLabel}`;
+          btn.appendChild(orgText);
+        }
+        if (!opt.available) {
+          btn.disabled = true;
+          btn.classList.add("unavailable");
+          if (opt.reason) btn.title = `Unavailable (${opt.reason})`;
+        }
+        btn.onclick = () => {
+          if (!opt.available) return;
+          optionsContainer.querySelectorAll(".time-slot-btn").forEach((b) => {
+            b.disabled = true;
+            b.classList.remove("selected");
+          });
+          btn.classList.add("selected");
+          this.selectedSlotId = opt.id || null;
+          this._handleSendManual(opt.label);
+        };
+        optionsContainer.appendChild(btn);
+      });
+
+      div.appendChild(optionsContainer);
+      this._msgList.appendChild(div);
+      this._scrollToBottom();
+    }
+
+    _extractLatestIsoDate() {
+      if (this.selectedDate) return this.selectedDate;
+      const bubbles = this._msgList.querySelectorAll(".message.user");
+      for (let i = bubbles.length - 1; i >= 0; i--) {
+        const text = (bubbles[i].textContent || "").trim();
+        const match = text.match(/\d{4}-\d{2}-\d{2}/);
+        if (match) {
+          return match[0];
+        }
+      }
+      return null;
+    }
+
+    async _fetchAvailabilityOptions(dateValue) {
+      try {
+        const response = await fetch(this._buildAvailabilityRequestUrl(dateValue));
+        if (!response.ok) return { options: [], status: null };
+        const payload = await response.json();
+        this.orgTimezone = payload.org_timezone || this.orgTimezone;
+        if (payload.user_timezone) {
+          this.userTimezone = payload.user_timezone;
+        }
+        if (payload.timezone_source) {
+          this.timezoneSource = payload.timezone_source;
+        }
+        this.timezoneFallbackUsed = !!payload.timezone_fallback_used;
+        this.timezoneFallbackReason = payload.timezone_fallback_reason || null;
+        this._persistTimezonePreference();
+        this._showTimezoneFallbackNoticeIfNeeded();
+        return {
+          options: this._normalizeAvailabilitySlots(payload.slots),
+          status: payload.availability_status || null,
+        };
+      } catch (e) {
+        return { options: [], status: null };
+      }
+    }
+
+    _appendOTPInterface(fieldMeta = {}) {
+      const channel = (fieldMeta?.channel || "email").toLowerCase();
+      const isPhone = channel === "phone";
+      const div = document.createElement("div");
+      div.className = "message agent otp-card";
+      div.setAttribute("role", "form");
+      div.setAttribute("aria-label", isPhone ? "Phone verification" : "Email verification");
+
+      const header = document.createElement("div");
+      header.className = "card-header";
+      header.textContent = isPhone ? "Phone Verification Required" : "Verification Required";
+
+      const desc = document.createElement("p");
+      desc.textContent = isPhone
+        ? "Please enter the SMS verification code sent to your phone."
+        : "Please enter the email verification code to continue booking.";
+
+      const policy = {
+        cooldownSeconds: Number(fieldMeta?.otp_cooldown_seconds || 30),
+        resendCap: Number(fieldMeta?.resend_cap || 3),
+        resendsLeft: Number(
+          typeof fieldMeta?.resends_left === "number"
+            ? fieldMeta.resends_left
+            : fieldMeta?.resend_cap || 3,
+        ),
+      };
+
+      const inputGroup = document.createElement("div");
+      inputGroup.className = "otp-input-group";
+
+      const input = document.createElement("input");
+      input.type = "text";
+      input.maxLength = 8;
+      input.placeholder = "Enter code";
+      input.id = "otp-field";
+      input.setAttribute("aria-label", "Verification code");
+      input.setAttribute("autocomplete", "one-time-code");
+
+      const btn = document.createElement("button");
+      btn.id = "verify-otp-btn";
+      btn.textContent = "Verify";
+      btn.setAttribute("aria-label", "Verify code");
+
+      inputGroup.appendChild(input);
+      inputGroup.appendChild(btn);
+
+      const resendLink = document.createElement("button");
+      resendLink.className = "otp-resend-link";
+      resendLink.textContent = "Didn't receive it? Resend code";
+      resendLink.setAttribute("aria-label", "Resend verification code");
+
+      const statusMsg = document.createElement("div");
+      statusMsg.className = "otp-status";
+      statusMsg.setAttribute("aria-live", "polite");
+      statusMsg.textContent = `Resend available in ${policy.cooldownSeconds}s • ${policy.resendsLeft} resends left`;
+
+      const recoverBtn = document.createElement("button");
+      recoverBtn.className = "otp-resend-link";
+      recoverBtn.textContent = "Use a different email address";
+      recoverBtn.setAttribute("aria-label", "Use different email address");
+
+      div.appendChild(header);
+      div.appendChild(desc);
+      div.appendChild(inputGroup);
+      div.appendChild(resendLink);
+      div.appendChild(recoverBtn);
+      div.appendChild(statusMsg);
+
+      this._msgList.appendChild(div);
+      this._scrollToBottom();
+
+      // Disable main chat input during OTP — prevent codes being sent to chat
+      this._input.disabled = true;
+      this._sendBtn.disabled = true;
+      this._input.placeholder = "Enter the verification code above...";
+      this._input.style.opacity = "0.5";
+
+      // Focus the OTP input
+      setTimeout(() => input.focus(), 100);
+
+      // Helper to resolve the phone to verify from multiple sources without a fake fallback.
+      const _resolvePhoneForSms = () => {
+        // Prefer explicit fieldMeta from backend (message_processor includes phone)
+        let raw = (fieldMeta?.phone || this._activeFieldMeta?.phone || "").toString().trim();
+        if (!raw) {
+          // Try to find last user phone bubble (stored via _appendPhoneInput)
+          try {
+            const bubbles = this._msgList.querySelectorAll(".message.user");
+            for (let i = bubbles.length - 1; i >= 0; i--) {
+              const t = (bubbles[i].textContent || "").trim();
+              // phone bubbles contain dial + number like "+91 9876543210"
+              if (/^\+?\d[\d\s\-()]{6,}$/.test(t) && t.replace(/\D/g, "").length >= 10) {
+                raw = t;
+                break;
+              }
+            }
+          } catch (_) {}
+        }
+        if (!raw) {
+          // Last resort: try sessionStorage last phone draft
+          try { raw = (this._directiveDrafts.phone?.localNumber || "").toString().trim(); } catch (_) {}
+          if (raw) {
+            const cc = (this._directiveDrafts.phone?.countryCode || "").toString().trim();
+            const dialMap = { US: "+1", GB: "+44", IN: "+91", AU: "+61", CA: "+1" };
+            const dial = dialMap[cc] || "";
+            if (dial) raw = dial + " " + raw;
+          }
+        }
+        return raw;
+      };
+      const _normalizePhoneE164 = (raw) => {
+        const trimmed = (raw || "").toString().trim();
+        if (!trimmed) return "";
+        // Already E.164 with +
+        if (trimmed.startsWith("+")) {
+          // Ensure single space, compact digits but keep +
+          const digits = trimmed.replace(/[^\d+]/g, "");
+          // Keep + then digits
+          return "+" + digits.replace(/\D/g, "");
+        }
+        const digits = trimmed.replace(/\D/g, "");
+        if (digits.length === 10) return "+91" + digits; // default IN for 10-digit local
+        if (digits.length >= 11 && digits.length <= 15) return "+" + digits;
+        return digits ? "+" + digits : "";
+      };
+
+      // For phone channel via Firebase, trigger SMS send immediately
+      let _phoneSmsRetryCount = 0;
+      const _sendPhoneSms = async (isResend = false) => {
+        const rawPhone = _resolvePhoneForSms();
+        console.warn("[DotStark] Send OTP started, channel: phone, raw:", rawPhone, "fieldMeta.phone:", fieldMeta?.phone, "activeMeta.phone:", this._activeFieldMeta?.phone);
+        _logToBackend(isResend ? "phone_resend_start" : "phone_send_start", rawPhone);
+        if (!rawPhone || rawPhone.replace(/\D/g, "").length < 10) {
+          console.warn("[DotStark] phone resolve failed - raw:", rawPhone);
+          _logToBackend("phone_resolve_failed", rawPhone || "empty");
+          firebaseStatus = "We couldn't detect your phone number. Please re-enter your phone and try again.";
+          statusMsg.textContent = firebaseStatus;
+          statusMsg.style.color = "#ef4444";
+          updateResendUi();
+          btn.disabled = false;
+          input.disabled = false;
+          return false;
+        }
+        const phone = _normalizePhoneE164(rawPhone);
+        console.log("[DotStark] phone number normalized:", phone, "from raw:", rawPhone);
+        if (!phone || !phone.startsWith("+") || phone.replace(/\D/g, "").length < 10) {
+          console.warn("[DotStark] invalid phone format - raw:", rawPhone, "normalized:", phone);
+          _logToBackend("phone_invalid_format", `${rawPhone} -> ${phone}`);
+          firebaseStatus = "Invalid phone number. Please check and re-enter it.";
+          statusMsg.textContent = firebaseStatus;
+          statusMsg.style.color = "#ef4444";
+          updateResendUi();
+          btn.disabled = false;
+          input.disabled = false;
+          return false;
+        }
+        // Ensure fresh verifier for each send (single-use)
+        const verifierReady = await _ensureFreshVerifier();
+        console.log("[DotStark] ensureFirebase done, ok:", verifierReady, "hasAuth:", !!firebaseAuth, "hasVerifier:", !!firebaseRecaptchaVerifier);
+        if (!verifierReady) {
+          console.warn("[DotStark] reCAPTCHA not ready - verifierReady:", verifierReady, "hasAuth:", !!firebaseAuth, "hasVerifier:", !!firebaseRecaptchaVerifier);
+          _logToBackend("phone_verifier_not_ready", `ready:${verifierReady} hasAuth:${!!firebaseAuth} hasVerifier:${!!firebaseRecaptchaVerifier}`);
+          firebaseStatus = "Preparing verification... Please wait a moment then click Resend.";
+          statusMsg.textContent = firebaseStatus;
+          statusMsg.style.color = "#64748b";
+          updateResendUi();
+          btn.disabled = true;
+          input.disabled = true;
+          setTimeout(() => { btn.disabled = false; input.disabled = false; }, 1500);
+          return false;
+        }
+        try {
+          firebaseStatus = `Sending SMS to ${phone} via Firebase...`;
+          statusMsg.textContent = firebaseStatus;
+          statusMsg.style.color = "#64748b";
+          updateResendUi();
+          console.warn("[DotStark] signInWithPhoneNumber started for", phone, "verifier:", !!firebaseRecaptchaVerifier);
+          _logToBackend("phone_sending", phone);
+          firebaseConfirmationResult = await firebaseAuth.signInWithPhoneNumber(phone, firebaseRecaptchaVerifier);
+          console.warn("[DotStark] signInWithPhoneNumber resolved, confirmationResult exists:", !!firebaseConfirmationResult);
+          _logToBackend("phone_sent", phone);
+          firebaseStatus = `Code sent to ${phone} via Firebase. Enter it above.`;
+          statusMsg.textContent = firebaseStatus;
+          statusMsg.style.color = "#22c55e";
+          updateResendUi();
+          btn.disabled = false;
+          input.disabled = false;
+          console.warn("[DotStark] Verify button enabled, hasConfirmationResult:", !!firebaseConfirmationResult);
+          return true;
+        } catch (e) {
+          const detail = e && e.message ? e.message : String(e);
+          const code = e && e.code ? ` [${e.code}]` : "";
+          // Map common codes to actionable hints for dev console only
+          let devHint = "";
+          if (code.includes("unauthorized-domain")) devHint = " - Add this domain to Firebase Console > Auth > Authorized domains";
+          else if (code.includes("captcha-check-failed")) devHint = " - reCAPTCHA blocked, reload page";
+          else if (code.includes("invalid-phone-number")) devHint = " - check phone format E.164";
+          else if (code.includes("quota-exceeded")) devHint = " - Firebase SMS quota exceeded";
+          else if (code.includes("too-many-requests")) devHint = " - too many attempts, wait";
+          console.warn("[DotStark] Firebase SMS failed - COMPLETE error (technical, dev console & backend):", e, "code:", code, "message:", detail, "hint:", devHint);
+          _logToBackend("phone_send_failed", `${code} ${detail.slice(0,80)}${devHint}`);
+          firebaseStatus = "Code not sent yet. Please click Resend to try again. (See developer console for technical detail)";
+          statusMsg.textContent = firebaseStatus;
+          statusMsg.style.color = "#64748b";
+          updateResendUi();
+          btn.disabled = true;
+          input.disabled = true;
+          setTimeout(() => { btn.disabled = false; input.disabled = false; }, 1500);
+          // Clear consumed verifier so next retry recreates
+          try { firebaseRecaptchaVerifier.clear(); } catch (_) {}
+          firebaseRecaptchaVerifier = null;
+          return false;
+        }
+      };
+
+      if (isPhone) {
+        // Zavu path: backend already sent SMS via /generate (kd78m7agx48rpyegpfrmhp5rsx8dm8t9 sms_oneway).
+        // Do not auto-trigger Firebase SMS — just enable input and show status.
+        // Keep _sendPhoneSms for manual Resend fallback only.
+        setTimeout(() => {
+          firebaseStatus = "Code sent via SMS. Enter it above.";
+          statusMsg.textContent = firebaseStatus;
+          statusMsg.style.color = "#22c55e";
+          updateResendUi();
+          btn.disabled = false;
+          input.disabled = false;
+        }, 100);
+      }
+
+      let resendCount = Math.max(0, policy.resendCap - policy.resendsLeft);
+      let cooldownRemaining = Math.max(0, policy.cooldownSeconds);
+      let firebaseStatus = ""; // keep Firebase send status separate so cooldown doesn't clobber it
+      const updateResendUi = () => {
+        const resendsLeft = Math.max(0, policy.resendCap - resendCount);
+        const cooldownText =
+          cooldownRemaining > 0
+            ? `Resend available in ${cooldownRemaining}s`
+            : "You can resend now";
+        // For phone, preserve Firebase status and append cooldown; don't overwrite Code sent/Failed
+        if (isPhone && firebaseStatus) {
+          statusMsg.textContent = `${firebaseStatus} • ${cooldownText} • ${resendsLeft} resends left`;
+        } else {
+          statusMsg.textContent = `${cooldownText} • ${resendsLeft} resends left`;
+        }
+        resendLink.disabled =
+          cooldownRemaining > 0 || resendCount >= policy.resendCap;
+      };
+      updateResendUi();
+      const cooldownInterval = window.setInterval(() => {
+        if (cooldownRemaining <= 0) {
+          window.clearInterval(cooldownInterval);
+          return;
+        }
+        cooldownRemaining -= 1;
+        updateResendUi();
+      }, 1000);
+
+      // For phone, disable Verify until Firebase is ready to guarantee id_token path
+      if (isPhone) {
+        btn.disabled = true;
+        input.disabled = true;
+        firebaseStatus = "Preparing phone verification...";
+        statusMsg.textContent = firebaseStatus;
+        updateResendUi();
+      }
+
+      btn.onclick = async () => {
+        const code = (input.value || "").replace(/\s+/g, "");
+        console.warn("[DotStark] Verify clicked. code length:", code.length, "session:", this.sessionId, "channel:", channel, "hasConfirmationResult:", !!firebaseConfirmationResult);
+        _logToBackend("verify_clicked", `code_len:${code.length} hasConfirmation:${!!firebaseConfirmationResult} channel:${channel}`);
+        // Keep global session for backend logs
+        try { window._dotstarkLastSessionId = this.sessionId; } catch (_) {}
+        if (code.length < 4) {
+          statusMsg.textContent = isPhone ? "Please enter the code sent to your phone." : "Please enter the code sent to your email.";
+          statusMsg.style.color = "#ef4444";
+          input.focus();
+          return;
+        }
+        if (!this.sessionId) {
+          statusMsg.textContent = "Session expired. Please refresh and start again.";
+          statusMsg.style.color = "#ef4444";
+          return;
+        }
+
+        btn.disabled = true;
+        input.disabled = true;
+        btn.textContent = "...";
+        statusMsg.textContent = "";
+
+        try {
+          let res;
+          if (isPhone) {
+            // Zavu SMS path (kd78m7agx48rpyegpfrmhp5rsx8dm8t9 sms_oneway) — try 6-digit code verify first
+            // Backend already sent SMS via /generate; this is the primary path. Firebase is fallback.
+            try {
+              const zavuPayload = { session_id: this.sessionId, channel: "phone", code };
+              console.warn("[DotStark] Trying Zavu phone verify with code", code.slice(0,2)+"***");
+              _logToBackend("zavu_verify_attempt", `code_len:${code.length}`);
+              const zavuRes = await fetch(`${CONFIG.apiBase}/auth/security/otp/verify`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "X-Widget-Token": CONFIG.widgetToken || "", "X-Requested-With": "XMLHttpRequest" },
+                body: JSON.stringify(zavuPayload)
+              });
+              if (zavuRes.ok) {
+                console.warn("[DotStark] Zavu phone verify succeeded");
+                _logToBackend("zavu_verify_success", code.slice(0,2)+"***");
+                div.textContent = "";
+                const success = document.createElement("div");
+                success.className = "success-msg";
+                success.textContent = "✅ Phone Verified Successfully!";
+                div.appendChild(success);
+                this._input.disabled = false;
+                this._sendBtn.disabled = false;
+                this._input.placeholder = "Type a message...";
+                this._input.style.opacity = "1";
+                setTimeout(() => this._handleSendManual("I've verified the code. Please proceed."), 800);
+                return;
+              } else {
+                const t = await zavuRes.text().catch(()=> "");
+                const detail = t.slice(0,120);
+                console.warn("[DotStark] Zavu verify failed status", zavuRes.status, detail, " — trying Firebase fallback");
+                _logToBackend("zavu_verify_failed", `status:${zavuRes.status} ${detail.slice(0,60)}`);
+                // If 400 invalid/expired, show error and don't fall through to Firebase (code is wrong, not missing)
+                if (zavuRes.status === 400) {
+                  statusMsg.textContent = detail || "That code is incorrect or has expired. Please try again or resend a new code.";
+                  statusMsg.style.color = "#ef4444";
+                  btn.disabled = false;
+                  input.disabled = false;
+                  btn.textContent = "Verify";
+                  input.value = "";
+                  input.focus();
+                  return;
+                }
+                // For 429, 500 etc, fall through to Firebase
+              }
+            } catch (zavuErr) {
+              console.warn("[DotStark] Zavu verify error, falling back to Firebase", zavuErr);
+              _logToBackend("zavu_verify_error", String(zavuErr).slice(0,80));
+            }
+            // TEST CODE BYPASS: allow "123456" to complete flow via mock token for local/dev testing
+            // This lets you test booking without real SMS when Firebase send is blocked (domain/quota) or using test numbers
+            if (code === "123456") {
+              const _testRaw = _resolvePhoneForSms() || fieldMeta?.phone || this._activeFieldMeta?.phone || "";
+              const _testPhone = _normalizePhoneE164(_testRaw);
+              if (_testPhone) {
+                console.warn("[DotStark] Test code 123456 detected - trying mock_valid_token for", _testPhone, "(dev console, also logged to backend)");
+                _logToBackend("phone_mock_verify_attempt", _testPhone);
+                try {
+                  const mockToken = `mock_valid_token:${_testPhone}`;
+                  const mockPayload = { session_id: this.sessionId, channel: "phone", id_token: mockToken };
+                  console.warn("[DotStark] POST mock verify", mockPayload.session_id.slice(0,8)+"***", "token", mockToken.slice(0,20)+"***");
+                  res = await fetch(`${CONFIG.apiBase}/auth/security/otp/verify`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Widget-Token": CONFIG.widgetToken || "", "X-Requested-With": "XMLHttpRequest" },
+                    body: JSON.stringify(mockPayload)
+                  });
+                  if (res.ok) {
+                    console.warn("[DotStark] Mock verify succeeded - completing flow");
+                    _logToBackend("phone_mock_verify_success", _testPhone);
+                    div.textContent = "";
+                    const success = document.createElement("div");
+                    success.className = "success-msg";
+                    success.textContent = "✅ Phone Verified Successfully!";
+                    div.appendChild(success);
+                    this._input.disabled = false;
+                    this._sendBtn.disabled = false;
+                    this._input.placeholder = "Type a message...";
+                    this._input.style.opacity = "1";
+                    setTimeout(() => this._handleSendManual("I've verified the code. Please proceed."), 800);
+                    return;
+                  } else {
+                    const t = await res.text().catch(()=> "");
+                    console.warn("[DotStark] Mock verify failed - status", res.status, t.slice(0,100), "falling through to Firebase");
+                    _logToBackend("phone_mock_verify_failed", `status:${res.status} ${t.slice(0,80)}`);
+                    // fall through to normal Firebase path below
+                  }
+                } catch (mockErr) {
+                  console.warn("[DotStark] Mock verify error", mockErr);
+                  _logToBackend("phone_mock_verify_error", String(mockErr).slice(0,100));
+                }
+              }
+            }
+            // Attempt auto-recovery if confirmationResult is still null (e.g. initial send failed)
+            if (!firebaseConfirmationResult) {
+              console.warn("[DotStark] Verify clicked without confirmationResult - attempting recovery send (technical detail in dev console, backend logs)");
+              _logToBackend("verify_no_confirmation", `code_len:${code.length} hasConfirmation:false`);
+              statusMsg.textContent = "Sending code... Please wait a moment then try again. (Technical detail in developer console)";
+              statusMsg.style.color = "#64748b";
+              const recovered = await _sendPhoneSms(false);
+              if (!firebaseConfirmationResult) {
+                console.warn("[DotStark] Recovery send still no confirmationResult - check dev console for [DotStark] Firebase SMS failed and backend docker logs widget.client_log");
+                _logToBackend("verify_still_no_confirmation", "after recovery");
+                firebaseStatus = "Code is being prepared. Please click Resend and wait for the SMS.";
+                statusMsg.textContent = firebaseStatus;
+                statusMsg.style.color = "#64748b";
+                updateResendUi();
+                btn.disabled = true;
+                input.disabled = true;
+                btn.textContent = "Verify";
+                setTimeout(() => { btn.disabled = false; input.disabled = false; }, 2000);
+                return;
+              }
+            }
+            try {
+              const cred = await firebaseConfirmationResult.confirm(code);
+              if (!cred || !cred.user) throw new Error("No user after confirm");
+              const idToken = await cred.user.getIdToken();
+              if (!idToken || typeof idToken !== "string" || idToken.length < 20) throw new Error("Empty idToken");
+              console.log("[DotStark] Firebase idToken length:", idToken.length, "prefix:", idToken.slice(0, 20));
+              // Verify payload contains id_token before sending
+              const payload = { session_id: this.sessionId, channel: "phone", id_token: idToken };
+              console.log("[DotStark] POST /auth/security/otp/verify payload has id_token:", !!payload.id_token, "len:", payload.id_token.length);
+              res = await fetch(
+                `${CONFIG.apiBase}/auth/security/otp/verify`,
+                {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "X-Widget-Token": CONFIG.widgetToken || "",
+                    "X-Requested-With": "XMLHttpRequest",
+                  },
+                  body: JSON.stringify(payload),
+                },
+              );
+            } catch (firebaseErr) {
+              const fCode = firebaseErr && firebaseErr.code ? String(firebaseErr.code) : "";
+              const fMsg = firebaseErr && firebaseErr.message ? String(firebaseErr.message) : String(firebaseErr);
+              console.warn("[DotStark] Firebase confirm failed (dev console, technical):", firebaseErr, "code:", fCode, "msg:", fMsg);
+              let userMsg = "We couldn't verify the code. Please try again.";
+              if (fCode.includes("invalid-verification-code") || fMsg.toLowerCase().includes("code")) userMsg = "That code is incorrect. Please check the SMS and try again.";
+              else if (fCode.includes("code-expired")) userMsg = "That code has expired. Please click Resend for a new one.";
+              else if (fCode.includes("too-many-requests")) userMsg = "Too many attempts. Please wait a minute then click Resend.";
+              // Generic friendly for other technical failures - details in dev console
+              statusMsg.textContent = userMsg;
+              statusMsg.style.color = "#ef4444";
+              btn.disabled = false;
+              input.disabled = false;
+              btn.textContent = "Verify";
+              return;
+            }
+          } else {
+            res = await fetch(
+              `${CONFIG.apiBase}/auth/security/otp/verify`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-Widget-Token": CONFIG.widgetToken || "",
+                  "X-Requested-With": "XMLHttpRequest",
+                },
+                body: JSON.stringify({ session_id: this.sessionId, code, channel }),
+              },
+            );
+          }
+
+          if (res.ok) {
+            div.textContent = "";
+            const success = document.createElement("div");
+            success.className = "success-msg";
+            success.textContent = isPhone ? "✅ Phone Verified Successfully!" : "✅ Email Verified Successfully!";
+            div.appendChild(success);
+            this._input.disabled = false;
+            this._sendBtn.disabled = false;
+            this._input.placeholder = "Type a message...";
+            this._input.style.opacity = "1";
+            setTimeout(
+              () =>
+                this._handleSendManual(
+                  "I've verified the code. Please proceed.",
+                ),
+              1000,
+            );
+          } else {
+            let detail = "";
+            try {
+              const errData = await res.json();
+              detail = errData && errData.detail ? String(errData.detail) : "";
+            } catch (e) {}
+            statusMsg.textContent =
+              res.status === 429
+                ? detail || "Too many attempts. Please request a new code."
+                : detail ||
+                  "That code is incorrect or has expired. Please try again or resend a new code.";
+            statusMsg.style.color = "#ef4444";
+            btn.disabled = false;
+            input.disabled = false;
+            btn.textContent = "Verify";
+            input.value = "";
+            input.focus();
+          }
+        } catch (e) {
+          statusMsg.textContent =
+            "Couldn't reach the server to verify. Please check your connection and try again.";
+          statusMsg.style.color = "#ef4444";
+          btn.disabled = false;
+          input.disabled = false;
+          btn.textContent = "Verify";
+        }
+      };
+
+      input.onkeydown = (e) => {
+        if (e.key === "Enter") btn.click();
+      };
+
+      resendLink.onclick = async () => {
+        if (resendCount >= policy.resendCap) {
+          statusMsg.textContent =
+            "Maximum resend attempts reached. Please try again later.";
+          statusMsg.style.color = "#ef4444";
+          return;
+        }
+        if (cooldownRemaining > 0) {
+          return;
+        }
+        resendLink.disabled = true;
+        resendLink.textContent = "Sending...";
+        statusMsg.textContent = "";
+
+        try {
+          // For Zavu, resend via backend chat "resend phone" will create a new OTP card with updated resends_left.
+          // Remove this stale card so user sees only the fresh one with correct count.
+          const thisCard = div;
+          if (isPhone) {
+            try { await this._handleSendManual("resend phone"); } catch (_) {}
+          } else {
+            await this._handleSendManual("resend");
+          }
+          // Increment local counter and immediately update this card before it is replaced
+          resendCount++;
+          cooldownRemaining = policy.cooldownSeconds;
+          // Update this card's display before it gets replaced by the new card from backend
+          const left = Math.max(0, policy.resendCap - resendCount);
+          if (!isPhone) {
+            statusMsg.textContent = `Code resent! (${left} resends left)`;
+            statusMsg.style.color = "#22c55e";
+            firebaseStatus = statusMsg.textContent;
+          } else {
+            firebaseStatus = `Code resent! (${left} resends left)`;
+            statusMsg.textContent = `${firebaseStatus} • Resend available in ${cooldownRemaining}s • ${left} resends left`;
+            statusMsg.style.color = "#22c55e";
+          }
+          updateResendUi();
+          // Hide this stale card after a short delay so the new card (with correct 2 left) is visible at bottom
+          setTimeout(() => { try { thisCard.style.opacity = "0.5"; thisCard.style.pointerEvents = "none"; } catch (_) {} }, 300);
+        } catch (e) {
+          statusMsg.textContent = "Failed to resend. Please try again.";
+          statusMsg.style.color = "#ef4444";
+          firebaseStatus = statusMsg.textContent;
+          updateResendUi();
+        }
+
+        resendLink.textContent = "Didn't receive it? Resend code";
+      };
+
+      recoverBtn.textContent = isPhone ? "Use a different phone number" : "Use a different email address";
+      recoverBtn.setAttribute("aria-label", isPhone ? "Use different phone" : "Use different email address");
+      recoverBtn.onclick = () => {
+        this._input.disabled = false;
+        this._sendBtn.disabled = false;
+        this._input.placeholder = isPhone ? "Enter the correct phone number..." : "Enter the correct email address...";
+        this._input.style.opacity = "1";
+        this._input.focus();
+        statusMsg.textContent = isPhone ? "No problem — provide the correct phone and we’ll resend there." : "No problem — provide the correct email and we’ll resend there.";
+        statusMsg.style.color = "#64748b";
+      };
+
+      this._scrollToBottom();
+      input.focus();
+    }
+
+    _appendSummaryCard(message) {
+      const div = document.createElement("div");
+      div.className = "message agent summary-card";
+
+      const header = document.createElement("div");
+      header.className = "card-header";
+      header.textContent = "📋 Booking Summary";
+
+      const content = document.createElement("div");
+      content.className = "summary-content";
+      this._renderMarkdown(content, message);
+
+      const actions = document.createElement("div");
+      actions.className = "card-actions";
+
+      const confirmBtn = document.createElement("button");
+      confirmBtn.className = "confirm-btn";
+      confirmBtn.textContent = "Confirm Booking";
+      confirmBtn.setAttribute("aria-label", "Confirm booking");
+
+      const editBtn = document.createElement("button");
+      editBtn.className = "edit-btn";
+      editBtn.textContent = "✎ Change Details";
+      editBtn.setAttribute("aria-label", "Edit booking details");
+
+      actions.appendChild(confirmBtn);
+      actions.appendChild(editBtn);
+      div.appendChild(header);
+      div.appendChild(content);
+      div.appendChild(actions);
+      this._msgList.appendChild(div);
+
+      confirmBtn.onclick = () => {
+        confirmBtn.disabled = true;
+        editBtn.disabled = true;
+        this._handleSendManual("Yes, please confirm the booking.");
+      };
+      editBtn.onclick = () => {
+        confirmBtn.disabled = true;
+        editBtn.disabled = true;
+        this._handleSendManual("I need to change some details.");
+      };
+
+      this._scrollToBottom();
+    }
+
+    _appendConfirmedCard(message, fieldMeta = {}) {
+      const div = document.createElement("div");
+      div.className = "message agent confirmed-card";
+      div.setAttribute("role", "alert");
+
+      const icon = document.createElement("div");
+      icon.className = "conf-icon";
+      icon.textContent = "🎉";
+
+      const heading = document.createElement("h3");
+      heading.textContent = "Booking Confirmed!";
+      heading.style.cssText =
+        "font-size:16px;font-weight:700;color:var(--success);margin:8px 0;";
+
+      const msg = document.createElement("p");
+      msg.style.cssText =
+        "font-size:13px;color:var(--text-sec);line-height:1.5;";
+      this._renderMarkdown(msg, message);
+
+      const footer = document.createElement("div");
+      footer.className = "conf-footer";
+      footer.textContent =
+        fieldMeta?.email_retrying === true
+          ? "📧 Booking confirmed. Confirmation email delivery is retrying in the background."
+          : "📧 A confirmation email is on its way.";
+
+      // "Start New Booking" button
+      const newBtn = document.createElement("button");
+      newBtn.textContent = "🔄 Start New Booking";
+      newBtn.style.cssText = `
                 margin-top:12px;padding:10px 20px;border:none;border-radius:8px;
                 background:var(--primary);color:#fff;font-size:13px;font-weight:600;
                 cursor:pointer;width:100%;transition:opacity 0.2s;
-            `,d.addEventListener("mouseover",()=>d.style.opacity="0.85"),d.addEventListener("mouseout",()=>d.style.opacity="1"),d.addEventListener("click",()=>this._startNewSession()),n.appendChild(i),n.appendChild(r),n.appendChild(s),n.appendChild(c),n.appendChild(d),this._msgList.appendChild(n),this._scrollToBottom()}async _handleSendManual(e){this._input.value=e,await this._handleSend()}_disableInput(e){this._input.disabled=!0,this._sendBtn.disabled=!0,this._input.placeholder=e||"Session ended.",this._input.style.opacity="0.5",this._sendBtn.style.opacity="0.3"}_enableInput(e){this._input.disabled=!1,this._sendBtn.disabled=!1,this._input.placeholder=e||"Type a message...",this._input.style.opacity="1",this._sendBtn.style.opacity="1"}_startNewSession(){this.sessionId=null,sessionStorage.removeItem(this._sessionStorageKey()),sessionStorage.removeItem("dotstark_session_id"),sessionStorage.removeItem("dotstark_user_timezone"),sessionStorage.removeItem("dotstark_timezone_source"),this.userTimezone=this._detectBrowserTimezone(),this.timezoneSource="detected",this.selectedSlotId=null,this.selectedDate=null,this.orgTimezone=null,this.timezoneFallbackUsed=!1,this.timezoneFallbackReason=null,this._timezoneNoticeShown=!1,this._directiveDrafts={},this._setInlineValidation(""),this._clearSkipAction(),this._msgList.querySelectorAll(".message").forEach(e=>e.remove()),this._enableInput("Type a message..."),this._appendBubble("agent","Hello! 👋 I'm your booking assistant. How can I help you schedule an appointment today?")}_appendNewBookingPrompt(){const e=document.createElement("div");e.className="message agent";const t=document.createElement("button");t.textContent="🔄 Start New Booking",t.style.cssText=`
+            `;
+      newBtn.addEventListener(
+        "mouseover",
+        () => (newBtn.style.opacity = "0.85"),
+      );
+      newBtn.addEventListener("mouseout", () => (newBtn.style.opacity = "1"));
+      newBtn.addEventListener("click", () => this._startNewSession());
+
+      div.appendChild(icon);
+      div.appendChild(heading);
+      div.appendChild(msg);
+      div.appendChild(footer);
+      div.appendChild(newBtn);
+      this._msgList.appendChild(div);
+      this._scrollToBottom();
+    }
+
+    async _handleSendManual(text) {
+      this._input.value = text;
+      await this._handleSend();
+    }
+
+    _disableInput(placeholder) {
+      this._input.disabled = true;
+      this._sendBtn.disabled = true;
+      this._input.placeholder = placeholder || "Session ended.";
+      this._input.style.opacity = "0.5";
+      this._sendBtn.style.opacity = "0.3";
+    }
+
+    _enableInput(placeholder) {
+      this._input.disabled = false;
+      this._sendBtn.disabled = false;
+      this._input.placeholder = placeholder || "Type a message...";
+      this._input.style.opacity = "1";
+      this._sendBtn.style.opacity = "1";
+    }
+
+    _startNewSession() {
+      // Clear session, reset chat, start fresh
+      this.sessionId = null;
+      sessionStorage.removeItem(this._sessionStorageKey());
+      sessionStorage.removeItem("dotstark_session_id");
+      sessionStorage.removeItem("dotstark_user_timezone");
+      sessionStorage.removeItem("dotstark_timezone_source");
+      this.userTimezone = this._detectBrowserTimezone();
+      this.timezoneSource = "detected";
+      this.selectedSlotId = null;
+      this.selectedDate = null;
+      this.orgTimezone = null;
+      this.timezoneFallbackUsed = false;
+      this.timezoneFallbackReason = null;
+      this._timezoneNoticeShown = false;
+      this._directiveDrafts = {};
+      this._setInlineValidation("");
+      this._clearSkipAction();
+      this._msgList.querySelectorAll(".message").forEach((m) => m.remove());
+      this._enableInput("Type a message...");
+      this._appendBubble(
+        "agent",
+        "Hello! 👋 I'm your booking assistant. How can I help you schedule an appointment today?",
+      );
+    }
+
+    _appendNewBookingPrompt() {
+      const div = document.createElement("div");
+      div.className = "message agent";
+      const btn = document.createElement("button");
+      btn.textContent = "🔄 Start New Booking";
+      btn.style.cssText = `
                 padding:10px 20px;border:none;border-radius:8px;
                 background:var(--primary);color:#fff;font-size:13px;font-weight:600;
                 cursor:pointer;width:100%;transition:opacity 0.2s;margin-top:4px;
-            `,t.addEventListener("mouseover",()=>t.style.opacity="0.85"),t.addEventListener("mouseout",()=>t.style.opacity="1"),t.addEventListener("click",()=>this._startNewSession()),e.appendChild(t),this._msgList.appendChild(e),this._scrollToBottom()}_resolveAssistantText(e){if(e&&typeof e=="object"){const n=e.response_text||e.message;return typeof n=="string"?n.trim():""}if(typeof e!="string")return"";const t=e.trim();if(!t)return"";if(t.startsWith("{")&&t.endsWith("}"))try{const n=JSON.parse(t);if(n&&typeof n=="object"){const i=n.response_text||n.message;return typeof i=="string"?i.trim():""}}catch{}return t}_scrollToBottom(){requestAnimationFrame(()=>{this._msgList.scrollTo({top:this._msgList.scrollHeight,behavior:"smooth"})})}_css(){return`
+            `;
+      btn.addEventListener("mouseover", () => (btn.style.opacity = "0.85"));
+      btn.addEventListener("mouseout", () => (btn.style.opacity = "1"));
+      btn.addEventListener("click", () => this._startNewSession());
+      div.appendChild(btn);
+      this._msgList.appendChild(div);
+      this._scrollToBottom();
+    }
+
+    _resolveAssistantText(rawValue) {
+      if (rawValue && typeof rawValue === "object") {
+        const preferred = rawValue.response_text || rawValue.message;
+        return typeof preferred === "string" ? preferred.trim() : "";
+      }
+      if (typeof rawValue !== "string") return "";
+      const text = rawValue.trim();
+      if (!text) return "";
+      if (text.startsWith("{") && text.endsWith("}")) {
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed && typeof parsed === "object") {
+            const preferred = parsed.response_text || parsed.message;
+            return typeof preferred === "string" ? preferred.trim() : "";
+          }
+        } catch (_) {}
+      }
+      return text;
+    }
+
+    _scrollToBottom() {
+      requestAnimationFrame(() => {
+        this._msgList.scrollTo({
+          top: this._msgList.scrollHeight,
+          behavior: "smooth",
+        });
+      });
+    }
+
+    /* ─────────── CSS ─────────── */
+    _css() {
+      return `
                 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
                 :host {
@@ -1157,4 +3562,12 @@
                     color: var(--text-muted);
                     text-align: right;
                 }
-            `}}customElements.define("dotstark-booking-widget",W);const V=document.createElement("dotstark-booking-widget");document.body.appendChild(V)})()})();
+            `;
+    }
+  }
+
+  customElements.define("dotstark-booking-widget", BookingWidget);
+
+  const el = document.createElement("dotstark-booking-widget");
+  document.body.appendChild(el);
+})();

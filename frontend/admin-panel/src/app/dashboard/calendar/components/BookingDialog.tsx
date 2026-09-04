@@ -170,6 +170,44 @@ export function BookingDialog({
             )}
           </div>
 
+          {/* Appointment Status - Online vs Offline differentiated */}
+          <div className="space-y-3">
+            <h3 className="text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-foreground px-1">Appointment Status • {event.meeting_type_snapshot === "ONLINE" ? "Online" : "Offline"}</h3>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {[
+                { label: "Attended", value: "ATTENDED", color: "bg-green-500 hover:bg-green-600 text-white", icon: "✓" },
+                { label: "No-Show", value: "NO_SHOW", color: "bg-red-500 hover:bg-red-600 text-white", icon: "✕" },
+                { label: "Cancelled", value: "CANCELLED", color: "bg-zinc-500 hover:bg-zinc-600 text-white", icon: "⊘" },
+                { label: "Rescheduled", value: "RESCHEDULED", color: "bg-blue-500 hover:bg-blue-600 text-white", icon: "↻" },
+              ].map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={async () => {
+                    try {
+                      const { api } = await import("@/lib/api");
+                      await api.put(`/dashboard/bookings/${event.id}/attendance`, { attendance_status: opt.value });
+                      // Simple feedback - reload or toast
+                      const { toast } = await import("sonner");
+                      toast.success(`Marked as ${opt.label} (${event.meeting_type_snapshot === "ONLINE" ? "Online: link click will auto-verify" : "Offline: manual after appointment"})`);
+                      // Optimistically update UI
+                      (event as unknown as Record<string, unknown>).attendance_status = opt.value;
+                    } catch (e) {
+                      const { toast } = await import("sonner");
+                      toast.error(e instanceof Error ? e.message : "Failed to update");
+                    }
+                  }}
+                  className={`text-xs font-semibold px-3 py-2 rounded-lg border transition-colors ${opt.color} border-transparent`}
+                  title={event.meeting_type_snapshot === "ONLINE" ? `Online: ${opt.label} - ${opt.value === "ATTENDED" ? "auto if Join clicked" : "manual"}` : `Offline: ${opt.label} - manual`}
+                >
+                  <span className="mr-1">{opt.icon}</span> {opt.label}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-muted-foreground px-1">
+              {event.meeting_type_snapshot === "ONLINE" ? "Online: Attended auto-marks when Join is clicked; otherwise manual. Offline: Admin marks after appointment." : "Offline: Admin marks attendance after the in-person appointment."}
+            </p>
+          </div>
+
           {/* Core Info */}
           <div className="space-y-4">
             <h3 className="text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-foreground px-1">Customer Info</h3>

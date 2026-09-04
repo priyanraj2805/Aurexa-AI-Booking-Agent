@@ -7,6 +7,8 @@ import { useSearchParams } from "next/navigation";
 import { useBookings } from "@/hooks/use-dashboard";
 import { Pagination } from "@/components/pagination";
 import { SearchInput, DateFilter } from "@/components/filter-bar";
+import { api } from "@/lib/api";
+import { toast } from "sonner";
 
 function formatDateTime(iso: string | null): string {
   if (!iso) return "—";
@@ -87,6 +89,8 @@ export default function BookingsPage() {
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [status, setStatus] = useState<string>("");
+  const [attendanceStatus, setAttendanceStatus] = useState<string>("");
+  const [meetingModeFilter, setMeetingModeFilter] = useState<string>("");
 
   const searchParams = useSearchParams();
   const highlightId = searchParams.get("highlight");
@@ -102,7 +106,17 @@ export default function BookingsPage() {
     }
   }, [searchParams]);
 
-  const { data, loading, error } = useBookings(page, 10, { search, status, fromDate, toDate });
+  const { data, loading, error, refetch } = useBookings(page, 10, { search, status, attendance_status: attendanceStatus, meeting_mode: meetingModeFilter, fromDate, toDate });
+
+  const handleAttendanceChange = async (bookingId: string, newStatus: string) => {
+    try {
+      await api.put(`/dashboard/bookings/${bookingId}/attendance`, { attendance_status: newStatus });
+      toast.success(`Attendance marked as ${newStatus}`);
+      refetch();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to update attendance");
+    }
+  };
 
   useEffect(() => {
     if (!highlightedId) return;
@@ -161,12 +175,33 @@ export default function BookingsPage() {
             onFromChange={(v) => { setFromDate(v); setPage(1); }}
             onToChange={(v) => { setToDate(v); setPage(1); }}
           />
-          {status && (
+          <select
+            value={attendanceStatus}
+            onChange={(e) => { setAttendanceStatus(e.target.value); setPage(1); }}
+            className="h-9 rounded-md border border-border bg-background px-3 text-xs"
+          >
+            <option value="">All Statuses</option>
+            <option value="SCHEDULED">Scheduled</option>
+            <option value="ATTENDED">Attended</option>
+            <option value="NO_SHOW">No-Show</option>
+            <option value="CANCELLED">Cancelled</option>
+            <option value="RESCHEDULED">Rescheduled</option>
+          </select>
+          <select
+            value={meetingModeFilter}
+            onChange={(e) => { setMeetingModeFilter(e.target.value); setPage(1); }}
+            className="h-9 rounded-md border border-border bg-background px-3 text-xs"
+          >
+            <option value="">All Modes</option>
+            <option value="ONLINE">Online</option>
+            <option value="OFFLINE">Offline</option>
+          </select>
+          {(status || attendanceStatus || meetingModeFilter) && (
             <button
-              onClick={() => { setStatus(""); setPage(1); }}
+              onClick={() => { setStatus(""); setAttendanceStatus(""); setMeetingModeFilter(""); setPage(1); }}
               className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
             >
-              Clear filter <X className="size-3.5" />
+              Clear filters <X className="size-3.5" />
             </button>
           )}
         </div>
@@ -222,6 +257,22 @@ export default function BookingsPage() {
                         Meeting: {formatDateTime(b.slot_start)}
                       </div>
                       <MeetingModeBadge booking={b} />
+                      <div className="flex items-center gap-1.5 mt-1">
+                        <select
+                          value={b.attendance_status || "SCHEDULED"}
+                          onChange={(e) => handleAttendanceChange(b.id, e.target.value)}
+                          className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border focus:outline-none focus:ring-1 focus:ring-primary ${b.attendance_status === "ATTENDED" ? "bg-green-500/10 text-green-600 border-green-500/20" : b.attendance_status === "NO_SHOW" ? "bg-red-500/10 text-red-600 border-red-500/20" : b.attendance_status === "CANCELLED" ? "bg-red-500/10 text-red-600 border-red-500/20" : b.attendance_status === "RESCHEDULED" ? "bg-blue-500/10 text-blue-600 border-blue-500/20" : "bg-green-500/10 text-green-600 border-green-500/20"}`}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <option value="SCHEDULED">Scheduled</option>
+                          <option value="ATTENDED">Attended</option>
+                          <option value="NO_SHOW">No-Show</option>
+                          <option value="CANCELLED">Cancelled</option>
+                          <option value="RESCHEDULED">Rescheduled</option>
+                        </select>
+                        {b.meeting_type_snapshot === "ONLINE" && b.attendance_status === "SCHEDULED" && <span className="text-[10px] text-muted-foreground">• Join</span>}
+                        {b.meeting_type_snapshot === "OFFLINE" && b.attendance_status === "SCHEDULED" && <span className="text-[10px] text-muted-foreground">• Mark after</span>}
+                      </div>
                       <div className="text-[11px] text-muted-foreground">
                         Booked: {formatDateTime(b.created_at)}
                       </div>
@@ -237,6 +288,7 @@ export default function BookingsPage() {
                     <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Email</th>
                     <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Meeting Time</th>
                     <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Mode</th>
+                    <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Appointment Status</th>
                     <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Booked At</th>
                     <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Status</th>
                   </tr>
@@ -270,6 +322,22 @@ export default function BookingsPage() {
                       </td>
                       <td className="px-4 py-4 text-[13px] border-b border-border">
                         <MeetingModeBadge booking={b} />
+                      </td>
+                      <td className="px-4 py-4 text-[13px] border-b border-border">
+                        <select
+                          value={b.attendance_status || "SCHEDULED"}
+                          onChange={(e) => handleAttendanceChange(b.id, e.target.value)}
+                          className={`text-[10px] font-semibold px-2 py-1 rounded-full border focus:outline-none focus:ring-1 focus:ring-primary ${b.attendance_status === "ATTENDED" ? "bg-green-500/10 text-green-600 border-green-500/20" : b.attendance_status === "NO_SHOW" ? "bg-red-500/10 text-red-600 border-red-500/20" : b.attendance_status === "CANCELLED" ? "bg-red-500/10 text-red-600 border-red-500/20" : b.attendance_status === "RESCHEDULED" ? "bg-blue-500/10 text-blue-600 border-blue-500/20" : "bg-green-500/10 text-green-600 border-green-500/20"}`}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <option value="SCHEDULED">Scheduled</option>
+                          <option value="ATTENDED">Attended</option>
+                          <option value="NO_SHOW">No-Show</option>
+                          <option value="CANCELLED">Cancelled</option>
+                          <option value="RESCHEDULED">Rescheduled</option>
+                        </select>
+                        {b.meeting_type_snapshot === "ONLINE" && b.attendance_status === "SCHEDULED" && <div className="text-[10px] text-muted-foreground mt-1">Join to mark</div>}
+                        {b.meeting_type_snapshot === "OFFLINE" && b.attendance_status === "SCHEDULED" && <div className="text-[10px] text-muted-foreground mt-1">Mark after</div>}
                       </td>
                       <td className="px-4 py-4 text-[13px] border-b border-border">{formatDateTime(b.created_at)}</td>
                       <td className="px-4 py-4 border-b border-border">
