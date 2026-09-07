@@ -43,6 +43,48 @@ import {
   type MeetingProviderType,
 } from "@/hooks/use-dashboard";
 import { api } from "@/lib/api";
+
+export function GoogleCalendarIcon({ size = 40 }: { size?: number }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width={size} height={size} fill="none">
+      <path fill="#4285F4" d="M38 10H14c-2.2 0-4 1.8-4 4v4h28v-4c0-2.2-1.8-4-4-4z"/>
+      <path fill="#34A853" d="M38 14h4v24c0 2.2-1.8 4-4 4v-28z"/>
+      <path fill="#FBBC05" d="M38 38H14c-2.2 0-4-1.8-4-4v4c0 2.2 1.8 4 4 4h24c2.2 0 4-1.8 4-4z"/>
+      <path fill="#EA4335" d="M10 14H6v24c0 2.2 1.8 4 4 4v-28z"/>
+      <path fill="#FFF" d="M38 18H10v20h28V18z"/>
+      <path fill="#4285F4" d="M19.5 24.5h-3v2h3v5h2.5v-5h3v-2h-5.5zM29.5 24.5h-4.5v2h2.5c.6 0 1 .4 1 1s-.4 1-1 1h-2v2h2c1.4 0 2.5-1.1 2.5-2.5 0-.8-.4-1.5-1-2 .6-.4 1-1.1 1-1.9 0-1.4-1.1-2.6-2.5-2.6z"/>
+    </svg>
+  );
+}
+export function GoogleMeetIcon({ size = 40 }: { size?: number }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width={size} height={size} fill="none">
+      <path fill="#00AC47" d="M8 10C5.79 10 4 11.79 4 14V34C4 36.21 5.79 38 8 38H29V10H8Z"/>
+      <path fill="#4285F4" d="M29 10H34C36.21 10 38 11.79 38 14V34C38 36.21 36.21 38 34 38H29V10Z"/>
+      <path fill="#EA4335" d="M38 18L44 13V35L38 30V18Z"/>
+      <path fill="#FBBC04" d="M4 14C4 11.79 5.79 10 8 10H21V20H4V14Z"/>
+      <path fill="#00AC47" d="M4 28H21V38H8C5.79 38 4 36.21 4 34V28Z"/>
+      <path fill="#34A853" d="M29 10H34C36.21 10 38 11.79 38 14V18L29 25V10Z"/>
+    </svg>
+  );
+}
+export function OutlookCalendarIcon({ size = 40 }: { size?: number }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width={size} height={size} fill="none">
+      <rect x="5" y="7" width="38" height="34" rx="5" fill="#0078D4"/>
+      <path d="M15 7H33V17H15V7Z" fill="#106EBE"/>
+      <rect x="11" y="18" width="26" height="18" rx="2" fill="white"/>
+      <path d="M15 22H19V26H15V22Z" fill="#0078D4"/>
+      <path d="M22 22H26V26H22V22Z" fill="#0078D4"/>
+      <path d="M29 22H33V26H29V22Z" fill="#0078D4"/>
+      <path d="M15 29H19V33H15V29Z" fill="#0078D4"/>
+      <path d="M22 29H26V33H22V29Z" fill="#0078D4"/>
+      <path d="M29 29H33V33H29V29Z" fill="#0078D4"/>
+      <path d="M15 4V10" stroke="#0078D4" strokeWidth="3" strokeLinecap="round"/>
+      <path d="M33 4V10" stroke="#0078D4" strokeWidth="3" strokeLinecap="round"/>
+    </svg>
+  );
+}
 import {
   AlertDialog,
   AlertDialogAction,
@@ -1171,32 +1213,9 @@ export default function IntegrationsPage() {
                     <h3 className="font-semibold text-base leading-none">Calendar Integration</h3>
                   </div>
                 </div>
-                {activeProvider && activeProvider !== "NONE" && (
-                  <span className="text-xs font-bold uppercase tracking-wider text-green-500 bg-green-500/10 px-3 py-1 rounded-full flex items-center gap-1.5">
-                    <div className="size-1.5 bg-green-500 rounded-full animate-pulse" />
-                    {activeProvider} Active
-                  </span>
-                )}
-              </div>
-
-              {(gcState.loading || ocState.loading) ? (
-                <div className="p-12 flex items-center justify-center">
-                  <Loader2 className="size-6 animate-spin text-muted-foreground" />
-                </div>
-              ) : (
-                <div className="p-6 md:p-8 space-y-8">
-                  {migrationInfo && (
-                    <div className="text-[13px] font-medium px-4 py-3 rounded-xl bg-blue-500/10 text-blue-600 border border-blue-500/20">
-                      {migrationInfo}
-                    </div>
-                  )}
-
-                  {/* Google Calendar Section */}
-                  <div className="border border-border rounded-xl p-5">
-                    <div className="flex items-center justify-between mb-4">
-                      <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3">
                         <div className="bg-white p-1.5 rounded-lg border border-border shadow-sm">
-                          <svg xmlns="http://w3.org/2000/svg" viewBox="0 0 48 48" width="20" height="20">
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="20" height="20">
                             <path fill="#4285F4" d="M38 10H14c-2.2 0-4 1.8-4 4v4h28v-4c0-2.2-1.8-4-4-4z"/>
                             <path fill="#34A853" d="M38 14h4v24c0 2.2-1.8 4-4 4v-28z"/>
                             <path fill="#FBBC05" d="M38 38H14c-2.2 0-4-1.8-4-4v4c0 2.2 1.8 4 4 4h24c2.2 0 4-1.8 4-4z"/>
@@ -1204,7 +1223,6 @@ export default function IntegrationsPage() {
                             <path fill="#FFF" d="M38 18H10v20h28V18z"/>
                             <path fill="#4285F4" d="M19.5 24.5h-3v2h3v5h2.5v-5h3v-2h-5.5zM29.5 24.5h-4.5v2h2.5c.6 0 1 .4 1 1s-.4 1-1 1h-2v2h2c1.4 0 2.5-1.1 2.5-2.5 0-.8-.4-1.5-1-2 .6-.4 1-1.1 1-1.9 0-1.4-1.1-2.6-2.5-2.6z"/>
                           </svg>
-                        </div>
                         <div>
                           <h4 className="font-semibold text-sm">Google Calendar</h4>
                           <p className="text-xs text-muted-foreground">Sync bookings to Google Calendar</p>
@@ -1254,23 +1272,18 @@ export default function IntegrationsPage() {
                     <div className="flex items-center justify-between mb-4">
                       <div className="flex items-center gap-3">
                         <div className="bg-white p-1.5 rounded-lg border border-border shadow-sm">
-                          <svg xmlns="http://w3.org/2000/svg" viewBox="0 0 48 48" width="20" height="20">
-                            <defs>
-                              <linearGradient id="outlookBlue" x1="10%" y1="10%" x2="90%" y2="90%">
-                                <stop offset="0%" stop-color="#00a1f1"/>
-                                <stop offset="100%" stop-color="#0078d4"/>
-                              </linearGradient>
-                            </defs>
-                            <rect x="12" y="12" width="30" height="30" rx="4" fill="url(#outlookBlue)"/>
-                            <path fill="#005a9e" d="M12 12h30v7H12z" opacity="0.4"/>
-                            <circle cx="18" cy="25" r="1.5" fill="#fff" opacity="0.8"/>
-                            <circle cx="26" cy="25" r="1.5" fill="#fff" opacity="0.8"/>
-                            <circle cx="34" cy="25" r="1.5" fill="#fff" opacity="0.8"/>
-                            <circle cx="18" cy="33" r="1.5" fill="#fff" opacity="0.8"/>
-                            <circle cx="26" cy="33" r="1.5" fill="#fff" opacity="0.8"/>
-                            <circle cx="34" cy="33" r="1.5" fill="#fff" opacity="0.8"/>
-                            <rect x="6" y="16" width="16" height="16" rx="3" fill="#0078d4"/>
-                            <text x="14" y="29" fill="#fff" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="15" text-anchor="middle">O</text>
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="20" height="20">
+                            <rect x="5" y="7" width="38" height="34" rx="5" fill="#0078D4"/>
+                            <path d="M15 7H33V17H15V7Z" fill="#106EBE"/>
+                            <rect x="11" y="18" width="26" height="18" rx="2" fill="white"/>
+                            <path d="M15 22H19V26H15V22Z" fill="#0078D4"/>
+                            <path d="M22 22H26V26H22V22Z" fill="#0078D4"/>
+                            <path d="M29 22H33V26H29V22Z" fill="#0078D4"/>
+                            <path d="M15 29H19V33H15V29Z" fill="#0078D4"/>
+                            <path d="M22 29H26V33H22V29Z" fill="#0078D4"/>
+                            <path d="M29 29H33V33H29V29Z" fill="#0078D4"/>
+                            <path d="M15 4V10" stroke="#0078D4" strokeWidth="3" strokeLinecap="round"/>
+                            <path d="M33 4V10" stroke="#0078D4" strokeWidth="3" strokeLinecap="round"/>
                           </svg>
                         </div>
                         <div>
@@ -1449,10 +1462,8 @@ export default function IntegrationsPage() {
                           title: "Google Meet",
                           description: "Host meetings via Google Meet for online bookings.",
                           connected: Boolean(meetingProviders?.google_meet_connected),
-                          iconBg: "bg-[#4285F4]",
-                          icon: (
-                            <img src="/google-meet-logo.png" alt="Google Meet" width="20" height="20" style={{ width: "20px", height: "20px" }} />
-                          ),
+                          iconBg: "bg-white",
+                          icon: <GoogleMeetIcon size={20} />,
                         },
 
                       ].map((provider) => {

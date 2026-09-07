@@ -12,6 +12,7 @@ python-jose[cryptography]>=3.3.0
 pyotp>=2.9.0
 qrcode>=7.4.0
 slowapi>=0.1.9
+razorpay>=2.0.1
 
 # ── Test Dependencies ──────────────────────
 pytest>=8.0.0
