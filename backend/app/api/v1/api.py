@@ -9,7 +9,7 @@ from app.api.v1.endpoints import (
     audit,
     email,
     monitoring,
-    whatsapp,
+    whatsapp_qr,
     widget,
     widget_ws,
     slots_bulk,
@@ -20,6 +20,8 @@ from app.api.v1.endpoints import (
     broadcasts,
     account,
     notifications,
+    razorpay,
+    razorpay_route,
 )
 from app.core.config import settings
 from app.api.v1.endpoints.internal import bridge as internal_bridge
@@ -30,7 +32,7 @@ api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(otp.router, prefix="/auth/security/otp", tags=["auth"])
 # Backward-compatible alias for legacy widget clients.
 api_router.include_router(otp.router, prefix="/auth/otp", tags=["auth"])
-api_router.include_router(whatsapp.router, prefix="/whatsapp", tags=["whatsapp"])
+api_router.include_router(whatsapp_qr.router, prefix="", tags=["whatsapp-qr"])
 api_router.include_router(slots.router, prefix="/slots", tags=["slots"])
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
@@ -53,6 +55,12 @@ api_router.include_router(account.router, prefix="/account", tags=["account"])
 api_router.include_router(
     notifications.router, prefix="/dashboard/notifications", tags=["notifications"]
 )
+
+# Razorpay Route payments + provider payouts (always mounted; routes themselves enforce auth / org scope)
+api_router.include_router(razorpay.router, prefix="", tags=["razorpay"])
+
+# Razorpay Route provider payouts (additive; each route 404s unless RAZORPAY_ROUTE_ENABLED)
+api_router.include_router(razorpay_route.router, prefix="", tags=["razorpay-route"])
 
 # Super Admin internal bridge — registered ONLY when the env gate is on.
 # (verify_bridge additionally 404s while disabled, so this is doubly inert.)

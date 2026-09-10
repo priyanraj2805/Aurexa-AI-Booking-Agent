@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Bell, CalendarCheck2, CalendarX2, Megaphone, X } from "lucide-react";
+import { Bell, CalendarCheck2, CalendarX2, CreditCard, Megaphone, X } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -53,6 +53,16 @@ export function AnnouncementBell() {
   const [tab, setTab] = React.useState<"announcements" | "bookings">("announcements");
   const [bookingItems, setBookingItems] = React.useState<InboxItem[]>([]);
   const [bookingUnread, setBookingUnread] = React.useState(0);
+
+  // Billing notices (plan expiry, subscription) belong to Announcements,
+  // not booking activity. Partitioned client-side from the same inbox feed.
+  const isBillingItem = (i: InboxItem) =>
+    i.kind === "billing_expiry" ||
+    i.kind.startsWith("billing_") ||
+    i.resource_type === "subscription";
+  const billingItems = bookingItems.filter(isBillingItem);
+  const activityItems = bookingItems.filter((i) => !isBillingItem(i));
+  const billingUnread = billingItems.filter((i) => !i.is_read).length;
 
   const loadCount = React.useCallback(async () => {
     try {
@@ -143,20 +153,51 @@ export function AnnouncementBell() {
 
   const markAll = async () => {
     try {
-      await Promise.all(
-        items
+      const unreadBilling = billingItems.filter((i) => !i.is_read);
+      await Promise.all([
+        ...items
           .filter((i) => !i.read)
-          .map((i) => api.post(`/broadcasts/${i.id}/read`))
-      );
+          .map((i) => api.post(`/broadcasts/${i.id}/read`)),
+        ...unreadBilling.map((i) =>
+          api.post(`/dashboard/notifications/${i.id}/read`)
+        ),
+      ]);
       setUnread(0);
       setItems((prev) => prev.map((i) => ({ ...i, read: true })));
+      if (unreadBilling.length > 0) {
+        const ids = new Set(unreadBilling.map((i) => i.id));
+        setBookingItems((prev) =>
+          prev.map((i) => (ids.has(i.id) ? { ...i, is_read: true } : i))
+        );
+        setBookingUnread((prev) => Math.max(0, prev - unreadBilling.length));
+      }
     } catch (err) {
       console.error("[announcement-bell] mark all read failed", err);
     }
   };
 
+  const openBillingItem = async (item: InboxItem) => {
+    setOpen(false);
+    if (!item.is_read) {
+      await api
+        .post(`/dashboard/notifications/${item.id}/read`)
+        .catch((err) =>
+          console.error("[announcement-bell] billing mark read failed", err)
+        );
+      setBookingItems((prev) =>
+        prev.map((i) => (i.id === item.id ? { ...i, is_read: true } : i))
+      );
+      setBookingUnread((prev) => Math.max(0, prev - 1));
+    }
+    router.push("/dashboard/billing");
+  };
+
   const openBookingItem = async (item: InboxItem) => {
     setOpen(false);
+    if (isBillingItem(item)) {
+      await openBillingItem(item);
+      return;
+    }
     if (!item.is_read) {
       await api
         .post(`/dashboard/notifications/${item.id}/read`)
@@ -184,10 +225,20 @@ export function AnnouncementBell() {
   };
 
   const markAllBookings = async () => {
+    // Per-item over booking activity only: the bulk read-all endpoint would
+    // also clear billing notices, which now live under Announcements.
     try {
-      await api.post("/dashboard/notifications/read-all");
-      setBookingUnread(0);
-      setBookingItems((prev) => prev.map((i) => ({ ...i, is_read: true })));
+      const unreadActivity = activityItems.filter((i) => !i.is_read);
+      await Promise.all(
+        unreadActivity.map((i) => api.post(`/dashboard/notifications/${i.id}/read`))
+      );
+      if (unreadActivity.length > 0) {
+        const ids = new Set(unreadActivity.map((i) => i.id));
+        setBookingItems((prev) =>
+          prev.map((i) => (ids.has(i.id) ? { ...i, is_read: true } : i))
+        );
+        setBookingUnread((prev) => Math.max(0, prev - unreadActivity.length));
+      }
     } catch (err) {
       console.error("[announcement-bell] booking mark all read failed", err);
     }
@@ -225,9 +276,9 @@ export function AnnouncementBell() {
             >
               <Megaphone className="size-3.5" />
               Announcements
-              {unread > 0 && (
+              {unread + billingUnread > 0 && (
                 <span className="rounded-full bg-red-600 px-1.5 text-[10px] font-bold text-white">
-                  {unread}
+                  {unread + billingUnread}
                 </span>
               )}
             </button>
@@ -252,16 +303,49 @@ export function AnnouncementBell() {
           {tab === "announcements" && (
             <>
               <div className="max-h-80 overflow-y-auto">
-                {loading && items.length === 0 && (
+                {loading && items.length === 0 && billingItems.length === 0 && (
                   <p className="px-3 py-6 text-center text-sm text-muted-foreground">
                     Loading…
                   </p>
                 )}
-                {!loading && items.length === 0 && (
+                {!loading && items.length === 0 && billingItems.length === 0 && (
                   <p className="px-3 py-6 text-center text-sm text-muted-foreground">
                     No announcements yet
                   </p>
                 )}
+                {billingItems.map((item) => (
+                  <button
+                    key={`billing-${item.id}`}
+                    onClick={() => void openBillingItem(item)}
+                    className={`flex w-full items-start gap-2.5 border-b border-border px-3 py-2.5 text-left hover:bg-accent ${
+                      item.is_read ? "opacity-60" : ""
+                    }`}
+                  >
+                    <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-500/10 text-amber-500">
+                      <CreditCard className="size-3.5" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center justify-between gap-2">
+                        <span className="truncate text-sm font-medium">
+                          {item.title}
+                        </span>
+                        {!item.is_read && (
+                          <Badge variant="destructive" className="px-1.5 text-[10px]">
+                            New
+                          </Badge>
+                        )}
+                      </span>
+                      {item.body && (
+                        <span className="mt-0.5 line-clamp-2 block text-xs text-muted-foreground">
+                          {item.body}
+                        </span>
+                      )}
+                      <span className="mt-1 block text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                        {fmtTime(item.created_at)}
+                      </span>
+                    </span>
+                  </button>
+                ))}
                 {items.map((item) => (
                   <button
                     key={item.id}
@@ -292,7 +376,8 @@ export function AnnouncementBell() {
                   </button>
                 ))}
               </div>
-              {items.some((i) => !i.read) && (
+              {(items.some((i) => !i.read) ||
+                billingItems.some((i) => !i.is_read)) && (
                 <div className="border-t border-border px-3 py-2">
                   <button
                     onClick={markAll}
@@ -308,17 +393,17 @@ export function AnnouncementBell() {
           {tab === "bookings" && (
             <>
               <div className="max-h-80 overflow-y-auto scrollbar-thin">
-                {loading && bookingItems.length === 0 && (
+                {loading && activityItems.length === 0 && (
                   <p className="px-3 py-6 text-center text-sm text-muted-foreground">
                     Loading…
                   </p>
                 )}
-                {!loading && bookingItems.length === 0 && (
+                {!loading && activityItems.length === 0 && (
                   <p className="px-3 py-6 text-center text-sm text-muted-foreground">
                     No booking activity yet
                   </p>
                 )}
-                {bookingItems.map((item) => {
+                {activityItems.map((item) => {
                   const Icon =
                     item.kind === "booking_cancelled" ? CalendarX2 : CalendarCheck2;
                   const iconCls =
@@ -362,7 +447,7 @@ export function AnnouncementBell() {
                   );
                 })}
               </div>
-              {bookingItems.some((i) => !i.is_read) && (
+              {activityItems.some((i) => !i.is_read) && (
                 <div className="border-t border-border px-3 py-2">
                   <button
                     onClick={markAllBookings}

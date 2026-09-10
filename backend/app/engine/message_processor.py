@@ -1324,7 +1324,27 @@ async def process_message(
         elif directive == "REQUEST_CONFIRMATION":
             msg, directive = _build_confirmation_summary(chat_session, fd_map)
 
-    field_meta = booking_field_meta if booking_field_meta is not None else next_step.get("field_meta")
+    # If payment required and not yet paid, override directive to REQUIRE_PAYMENT even when next_step is PROCESS_BOOKING
+    # This handles the case where LLM thinks booking is ready but payment not verified
+    try:
+        _price_enabled2 = bool(getattr(org_config, "appointment_price_enabled", False))
+        _price_paise2 = int(getattr(org_config, "appointment_price_paise", 0) or 0)
+        # Route readiness replaces the removed sub-merchant READY check.
+        from app.services.razorpay.routing import get_org_route_context as _grc2
+        _rzp_ready2 = (await _grc2(db, org.id)).transfer_ready
+        if _price_enabled2 and _price_paise2 > 0 and _rzp_ready2:
+            from app.models.payment import PaymentAttempt as _PA2
+            from sqlalchemy.future import select as _sel2
+            _paid2 = (await db.execute(_sel2(_PA2).where(_PA2.session_id == chat_session.session_id, _PA2.org_id == org.id, _PA2.status == "paid", _PA2.amount_paise == _price_paise2))).scalars().first()
+            if not _paid2 and directive == "REQUEST_CONFIRMATION":
+                _currency2 = getattr(org_config, "appointment_currency", "INR") or "INR"
+                directive = "REQUIRE_PAYMENT"
+                msg = f"Your appointment total is ₹{_price_paise2/100:.2f}. Please pay to confirm your booking."
+                field_meta = {"amount_paise": _price_paise2, "amount_display": f"₹{_price_paise2/100:.2f}", "currency": _currency2, "session_id": str(chat_session.session_id)}
+    except Exception:
+        pass
+
+    field_meta = booking_field_meta if 'booking_field_meta' in locals() and booking_field_meta is not None else next_step.get("field_meta") if 'next_step' in locals() and isinstance(next_step, dict) else None
     has_collected_data = bool(chat_session.collected_data)
     collected_keys = (
         list(chat_session.collected_data.keys()) if chat_session.collected_data else []
@@ -1666,29 +1686,33 @@ async def _handle_booking_flow(
             meta = await _get_phone_meta(db, chat_session.session_id, channel="phone")
             meta["channel"] = "phone"
             meta["phone"] = _phone
+            from app.core.config import settings as _cfg_via2
+            via2 = "WhatsApp" if (getattr(_cfg_via2, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else "SMS"
             return (
-                f"I've sent a verification code to {_phone} via SMS. Please enter it here to continue.",
+                f"I've sent a verification code to {_phone} via {via2}. Please enter it here to continue.",
                 "REQUIRE_OTP_MODAL",
                 meta,
             )
         try:
             code = await _gen_phone_otp(db, chat_session.session_id, channel="phone", resend=False)
-            # Send via Zavu (shares mock logic with sms.py DEBUG handling)
+            # Delivery via provider abstraction (WhatsApp active, SMS fallback — Zavu path kept intact)
             try:
-                from app.core.sms import send_phone_otp_sms
-
-                await send_phone_otp_sms(_phone, code)
+                from app.core.config import settings as _cfg2
+                from app.core.otp_delivery.whatsapp_provider import WhatsAppProvider
+                from app.core.otp_delivery.sms_provider import SMSProvider
+                _provider = WhatsAppProvider() if (getattr(_cfg2, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else SMSProvider()
+                await _provider.send_otp(_phone, code, str(chat_session.session_id))
             except Exception as sms_err:
-                logger.error(f"Zavu phone OTP send failed: {sms_err}")
-                # Keep record for retry; surface error but still allow modal (resend)
+                logger.error(f"Phone OTP send failed ({_provider.__class__.__name__ if '_provider' in locals() else 'unknown'}): {sms_err}")
             _internal_state["phone_otp_send_key"] = _phone_send_key
             _internal_state.pop("phone_otp_verified_key", None)
             await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
             meta = await _get_phone_meta(db, chat_session.session_id, channel="phone")
             meta["channel"] = "phone"
             meta["phone"] = _phone
+            via = "WhatsApp" if (getattr(__import__("app.core.config", fromlist=["settings"]).settings, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else "SMS"
             return (
-                f"I've sent a verification code to {_phone} via SMS. Please enter it here to continue.",
+                f"I've sent a verification code to {_phone} via {via}. Please enter it here to continue.",
                 "REQUIRE_OTP_MODAL",
                 meta,
             )
@@ -1698,6 +1722,70 @@ async def _handle_booking_flow(
                 "I couldn't send the verification code to your phone. Please double-check your phone number and try again, or say 'resend' to retry.",
                 "TEXT_INPUT",
                 None,
+            )
+
+    # ── Razorpay Route payment gate ──
+    # TRANSFER_READY is the only state that allows payments. Anything else
+    # blocks paid booking (the legacy sub-merchant flow was removed).
+    _price_enabled = bool(getattr(org_config, "appointment_price_enabled", False))
+    _price_paise = int(getattr(org_config, "appointment_price_paise", 0) or 0)
+    from app.services.razorpay.routing import get_org_route_context as _grc
+    _route_ready = False
+    try:
+        _route_ready = (await _grc(db, org.id)).transfer_ready
+    except Exception:
+        _route_ready = False
+    _payment_required = _price_enabled and _price_paise > 0 and _route_ready
+    if _price_enabled and _price_paise > 0 and not _route_ready:
+        return (
+            "Online payments are temporarily unavailable for this business. Please try again later or contact the business directly.",
+            "TEXT_INPUT",
+            None,
+        )
+    if _payment_required:
+        from app.models.payment import PaymentAttempt
+        from sqlalchemy.future import select as _sel
+        # Any paid attempt for this session+org?
+        _paid_res = await db.execute(
+            _sel(PaymentAttempt).where(
+                PaymentAttempt.session_id == chat_session.session_id,
+                PaymentAttempt.org_id == org.id,
+                PaymentAttempt.status == "paid",
+                PaymentAttempt.amount_paise == _price_paise,
+            )
+        )
+        _paid_attempt = _paid_res.scalars().first()
+        if not _paid_attempt:
+            # Check if there's a created attempt still pending (extend lock window)
+            _pending_res = await db.execute(
+                _sel(PaymentAttempt).where(
+                    PaymentAttempt.session_id == chat_session.session_id,
+                    PaymentAttempt.org_id == org.id,
+                    PaymentAttempt.status == "created",
+                )
+            )
+            _pending = _pending_res.scalars().first()
+            # If pending and not expired, keep payment pending; else request payment
+            _currency = getattr(org_config, "appointment_currency", "INR") or "INR"
+            _meta = {
+                "amount_paise": _price_paise,
+                "amount_display": f"₹{_price_paise/100:.2f}",
+                "currency": _currency,
+                "razorpay_connected": True,
+                "session_id": str(chat_session.session_id),
+            }
+            if _pending:
+                # Re-surface payment if pending
+                return (
+                    f"Your appointment total is ₹{_price_paise/100:.2f}. Please complete the payment to confirm your booking.",
+                    "REQUIRE_PAYMENT",
+                    _meta,
+                )
+            # No paid attempt → request payment
+            return (
+                f"Your appointment total is ₹{_price_paise/100:.2f}. Please pay to confirm your booking.",
+                "REQUIRE_PAYMENT",
+                _meta,
             )
 
     # OTP verified (or disabled) — proceed to booking
@@ -2875,6 +2963,38 @@ async def _execute_booking(
             meeting_type_snapshot = "OFFLINE"
             meeting_link_status = MeetingLinkStatus.NOT_REQUIRED
 
+        # Payment snapshot from latest paid attempt (if any)
+        _pay_order_id = None
+        _pay_payment_id = None
+        _pay_amount = None
+        _pay_currency = None
+        _pay_status = "not_required"
+        try:
+            _price_enabled3 = bool(getattr(org_config, "appointment_price_enabled", False))
+            _price_paise3 = int(getattr(org_config, "appointment_price_paise", 0) or 0)
+            from app.services.razorpay.routing import get_org_route_context as _grc3
+            _route_ready3 = False
+            try:
+                _route_ready3 = (await _grc3(db, org.id)).transfer_ready
+            except Exception:
+                _route_ready3 = False
+            if _price_enabled3 and _price_paise3 > 0 and _route_ready3:
+                from app.models.payment import PaymentAttempt as _PA3
+                from sqlalchemy.future import select as _sel3
+                _paid3 = (await db.execute(_sel3(_PA3).where(_PA3.session_id == chat_session.session_id, _PA3.org_id == org.id, _PA3.status == "paid"))).scalars().first()
+                if _paid3:
+                    _pay_order_id = _paid3.razorpay_order_id
+                    _pay_payment_id = _paid3.razorpay_payment_id
+                    _pay_amount = _paid3.amount_paise
+                    _pay_currency = _paid3.currency
+                    _pay_status = "paid"
+                else:
+                    _pay_status = "pending"
+            else:
+                _pay_status = "not_required"
+        except Exception:
+            _pay_status = "not_required"
+
         booking = await attempt_booking(
             db=db,
             session_id=chat_session.session_id,
@@ -2901,6 +3021,12 @@ async def _execute_booking(
             else None,
             meeting_link_external_id=meeting_link_external_id,
             meeting_link_error_code=meeting_link_error_code,
+            # Payment snapshot
+            payment_status=_pay_status,
+            razorpay_order_id=_pay_order_id,
+            razorpay_payment_id=_pay_payment_id,
+            amount_paise=_pay_amount,
+            currency=_pay_currency,
         )
 
         if background_tasks:

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Globe,
@@ -28,6 +28,9 @@ import {
   Users,
   Workflow,
   Video,
+  CreditCard,
+  QrCode,
+  RefreshCw,
 } from "lucide-react";
 import {
   useAgentConfig,
@@ -43,48 +46,6 @@ import {
   type MeetingProviderType,
 } from "@/hooks/use-dashboard";
 import { api } from "@/lib/api";
-
-export function GoogleCalendarIcon({ size = 40 }: { size?: number }) {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width={size} height={size} fill="none">
-      <path fill="#4285F4" d="M38 10H14c-2.2 0-4 1.8-4 4v4h28v-4c0-2.2-1.8-4-4-4z"/>
-      <path fill="#34A853" d="M38 14h4v24c0 2.2-1.8 4-4 4v-28z"/>
-      <path fill="#FBBC05" d="M38 38H14c-2.2 0-4-1.8-4-4v4c0 2.2 1.8 4 4 4h24c2.2 0 4-1.8 4-4z"/>
-      <path fill="#EA4335" d="M10 14H6v24c0 2.2 1.8 4 4 4v-28z"/>
-      <path fill="#FFF" d="M38 18H10v20h28V18z"/>
-      <path fill="#4285F4" d="M19.5 24.5h-3v2h3v5h2.5v-5h3v-2h-5.5zM29.5 24.5h-4.5v2h2.5c.6 0 1 .4 1 1s-.4 1-1 1h-2v2h2c1.4 0 2.5-1.1 2.5-2.5 0-.8-.4-1.5-1-2 .6-.4 1-1.1 1-1.9 0-1.4-1.1-2.6-2.5-2.6z"/>
-    </svg>
-  );
-}
-export function GoogleMeetIcon({ size = 40 }: { size?: number }) {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width={size} height={size} fill="none">
-      <path fill="#00AC47" d="M8 10C5.79 10 4 11.79 4 14V34C4 36.21 5.79 38 8 38H29V10H8Z"/>
-      <path fill="#4285F4" d="M29 10H34C36.21 10 38 11.79 38 14V34C38 36.21 36.21 38 34 38H29V10Z"/>
-      <path fill="#EA4335" d="M38 18L44 13V35L38 30V18Z"/>
-      <path fill="#FBBC04" d="M4 14C4 11.79 5.79 10 8 10H21V20H4V14Z"/>
-      <path fill="#00AC47" d="M4 28H21V38H8C5.79 38 4 36.21 4 34V28Z"/>
-      <path fill="#34A853" d="M29 10H34C36.21 10 38 11.79 38 14V18L29 25V10Z"/>
-    </svg>
-  );
-}
-export function OutlookCalendarIcon({ size = 40 }: { size?: number }) {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width={size} height={size} fill="none">
-      <rect x="5" y="7" width="38" height="34" rx="5" fill="#0078D4"/>
-      <path d="M15 7H33V17H15V7Z" fill="#106EBE"/>
-      <rect x="11" y="18" width="26" height="18" rx="2" fill="white"/>
-      <path d="M15 22H19V26H15V22Z" fill="#0078D4"/>
-      <path d="M22 22H26V26H22V22Z" fill="#0078D4"/>
-      <path d="M29 22H33V26H29V22Z" fill="#0078D4"/>
-      <path d="M15 29H19V33H15V29Z" fill="#0078D4"/>
-      <path d="M22 29H26V33H22V29Z" fill="#0078D4"/>
-      <path d="M29 29H33V33H29V29Z" fill="#0078D4"/>
-      <path d="M15 4V10" stroke="#0078D4" strokeWidth="3" strokeLinecap="round"/>
-      <path d="M33 4V10" stroke="#0078D4" strokeWidth="3" strokeLinecap="round"/>
-    </svg>
-  );
-}
 import {
   AlertDialog,
   AlertDialogAction,
@@ -136,15 +97,6 @@ interface RuntimeUrls {
   warnings: string[];
 }
 
-interface WhatsAppConfig {
-  whatsapp_enabled: boolean;
-  whatsapp_phone_number_id: string | null;
-  whatsapp_business_account_id: string | null;
-  whatsapp_verify_token: string | null;
-  whatsapp_api_token_set: boolean;
-  webhook_url: string;
-}
-
 interface GoogleCalendarConfig {
   google_calendar_enabled: boolean;
   google_calendar_connected: boolean;
@@ -185,25 +137,105 @@ interface MeetingProviderUiState {
 export default function IntegrationsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [activeTab, setActiveTab] = useState<"overview" | "widget" | "whatsapp" | "calendar" | "providers">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "widget" | "whatsapp" | "calendar" | "providers" | "payments">("overview");
   const [copied, setCopied] = useState(false);
   const [publicApiBaseInput, setPublicApiBaseInput] = useState("");
   const [runtimeUrls, setRuntimeUrls] = useState<RuntimeUrls | null>(null);
   const { data: config } = useAgentConfig();
 
-  // WhatsApp config state
-  const [waConfig, setWaConfig] = useState<WhatsAppConfig | null>(null);
-  const [waLoading, setWaLoading] = useState(true);
-  const [waSaving, setWaSaving] = useState(false);
-  const [waForm, setWaForm] = useState({
-    whatsapp_enabled: false,
-    whatsapp_phone_number_id: "",
-    whatsapp_business_account_id: "",
-    whatsapp_verify_token: "",
-    whatsapp_api_token: "",
-  });
-  const [waMessage, setWaMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
-  const [waWebhookCopied, setWaWebhookCopied] = useState(false);
+  // WhatsApp QR pairing state is declared below (qrStatus, qrImg, ...).
+
+  // WhatsApp QR pairing state (Baileys transport; replaces manual token setup)
+  type QrConnection = {
+    status: string; phone_number?: string; display_name?: string;
+    connected_at?: string; disconnected_at?: string; last_seen_at?: string;
+  };
+  const [qrStatus, setQrStatus] = useState<QrConnection | null>(null);
+  const [qrLoading, setQrLoading] = useState(true);
+  const [qrImg, setQrImg] = useState<{ dataUrl: string; expiresAt: number } | null>(null);
+  const [qrBusy, setQrBusy] = useState(false);
+  const [qrMsg, setQrMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [qrPairing, setQrPairing] = useState(false);
+
+  const loadQrStatus = async () => {
+    try {
+      const data = await api.get<QrConnection>("/dashboard/whatsapp-qr/status");
+      setQrStatus(data);
+      return data;
+    } catch {
+      setQrStatus(null);
+      return null;
+    } finally {
+      setQrLoading(false);
+    }
+  };
+  const loadQrImage = async () => {
+    try {
+      const data = await api.get<{ qr_data_url: string; issued_at: number; expires_at: number }>("/dashboard/whatsapp-qr/qr");
+      setQrImg({ dataUrl: data.qr_data_url, expiresAt: data.expires_at });
+    } catch {
+      // NO_FRESH_QR or not started — keep previous frame; poller retries.
+    }
+  };
+  const startQrPairing = async () => {
+    setQrBusy(true);
+    setQrMsg(null);
+    try {
+      const data = await api.post<QrConnection>("/dashboard/whatsapp-qr/connect/start", {});
+      setQrStatus(data);
+      setQrPairing(true);
+      await loadQrImage();
+      toast.success("Scan the QR with your business WhatsApp number");
+    } catch (err) {
+      setQrMsg({ type: "error", text: err instanceof Error ? err.message : "Failed to start pairing" });
+    } finally {
+      setQrBusy(false);
+    }
+  };
+  const disconnectQr = async () => {
+    setQrBusy(true);
+    try {
+      const data = await api.post<QrConnection>("/dashboard/whatsapp-qr/disconnect", {});
+      setQrStatus(data);
+      setQrImg(null);
+      setQrPairing(false);
+      toast.success("WhatsApp disconnected");
+    } catch (err) {
+      setQrMsg({ type: "error", text: err instanceof Error ? err.message : "Failed to disconnect" });
+    } finally {
+      setQrBusy(false);
+    }
+  };
+  const reconnectQr = async () => {
+    setQrBusy(true);
+    try {
+      const data = await api.post<QrConnection>("/dashboard/whatsapp-qr/reconnect", {});
+      setQrStatus(data);
+      toast.success("Reconnect requested");
+    } catch (err) {
+      setQrMsg({ type: "error", text: err instanceof Error ? err.message : "Failed to reconnect" });
+    } finally {
+      setQrBusy(false);
+    }
+  };
+  // Poll status + QR while the tab is open and pairing is active or connected.
+  const qrPairingRef = useRef(false);
+  qrPairingRef.current = qrPairing;
+  useEffect(() => {
+    if (activeTab !== "whatsapp") return;
+    loadQrStatus();
+    const t = setInterval(async () => {
+      const s = await loadQrStatus();
+      if (!s) return;
+      if (s.status === "CONNECTED") {
+        setQrPairing(false);
+        return;
+      }
+      if (qrPairingRef.current) await loadQrImage();
+    }, 4000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   // Google Calendar state
   const [gcState, setGcState] = useState<GoogleCalendarState>({
@@ -264,10 +296,92 @@ export default function IntegrationsPage() {
   const [wtRevealed, setWtRevealed] = useState(false);
   const [justRegenerated, setJustRegenerated] = useState(false);
 
+  // Razorpay Route provider payouts
+  type RouteSnapshot = {
+    onboarding_status: string; payment_mode: string; razorpay_account_id?: string;
+    razorpay_status?: string; route_product_id?: string; route_product_status?: string;
+    stakeholder_id?: string; bank_verified: boolean; bank_last4?: string;
+    beneficiary_name?: string; transfer_ready: boolean; transfer_ready_at?: string;
+    failure_reason?: string; message: string;
+    price_enabled: boolean; price_paise: number; currency: string;
+  };
+  const [routeStatus, setRouteStatus] = useState<RouteSnapshot | null>(null);
+  const [routeAvailable, setRouteAvailable] = useState(false);
+  const [routeLoading, setRouteLoading] = useState(true);
+  const [routeBusy, setRouteBusy] = useState(false);
+  const [routePhone, setRoutePhone] = useState("");
+  const [routeLegalName, setRouteLegalName] = useState("");
+  const [stakeName, setStakeName] = useState("");
+  const [stakePan, setStakePan] = useState("");
+  const [settleAcct, setSettleAcct] = useState("");
+  const [settleIfsc, setSettleIfsc] = useState("");
+  const [settleName, setSettleName] = useState("");
+  const [routeTnc, setRouteTnc] = useState(false);
+  const [routePriceEnabled, setRoutePriceEnabled] = useState(false);
+  const [routePricePaise, setRoutePricePaise] = useState(0);
+  const [routeCurrency, setRouteCurrency] = useState("INR");
+  const [routeSavingPrice, setRouteSavingPrice] = useState(false);
+
+  const loadRouteStatus = async () => {
+    setRouteLoading(true);
+    try {
+      const data = await api.get<RouteSnapshot>("/dashboard/razorpay/route/status");
+      setRouteStatus(data);
+      setRoutePriceEnabled(data.price_enabled);
+      setRoutePricePaise(data.price_paise || 0);
+      setRouteCurrency(data.currency || "INR");
+      setRouteAvailable(true);
+    } catch (err) {
+      // 404 = Route disabled on backend -> hide the card; other errors keep it hidden too
+      setRouteAvailable(false);
+    }
+    setRouteLoading(false);
+  };
+  const routeCall = async (fn: () => Promise<RouteSnapshot>, okMsg: string) => {
+    setRouteBusy(true);
+    try {
+      const data = await fn();
+      setRouteStatus(data);
+      setRouteAvailable(true);
+      toast.success(okMsg);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Route request failed");
+    } finally { setRouteBusy(false); }
+  };
+  const handleRouteStart = () => routeCall(
+    () => api.post<RouteSnapshot>("/dashboard/razorpay/route/linked-account", { phone: routePhone, legal_business_name: routeLegalName || undefined }),
+    "Payout account created",
+  );
+  const handleRouteStakeholder = () => routeCall(
+    () => api.post<RouteSnapshot>("/dashboard/razorpay/route/stakeholder", { name: stakeName || undefined, pan: stakePan || undefined }),
+    "Business details saved",
+  );
+  const handleRouteProduct = () => routeCall(
+    () => api.post<RouteSnapshot>("/dashboard/razorpay/route/product", { tnc_accepted: routeTnc }),
+    "Route product requested",
+  );
+  const handleRouteSettlement = () => routeCall(
+    () => api.patch<RouteSnapshot>("/dashboard/razorpay/route/product", { account_number: settleAcct, ifsc_code: settleIfsc, beneficiary_name: settleName, tnc_accepted: routeTnc }),
+    "Bank details submitted",
+  );
+  const handleRouteMode = (mode: string) => routeCall(
+    () => api.patch<RouteSnapshot>("/dashboard/razorpay/route/payment-mode", { mode }),
+    `Payout mode set to ${mode}`,
+  );
+  const handleSaveRoutePrice = async () => {
+    setRouteSavingPrice(true);
+    try {
+      await api.put("/dashboard/razorpay/price", { enabled: routePriceEnabled, amount_paise: routePriceEnabled ? routePricePaise : 0, currency: routeCurrency });
+      toast.success("Appointment price saved");
+      await loadRouteStatus();
+    } catch (err) { toast.error(err instanceof Error ? err.message : "Failed to save price"); }
+    setRouteSavingPrice(false);
+  };
+
   useEffect(() => {
-    loadWhatsAppConfig();
     loadCalendarConfig();
     loadWidgetToken();
+    loadRouteStatus();
 
     const fromQuery = normalizeApiBase(searchParams.get("public_api_base"));
     const fromStorage =
@@ -432,24 +546,6 @@ export default function IntegrationsPage() {
     setWtRegenerating(false);
   };
 
-  const loadWhatsAppConfig = async () => {
-    try {
-      const data = await api.get<WhatsAppConfig>("/dashboard/whatsapp-config");
-      setWaConfig(data);
-      setWaForm({
-        whatsapp_enabled: data.whatsapp_enabled,
-        whatsapp_phone_number_id: data.whatsapp_phone_number_id || "",
-        whatsapp_business_account_id: data.whatsapp_business_account_id || "",
-        whatsapp_verify_token: data.whatsapp_verify_token || "",
-        whatsapp_api_token: "",
-      });
-    } catch {
-      // Not configured yet
-    } finally {
-      setWaLoading(false);
-    }
-  };
-
   const connectGoogleCalendar = async () => {
     setGcState((prev) => ({ ...prev, connecting: true, error: null }));
     try {
@@ -515,30 +611,6 @@ export default function IntegrationsPage() {
         error: err instanceof Error ? err.message : "Failed to disconnect" 
       }));
       toast.error(err instanceof Error ? err.message : "Failed to disconnect Outlook Calendar");
-    }
-  };
-
-  const saveWhatsAppConfig = async () => {
-    setWaSaving(true);
-    setWaMessage(null);
-    try {
-      const payload: Record<string, unknown> = {
-        whatsapp_enabled: waForm.whatsapp_enabled,
-        whatsapp_phone_number_id: waForm.whatsapp_phone_number_id || null,
-        whatsapp_business_account_id: waForm.whatsapp_business_account_id || null,
-        whatsapp_verify_token: waForm.whatsapp_verify_token || null,
-      };
-      if (waForm.whatsapp_api_token) {
-        payload.whatsapp_api_token = waForm.whatsapp_api_token;
-      }
-      const data = await api.put<WhatsAppConfig>("/dashboard/whatsapp-config", payload);
-      setWaConfig(data);
-      setWaForm((prev) => ({ ...prev, whatsapp_api_token: "" }));
-      setWaMessage({ type: "success", text: "WhatsApp configuration saved!" });
-    } catch (err: unknown) {
-      setWaMessage({ type: "error", text: err instanceof Error ? err.message : "Failed to save" });
-    } finally {
-      setWaSaving(false);
     }
   };
 
@@ -731,6 +803,29 @@ export default function IntegrationsPage() {
 
   const activeIntegrations = [
     {
+      id: "payments" as const,
+      title: "Provider Payouts",
+      icon: CreditCard,
+      iconBg: "bg-emerald-500",
+      status: (()=>{
+        if(routeStatus?.transfer_ready) return "Ready";
+        const s=(routeStatus?.onboarding_status||"NOT_STARTED");
+        if(s==="UNDER_REVIEW") return "Under Review";
+        if(s==="SUSPENDED"||s==="FAILED") return "Action Required";
+        if(s!=="NOT_STARTED") return "Onboarding";
+        return "Not Connected";
+      })(),
+      statusClass: (()=>{
+        if(routeStatus?.transfer_ready) return "bg-green-500/10 text-green-500";
+        const s=(routeStatus?.onboarding_status||"NOT_STARTED");
+        if(s==="UNDER_REVIEW") return "bg-amber-500/10 text-amber-600";
+        if(s==="SUSPENDED"||s==="FAILED") return "bg-red-500/10 text-red-600";
+        if(s!=="NOT_STARTED") return "bg-sky-500/10 text-sky-600";
+        return "bg-muted text-muted-foreground";
+      })(),
+      description: "Receive automatic provider payouts via Razorpay Route.",
+    },
+    {
       id: "widget",
       title: "Universal Web Widget",
       icon: Globe,
@@ -744,8 +839,8 @@ export default function IntegrationsPage() {
       title: "WhatsApp API",
       icon: MessageCircle,
       iconBg: "bg-green-500",
-      status: waConfig?.whatsapp_enabled ? "Active" : "Configure",
-      statusClass: waConfig?.whatsapp_enabled ? "bg-green-500/10 text-green-500" : "bg-yellow-500/10 text-yellow-500",
+      status: qrStatus?.status === "CONNECTED" ? "Active" : "Configure",
+      statusClass: qrStatus?.status === "CONNECTED" ? "bg-green-500/10 text-green-500" : "bg-yellow-500/10 text-yellow-500",
       description: "Allow the AI to converse and take bookings directly via WhatsApp.",
     },
     {
@@ -830,6 +925,21 @@ export default function IntegrationsPage() {
           </button>
 
           <button
+            onClick={() => setActiveTab("payments")}
+            className={`w-full flex items-center justify-between px-4 py-3 rounded-lg text-sm font-medium transition-all duration-200 ${
+              activeTab === "payments" 
+              ? "bg-primary text-primary-foreground shadow-md" 
+              : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <CreditCard className="size-4" />
+              Razorpay
+            </div>
+            {routeStatus?.transfer_ready && <ChevronRight className="size-4 opacity-50 text-green-500" />}
+          </button>
+
+          <button
             onClick={() => setActiveTab("whatsapp")}
             className={`w-full flex items-center justify-between px-4 py-3 rounded-lg text-sm font-medium transition-all duration-200 ${
               activeTab === "whatsapp" 
@@ -841,7 +951,7 @@ export default function IntegrationsPage() {
               <MessageCircle className="size-4" />
               WhatsApp
             </div>
-            {waConfig?.whatsapp_enabled && <ChevronRight className="size-4 opacity-50" />}
+            {qrStatus?.status === "CONNECTED" && <ChevronRight className="size-4 opacity-50" />}
           </button>
 
           <button
@@ -884,7 +994,7 @@ export default function IntegrationsPage() {
                   {activeIntegrations.map((item) => (
                     <div 
                       key={item.title} 
-                      onClick={() => setActiveTab(item.id as "widget" | "whatsapp" | "calendar" | "providers")}
+                      onClick={() => setActiveTab(item.id as any)}
                       className="group cursor-pointer bg-card border border-border/60 hover:border-border rounded-xl p-5 flex flex-col transition-all duration-300 hover:shadow-lg hover:-translate-y-1 relative overflow-hidden"
                     >
                       <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none" />
@@ -1057,6 +1167,113 @@ export default function IntegrationsPage() {
             </div>
           )}
 
+          {activeTab === "payments" && routeAvailable && (
+            <div className="bg-card border border-border rounded-2xl overflow-hidden shadow-sm animate-in fade-in duration-500 slide-in-from-bottom-2">
+              <div className="flex flex-wrap items-center justify-between gap-3 p-4 sm:p-5 bg-secondary/40 border-b border-border/50">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-sky-500/10 rounded-lg"><CreditCard className="size-5 text-sky-600" /></div>
+                  <div><h3 className="font-semibold text-base leading-none">Provider Payouts</h3><p className="text-xs text-muted-foreground mt-1">Razorpay Route • platform payments → automatic provider transfers</p></div>
+                </div>
+                {(()=>{
+                  const s=(routeStatus?.onboarding_status||"NOT_STARTED");
+                  if(routeStatus?.transfer_ready) return <span className="text-xs font-bold uppercase tracking-wider bg-green-500/10 text-green-600 px-3 py-1 rounded-full">Ready to receive payments</span>;
+                  if(s==="UNDER_REVIEW") return <span className="text-xs font-bold uppercase tracking-wider bg-amber-500/10 text-amber-600 px-3 py-1 rounded-full">Verification in progress</span>;
+                  if(s==="SUSPENDED"||s==="FAILED") return <span className="text-xs font-bold uppercase tracking-wider bg-red-500/10 text-red-600 px-3 py-1 rounded-full">Action required</span>;
+                  if(s!=="NOT_STARTED") return <span className="text-xs font-bold uppercase tracking-wider bg-sky-500/10 text-sky-600 px-3 py-1 rounded-full">Onboarding</span>;
+                  return <span className="text-xs font-bold uppercase tracking-wider bg-muted px-3 py-1 rounded-full text-muted-foreground">Not connected</span>;
+                })()}
+              </div>
+              <div className="p-6 md:p-8 space-y-6">
+                {routeLoading ? <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin"/> Loading payout status…</div> : (
+                  <>
+                    <p className="text-sm text-muted-foreground">{routeStatus?.message || "Connect a bank account to receive automatic payouts."}</p>
+                    {(routeStatus?.onboarding_status||"NOT_STARTED")==="NOT_STARTED" && (
+                      <div className="rounded-xl border border-dashed p-6 space-y-3 bg-secondary/20">
+                        <div className="grid sm:grid-cols-2 gap-3">
+                          <input value={routePhone} onChange={e=>setRoutePhone(e.target.value)} placeholder="Business phone (8–15 digits)" className="bg-background border rounded-lg px-3 py-2 text-sm" />
+                          <input value={routeLegalName} onChange={e=>setRouteLegalName(e.target.value)} placeholder="Legal business name (optional)" className="bg-background border rounded-lg px-3 py-2 text-sm" />
+                        </div>
+                        <button onClick={handleRouteStart} disabled={routeBusy || !routePhone} className="px-6 py-2.5 rounded-xl bg-sky-600 text-white text-sm font-medium hover:bg-sky-700 disabled:opacity-50">{routeBusy ? "Working…" : "Connect Bank Account"}</button>
+                      </div>
+                    )}
+                    {(routeStatus?.onboarding_status==="STAKEHOLDER_PENDING"||routeStatus?.onboarding_status==="ACCOUNT_CREATED") && (
+                      <div className="rounded-xl border p-5 space-y-3">
+                        <h4 className="text-sm font-semibold">Business details</h4>
+                        <p className="text-xs text-muted-foreground">Stakeholder identity is bound to your verified login email.</p>
+                        <div className="grid sm:grid-cols-2 gap-3">
+                          <input value={stakeName} onChange={e=>setStakeName(e.target.value)} placeholder="Full name (optional)" className="bg-background border rounded-lg px-3 py-2 text-sm" />
+                          <input value={stakePan} onChange={e=>setStakePan(e.target.value)} placeholder="PAN (optional)" className="bg-background border rounded-lg px-3 py-2 text-sm" />
+                        </div>
+                        <button onClick={handleRouteStakeholder} disabled={routeBusy} className="text-sm px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">{routeBusy ? "Saving…" : "Save business details"}</button>
+                      </div>
+                    )}
+                    {routeStatus?.onboarding_status==="PRODUCT_PENDING" && (
+                      <div className="rounded-xl border p-5 space-y-3">
+                        <h4 className="text-sm font-semibold">Route payouts product</h4>
+                        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={routeTnc} onChange={e=>setRouteTnc(e.target.checked)} /> I accept the Razorpay Route terms for payouts</label>
+                        <button onClick={handleRouteProduct} disabled={routeBusy || !routeTnc} className="text-sm px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">{routeBusy ? "Requesting…" : "Request payouts"}</button>
+                      </div>
+                    )}
+                    {routeStatus?.onboarding_status==="BANK_DETAILS_PENDING" && (
+                      <div className="rounded-xl border p-5 space-y-3">
+                        <h4 className="text-sm font-semibold">Bank account for settlements</h4>
+                        <p className="text-xs text-muted-foreground">Sent directly to Razorpay. Only the last 4 digits are stored.</p>
+                        <div className="grid sm:grid-cols-3 gap-3">
+                          <input type="password" value={settleAcct} onChange={e=>setSettleAcct(e.target.value)} placeholder="Account number" autoComplete="off" className="bg-background border rounded-lg px-3 py-2 text-sm" />
+                          <input value={settleIfsc} onChange={e=>setSettleIfsc(e.target.value.toUpperCase())} placeholder="IFSC" autoComplete="off" className="bg-background border rounded-lg px-3 py-2 text-sm" />
+                          <input value={settleName} onChange={e=>setSettleName(e.target.value)} placeholder="Beneficiary name" className="bg-background border rounded-lg px-3 py-2 text-sm" />
+                        </div>
+                        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={routeTnc} onChange={e=>setRouteTnc(e.target.checked)} /> I accept the Razorpay Route terms for payouts</label>
+                        <button onClick={handleRouteSettlement} disabled={routeBusy || !routeTnc || !settleAcct || !settleIfsc || !settleName} className="text-sm px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">{routeBusy ? "Submitting…" : "Submit bank details"}</button>
+                      </div>
+                    )}
+                    {routeStatus?.onboarding_status==="UNDER_REVIEW" && (
+                      <div className="rounded-xl border bg-amber-50 dark:bg-amber-950/20 p-5 border-amber-200">
+                        <div className="flex items-center gap-2 text-sm font-medium text-amber-700"><Loader2 className="size-4 animate-spin"/> Bank account verification in progress.</div>
+                        <button onClick={loadRouteStatus} className="mt-3 text-xs border px-3 py-1.5 rounded-lg hover:bg-accent">Refresh status</button>
+                      </div>
+                    )}
+                    {(routeStatus?.transfer_ready || routeStatus?.bank_last4) && (
+                      <div className="rounded-xl border bg-green-50 dark:bg-green-950/20 p-5 border-green-200">
+                        <p className="text-sm font-semibold text-green-700">{routeStatus?.transfer_ready ? "Ready to receive payments" : "Bank account connected"}</p>
+                        {routeStatus?.bank_last4 && <p className="text-xs text-muted-foreground mt-1">Account: •••• {routeStatus.bank_last4}{routeStatus?.beneficiary_name ? ` • ${routeStatus.beneficiary_name}` : ""}</p>}
+                      </div>
+                    )}
+                    {(routeStatus?.onboarding_status==="SUSPENDED"||routeStatus?.onboarding_status==="FAILED") && (
+                      <div className="rounded-xl border bg-red-50 dark:bg-red-950/20 p-5 border-red-200">
+                        <p className="text-sm font-semibold text-red-700">Verification failed — action required</p>
+                        <p className="text-xs text-muted-foreground mt-1 whitespace-pre-wrap">{routeStatus?.failure_reason || "Razorpay needs more information."}</p>
+                      </div>
+                    )}
+                    {routeStatus && routeStatus.onboarding_status !== "NOT_STARTED" && (
+                      <div className="rounded-xl border p-5 space-y-2">
+                        <h4 className="text-sm font-semibold">Payment routing</h4>
+                        <p className="text-xs text-muted-foreground">AUTO uses Route once payout-ready. ROUTE rejects new payments until payout-ready (no silent fallback).</p>
+                        <div className="flex gap-2">
+                          {(["AUTO","ROUTE"] as const).map(m => (
+                            <button key={m} onClick={()=>handleRouteMode(m)} disabled={routeBusy || routeStatus.payment_mode===m} className={`text-xs px-3 py-1.5 rounded-lg border ${routeStatus.payment_mode===m ? "bg-primary text-primary-foreground" : "hover:bg-accent"} disabled:opacity-50`}>{m}</button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div className="rounded-xl border p-5 space-y-3">
+                      <h4 className="text-sm font-semibold">Appointment Price</h4>
+                      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={routePriceEnabled} onChange={e=>setRoutePriceEnabled(e.target.checked)} /> Enable paid appointments</label>
+                      {routePriceEnabled && (
+                        <div className="flex gap-2 items-center">
+                          <span className="text-sm">₹</span>
+                          <input type="number" value={routePricePaise/100} onChange={e=>setRoutePricePaise(Math.round(parseFloat(e.target.value||"0")*100))} className="w-28 bg-background border rounded-lg px-3 py-2 text-sm" placeholder="500" />
+                          <select value={routeCurrency} onChange={e=>setRouteCurrency(e.target.value)} className="bg-background border rounded-lg px-2 py-2 text-sm"><option value="INR">INR</option></select>
+                        </div>
+                      )}
+                      <button onClick={handleSaveRoutePrice} disabled={routeSavingPrice} className="text-sm px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">{routeSavingPrice ? "Saving…" : "Save price"}</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
           {activeTab === "whatsapp" && (
             <div className="bg-card border border-border rounded-2xl overflow-hidden shadow-sm animate-in fade-in duration-500 slide-in-from-bottom-2">
               <div className="flex flex-wrap items-center justify-between gap-3 p-4 sm:p-5 bg-secondary/40 border-b border-border/50">
@@ -1069,134 +1286,72 @@ export default function IntegrationsPage() {
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
-                  <span className="text-sm font-medium text-muted-foreground">
-                    {waForm.whatsapp_enabled ? "Enabled" : "Disabled"}
-                  </span>
+                  {(()=>{
+                    if (qrStatus?.status === "CONNECTED") return <span className="text-xs font-bold uppercase tracking-wider bg-green-500/10 text-green-600 px-3 py-1 rounded-full">Connected</span>;
+                    return <span className="text-xs font-bold uppercase tracking-wider bg-muted px-3 py-1 rounded-full text-muted-foreground">Not Connected</span>;
+                  })()}
                   <button
-                    onClick={() => setWaForm((f) => ({ ...f, whatsapp_enabled: !f.whatsapp_enabled }))}
-                    title="Toggle WhatsApp Integration"
-                    aria-label="Toggle WhatsApp Integration"
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                      waForm.whatsapp_enabled ? "bg-green-500" : "bg-muted"
-                    }`}
+                    onClick={() => { loadQrStatus(); }}
+                    title="Refresh WhatsApp status"
+                    aria-label="Refresh WhatsApp status"
+                    className="relative inline-flex h-8 w-8 items-center justify-center rounded-full border border-border hover:bg-accent transition-colors"
                   >
-                    <span
-                      className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
-                        waForm.whatsapp_enabled ? "translate-x-6" : "translate-x-1"
-                      }`}
-                    />
+                    <RefreshCw className="size-4" />
                   </button>
                 </div>
               </div>
 
-              {waLoading ? (
+              {qrLoading ? (
                 <div className="p-12 flex items-center justify-center">
                   <Loader2 className="size-6 animate-spin text-muted-foreground" />
                 </div>
               ) : (
                 <div className="p-6 md:p-8 space-y-6">
-                  {waConfig?.webhook_url && (
-                    <div className="p-5 bg-secondary/20 rounded-xl border border-dashed border-border">
-                      <label className="text-xs font-semibold text-muted-foreground uppercase tracking-widest mb-2 block">
-                        Your Meta Webhook URL
-                      </label>
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1 flex items-center gap-3 bg-background border border-border rounded-lg px-4 py-2.5">
-                          <Link2 className="size-4 text-muted-foreground shrink-0" />
-                          <code className="text-[13px] font-mono text-foreground truncate">{waConfig.webhook_url}</code>
+                  <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-5">
+                    <p className="text-sm font-semibold">Connect a dedicated business booking number</p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Use a WhatsApp Business number reserved for customer bookings — not your personal number.
+                      This uses an unofficial WhatsApp Web integration: Meta may throttle, disconnect, or restrict
+                      numbers that look automated. Keep the number warmed up with normal activity.
+                    </p>
+                  </div>
+
+                  {qrStatus?.status === "CONNECTED" ? (
+                    <div className="rounded-xl border bg-green-50 dark:bg-green-950/20 p-5 border-green-200">
+                      <div className="flex items-center gap-2 text-sm font-medium text-green-700">
+                        <Check className="size-4" /> WhatsApp Connected
+                        {qrStatus.phone_number ? <span className="font-mono">+{qrStatus.phone_number}</span> : null}
+                      </div>
+                      {qrStatus.display_name ? <p className="text-xs text-muted-foreground mt-1">{qrStatus.display_name}</p> : null}
+                      <div className="flex gap-2 mt-3">
+                        <button onClick={reconnectQr} disabled={qrBusy} className="text-xs border px-3 py-1.5 rounded-lg hover:bg-accent disabled:opacity-50">Reconnect</button>
+                        <button onClick={disconnectQr} disabled={qrBusy} className="text-xs border border-destructive/20 text-destructive px-3 py-1.5 rounded-lg hover:bg-destructive/10 disabled:opacity-50">Disconnect</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-dashed p-6 text-center bg-secondary/20 space-y-4">
+                      <div className="flex justify-center"><QrCode className="size-8 text-muted-foreground" /></div>
+                      <div>
+                        <p className="text-sm font-medium">Link your business WhatsApp in under a minute</p>
+                        <p className="text-xs text-muted-foreground mt-1">Click Connect, then on the business phone go to WhatsApp → Settings → Linked Devices → Link a Device and scan the code. QR refreshes automatically.</p>
+                      </div>
+                      {qrImg && (qrStatus?.status === "PENDING_QR" || qrStatus?.status === "DISCONNECTED") ? (
+                        <div className="flex justify-center">
+                          <img src={qrImg.dataUrl} alt="WhatsApp pairing QR code" className="size-56 rounded-xl border border-border bg-white p-2" />
                         </div>
-                        <button
-                          onClick={() => {
-                            navigator.clipboard.writeText(waConfig.webhook_url);
-                            setWaWebhookCopied(true);
-                            setTimeout(() => setWaWebhookCopied(false), 2000);
-                          }}
-                          className="flex items-center gap-2 text-[13px] font-medium px-4 py-2.5 rounded-lg bg-secondary border border-border hover:bg-accent transition-colors"
-                        >
-                          {waWebhookCopied ? <Check className="size-4 text-green-500" /> : <Copy className="size-4" />}
-                          {waWebhookCopied ? "Copied!" : "Copy URL"}
-                        </button>
-                      </div>
+                      ) : null}
+                      {qrStatus && qrStatus.status !== "NOT_CONNECTED" && qrStatus.status !== "LOGGED_OUT" ? (
+                        <p className="text-xs text-muted-foreground">Status: {qrStatus.status}. Waiting for scan…</p>
+                      ) : null}
+                      <button onClick={startQrPairing} disabled={qrBusy} className="px-6 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700 disabled:opacity-50">
+                        {qrBusy ? <><Loader2 className="size-4 animate-spin inline mr-2" />Starting…</> : "Connect WhatsApp"}
+                      </button>
+                      {qrMsg && (
+                        <p className={`text-xs ${qrMsg.type === "success" ? "text-green-600" : "text-red-600"}`}>{qrMsg.text}</p>
+                      )}
                     </div>
                   )}
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4">
-                    <div className="space-y-4 md:col-span-2">
-                      <h4 className="text-sm font-semibold border-b border-border/50 pb-2">Meta Credentials</h4>
-                    </div>
-                    <div>
-                      <label className="text-[13px] font-semibold text-foreground mb-1.5 block">Phone Number ID</label>
-                      <input
-                        type="text"
-                        title="Phone Number ID"
-                        placeholder="Enter Phone Number ID"
-                        value={waForm.whatsapp_phone_number_id}
-                        onChange={(e) => setWaForm((f) => ({ ...f, whatsapp_phone_number_id: e.target.value }))}
-                        className="w-full bg-background border border-border rounded-lg px-4 py-2.5 text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[13px] font-semibold text-foreground mb-1.5 block">Business Account ID</label>
-                      <input
-                        type="text"
-                        title="Business Account ID"
-                        placeholder="Enter Business Account ID"
-                        value={waForm.whatsapp_business_account_id}
-                        onChange={(e) => setWaForm((f) => ({ ...f, whatsapp_business_account_id: e.target.value }))}
-                        className="w-full bg-background border border-border rounded-lg px-4 py-2.5 text-sm"
-                      />
-                    </div>
-                    
-                    <div className="space-y-4 md:col-span-2 mt-2">
-                      <h4 className="text-sm font-semibold border-b border-border/50 pb-2">Authentication</h4>
-                    </div>
-                    <div>
-                      <label className="text-[13px] font-semibold text-foreground mb-1.5 block">Verify Token</label>
-                      <input
-                        type="text"
-                        title="Verify Token"
-                        placeholder="Enter Verify Token"
-                        value={waForm.whatsapp_verify_token}
-                        onChange={(e) => setWaForm((f) => ({ ...f, whatsapp_verify_token: e.target.value }))}
-                        className="w-full bg-background border border-border rounded-lg px-4 py-2.5 text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[13px] font-semibold text-foreground mb-1.5 block">Permanent API Token</label>
-                      <div className="relative">
-                        <input
-                          type="password"
-                          value={waForm.whatsapp_api_token}
-                          onChange={(e) => setWaForm((f) => ({ ...f, whatsapp_api_token: e.target.value }))}
-                          placeholder={waConfig?.whatsapp_api_token_set ? "•••••••••••• (Saved)" : ""}
-                          className="w-full bg-background border border-border rounded-lg px-4 py-2.5 text-sm pr-10"
-                        />
-                        <Shield className="absolute right-3 top-3 size-4 text-muted-foreground" />
-                      </div>
-                    </div>
-                  </div>
-
-                  {waMessage && (
-                    <div
-                      className={`text-[13px] font-medium px-4 py-3 rounded-xl flex items-center gap-2 mt-4 ${
-                        waMessage.type === "success" ? "bg-green-500/10 text-green-600 dark:text-green-400 border border-green-500/20" : "bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20"
-                      }`}
-                    >
-                      {waMessage.type === "success" ? <Check className="size-4" /> : <AlertCircle className="size-4" />}
-                      {waMessage.text}
-                    </div>
-                  )}
-
-                  <div className="pt-6 mt-4 border-t border-border/50 flex justify-end">
-                    <button
-                      onClick={saveWhatsAppConfig}
-                      disabled={waSaving}
-                      className="flex items-center gap-2 text-sm font-medium px-6 py-2.5 rounded-xl bg-primary text-primary-foreground hover:bg-primary/90 transition-all shadow-sm"
-                    >
-                      {waSaving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
-                      Save Configuration
-                    </button>
-                  </div>
                 </div>
               )}
             </div>
@@ -1213,9 +1368,32 @@ export default function IntegrationsPage() {
                     <h3 className="font-semibold text-base leading-none">Calendar Integration</h3>
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
+                {activeProvider && activeProvider !== "NONE" && (
+                  <span className="text-xs font-bold uppercase tracking-wider text-green-500 bg-green-500/10 px-3 py-1 rounded-full flex items-center gap-1.5">
+                    <div className="size-1.5 bg-green-500 rounded-full animate-pulse" />
+                    {activeProvider} Active
+                  </span>
+                )}
+              </div>
+
+              {(gcState.loading || ocState.loading) ? (
+                <div className="p-12 flex items-center justify-center">
+                  <Loader2 className="size-6 animate-spin text-muted-foreground" />
+                </div>
+              ) : (
+                <div className="p-6 md:p-8 space-y-8">
+                  {migrationInfo && (
+                    <div className="text-[13px] font-medium px-4 py-3 rounded-xl bg-blue-500/10 text-blue-600 border border-blue-500/20">
+                      {migrationInfo}
+                    </div>
+                  )}
+
+                  {/* Google Calendar Section */}
+                  <div className="border border-border rounded-xl p-5">
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-3">
                         <div className="bg-white p-1.5 rounded-lg border border-border shadow-sm">
-                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="20" height="20">
+                          <svg xmlns="http://w3.org/2000/svg" viewBox="0 0 48 48" width="20" height="20">
                             <path fill="#4285F4" d="M38 10H14c-2.2 0-4 1.8-4 4v4h28v-4c0-2.2-1.8-4-4-4z"/>
                             <path fill="#34A853" d="M38 14h4v24c0 2.2-1.8 4-4 4v-28z"/>
                             <path fill="#FBBC05" d="M38 38H14c-2.2 0-4-1.8-4-4v4c0 2.2 1.8 4 4 4h24c2.2 0 4-1.8 4-4z"/>
@@ -1223,6 +1401,7 @@ export default function IntegrationsPage() {
                             <path fill="#FFF" d="M38 18H10v20h28V18z"/>
                             <path fill="#4285F4" d="M19.5 24.5h-3v2h3v5h2.5v-5h3v-2h-5.5zM29.5 24.5h-4.5v2h2.5c.6 0 1 .4 1 1s-.4 1-1 1h-2v2h2c1.4 0 2.5-1.1 2.5-2.5 0-.8-.4-1.5-1-2 .6-.4 1-1.1 1-1.9 0-1.4-1.1-2.6-2.5-2.6z"/>
                           </svg>
+                        </div>
                         <div>
                           <h4 className="font-semibold text-sm">Google Calendar</h4>
                           <p className="text-xs text-muted-foreground">Sync bookings to Google Calendar</p>
@@ -1272,18 +1451,23 @@ export default function IntegrationsPage() {
                     <div className="flex items-center justify-between mb-4">
                       <div className="flex items-center gap-3">
                         <div className="bg-white p-1.5 rounded-lg border border-border shadow-sm">
-                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="20" height="20">
-                            <rect x="5" y="7" width="38" height="34" rx="5" fill="#0078D4"/>
-                            <path d="M15 7H33V17H15V7Z" fill="#106EBE"/>
-                            <rect x="11" y="18" width="26" height="18" rx="2" fill="white"/>
-                            <path d="M15 22H19V26H15V22Z" fill="#0078D4"/>
-                            <path d="M22 22H26V26H22V22Z" fill="#0078D4"/>
-                            <path d="M29 22H33V26H29V22Z" fill="#0078D4"/>
-                            <path d="M15 29H19V33H15V29Z" fill="#0078D4"/>
-                            <path d="M22 29H26V33H22V29Z" fill="#0078D4"/>
-                            <path d="M29 29H33V33H29V29Z" fill="#0078D4"/>
-                            <path d="M15 4V10" stroke="#0078D4" strokeWidth="3" strokeLinecap="round"/>
-                            <path d="M33 4V10" stroke="#0078D4" strokeWidth="3" strokeLinecap="round"/>
+                          <svg xmlns="http://w3.org/2000/svg" viewBox="0 0 48 48" width="20" height="20">
+                            <defs>
+                              <linearGradient id="outlookBlue" x1="10%" y1="10%" x2="90%" y2="90%">
+                                <stop offset="0%" stop-color="#00a1f1"/>
+                                <stop offset="100%" stop-color="#0078d4"/>
+                              </linearGradient>
+                            </defs>
+                            <rect x="12" y="12" width="30" height="30" rx="4" fill="url(#outlookBlue)"/>
+                            <path fill="#005a9e" d="M12 12h30v7H12z" opacity="0.4"/>
+                            <circle cx="18" cy="25" r="1.5" fill="#fff" opacity="0.8"/>
+                            <circle cx="26" cy="25" r="1.5" fill="#fff" opacity="0.8"/>
+                            <circle cx="34" cy="25" r="1.5" fill="#fff" opacity="0.8"/>
+                            <circle cx="18" cy="33" r="1.5" fill="#fff" opacity="0.8"/>
+                            <circle cx="26" cy="33" r="1.5" fill="#fff" opacity="0.8"/>
+                            <circle cx="34" cy="33" r="1.5" fill="#fff" opacity="0.8"/>
+                            <rect x="6" y="16" width="16" height="16" rx="3" fill="#0078d4"/>
+                            <text x="14" y="29" fill="#fff" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="15" text-anchor="middle">O</text>
                           </svg>
                         </div>
                         <div>
@@ -1462,8 +1646,10 @@ export default function IntegrationsPage() {
                           title: "Google Meet",
                           description: "Host meetings via Google Meet for online bookings.",
                           connected: Boolean(meetingProviders?.google_meet_connected),
-                          iconBg: "bg-white",
-                          icon: <GoogleMeetIcon size={20} />,
+                          iconBg: "bg-[#4285F4]",
+                          icon: (
+                            <img src="/google-meet-logo.png" alt="Google Meet" width="20" height="20" style={{ width: "20px", height: "20px" }} />
+                          ),
                         },
 
                       ].map((provider) => {

@@ -1,7 +1,7 @@
 """
-WhatsApp webhook message debouncer and sequencer.
+WhatsApp message debouncer and sequencer.
 
-Handles out-of-order and duplicate webhook messages from Meta:
+Handles out-of-order and duplicate inbound messages:
 - Deduplicates by tracking processed message IDs
 - Uses asyncio locks to prevent concurrent processing of same session
 - Cleans up old locks to prevent memory leaks

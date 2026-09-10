@@ -88,14 +88,9 @@ class OrgConfig(Base):
         Integer, default=0, server_default="0", nullable=False
     )
 
-    # WhatsApp integration
-    whatsapp_enabled = Column(
-        Boolean, default=False, server_default="false", nullable=False
-    )
-    whatsapp_phone_number_id = Column(String(255), nullable=True)
-    whatsapp_business_account_id = Column(String(255), nullable=True)
-    whatsapp_verify_token = Column(String(255), nullable=True)
-    whatsapp_api_token = Column(String(512), nullable=True)
+    # NOTE: Meta Cloud API WhatsApp columns removed (QR/Baileys transport is
+    # the only WhatsApp channel now; see whatsapp_connections). Migration
+    # drops the columns; the cutover keeps all business data intact.
 
     # Google Calendar integration
     google_calendar_enabled = Column(
@@ -196,3 +191,9 @@ class OrgConfig(Base):
     # {"business_profile": {...}, "sources": {"<doc_id|website>": {...}}}
     # Injected into the agent system prompt and stamped onto chunk metadata.
     knowledge_context = Column(JSONB, nullable=True)
+
+    # Appointment pricing (paise). 0 = free / no payment required.
+    # Payments are collected on the platform account and split via Razorpay Route.
+    appointment_price_paise = Column(Integer, nullable=False, default=0, server_default="0")
+    appointment_currency = Column(String(10), nullable=False, default="INR", server_default="INR")
+    appointment_price_enabled = Column(Boolean, nullable=False, default=False, server_default="false")

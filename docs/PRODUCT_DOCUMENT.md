@@ -180,7 +180,7 @@ The admin portal is a **Next.js (App Router) application** with a dark, shadcn/u
 ### 6.6 Integrations (`/dashboard/integrations`)
 - **Meeting providers:** connect/disconnect **Google Meet, Microsoft Teams, Zoom**; set the active provider for auto-generating meeting links (OAuth flows; Zoom has its own callback route).
 - **Calendar sync:** connect/disconnect **Google Calendar** and **Outlook Calendar** (single active calendar provider); booking events are written there on confirmation; connection state shown (success/error toast, error-code mapping for common OAuth failures).
-- **WhatsApp Business:** enable + configure phone number ID, business account ID, verify token, API token; shows the webhook URL to register with Meta (`/api/v1/whatsapp/webhook`).
+- **WhatsApp Business:** connect a dedicated business number by scanning a QR code (Linked Devices); connection health, disconnect and reconnect from the same card. Unofficial WhatsApp Web transport — Meta may throttle or restrict automated numbers.
 - **Widget token:** view / regenerate / delete the `ds_wid_*` token; embed code is shown in **Production** and **Dev** tabs (dev API base defaults to `http://localhost:5174`); API base stored under `dotstark_public_api_base` for preview.
 
 ### 6.7 Knowledge Base (under Agent Personalisation)
@@ -458,7 +458,7 @@ Placeholder tiers (not implemented in admin portal) — recommend positioning as
 4. **Can customers really book in natural language?** Yes — the AI extracts and validates details from chat; things like "next Tuesday" or "3pm" are parsed, validated, and confirmed.
 5. **Can I take over a conversation as a human?** Yes — from the Inbox you take over, chat live (the customer sees you join), then release back to the AI.
 6. **What happens if the AI can't answer?** It can hand off to a human, or answer from your knowledge base (PDFs + website).
-7. **Which channels are supported?** Website widget and WhatsApp Business (Meta Cloud API) — same engine, same conversations in one Inbox.
+7. **Which channels are supported?** Website widget and WhatsApp Business (QR-paired number) — same engine, same conversations in one Inbox.
 8. **Which calendars does it sync?** Google Calendar and Outlook Calendar (single active provider), with events created on booking confirmation.
 9. **Which meeting tools?** Google Meet, Microsoft Teams, Zoom — meeting links auto-generated for online bookings; if link generation fails the booking still confirms with a clear status.
 10. **Is email verification required?** Optional but on by default — the customer receives an OTP before the booking is confirmed, filtering fake/mistyped contacts.

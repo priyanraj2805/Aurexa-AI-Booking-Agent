@@ -161,6 +161,12 @@ async def attempt_booking(
     meeting_link_status: str | None = None,  # MeetingLinkStatus value
     meeting_link_external_id: str | None = None,
     meeting_link_error_code: str | None = None,
+    # Payment snapshot (Razorpay)
+    payment_status: str | None = None,
+    razorpay_order_id: str | None = None,
+    razorpay_payment_id: str | None = None,
+    amount_paise: int | None = None,
+    currency: str | None = None,
 ) -> Booking:
     """
     Atomically locks a slot and creates a booking record.
@@ -240,6 +246,12 @@ async def attempt_booking(
             meeting_link_status=resolved_meeting_link_status,
             meeting_link_external_id=meeting_link_external_id,
             meeting_link_error_code=meeting_link_error_code,
+            # Payment snapshot
+            payment_status=payment_status or "not_required",
+            razorpay_order_id=razorpay_order_id,
+            razorpay_payment_id=razorpay_payment_id,
+            amount_paise=amount_paise,
+            currency=currency,
         )
         db.add(booking)
         slot.is_booked = True

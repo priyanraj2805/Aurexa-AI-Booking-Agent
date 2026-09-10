@@ -1105,7 +1105,7 @@ export default function AgentCorePage() {
                 <div>
                   <p className="text-[13px] font-semibold">Phone OTP Verification</p>
                   <p className="text-[12px] text-muted-foreground mt-0.5">
-                    Require SMS OTP to the customer&apos;s phone before confirming.
+                    Require WhatsApp OTP to the customer&apos;s phone before confirming.
                   </p>
                 </div>
                 <button
@@ -1126,7 +1126,7 @@ export default function AgentCorePage() {
               </div>
               <p className="text-[11px] mt-2 font-medium">
                 {requirePhoneOtp ? (
-                  <span className="text-blue-500">✓ Enabled — customers must verify via SMS OTP</span>
+                  <span className="text-blue-500">✓ Enabled — customers must verify via WhatsApp OTP</span>
                 ) : (
                   <span className="text-amber-500">⚠ Disabled — bookings will be confirmed without phone OTP</span>
                 )}

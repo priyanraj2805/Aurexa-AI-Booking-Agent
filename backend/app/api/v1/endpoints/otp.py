@@ -40,7 +40,7 @@ async def request_otp(
         logger.info(f"OTP ({channel}) generated for session {data.session_id}")
         try:
             if channel == "phone":
-                # Phone OTP via Zavu sms_oneway — fetch phone from session and send SMS
+                # Phone OTP via provider abstraction (WhatsApp active, SMS fallback — both use same OTPRecord)
                 from sqlalchemy.future import select as _select2
                 from app.models.session import ChatSession as _CS2
                 import uuid as _uuid3
@@ -52,14 +52,15 @@ async def request_otp(
                 if sess3 and isinstance(sess3.state_data, dict):
                     phone = str(sess3.state_data.get("phone") or "").strip()
                 if phone:
-                    from app.core.sms import send_phone_otp_sms
-
+                    from app.core.config import settings as _cfg
+                    from app.core.otp_delivery.whatsapp_provider import WhatsAppProvider
+                    from app.core.otp_delivery.sms_provider import SMSProvider
+                    provider = WhatsAppProvider() if (getattr(_cfg, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else SMSProvider()
                     try:
-                        await send_phone_otp_sms(phone, code)
-                        logger.info(f"Zavu phone OTP sent to {phone[:6]}*** for session {data.session_id}")
+                        await provider.send_otp(phone, code, str(data.session_id))
+                        logger.info(f"Phone OTP ({provider.__class__.__name__}) sent to {phone[:6]}*** for session {data.session_id}")
                     except Exception as sms_err:
-                        logger.error(f"Zavu SMS send failed for {data.session_id}: {sms_err}")
-                        # Keep OTP record; client can retry via resend cooldown
+                        logger.error(f"Phone OTP send failed ({provider.__class__.__name__}) for {data.session_id}: {sms_err}")
                 else:
                     logger.warning(f"Phone OTP generate: no phone in session {data.session_id}")
             else:

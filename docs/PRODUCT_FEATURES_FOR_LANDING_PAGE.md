@@ -49,7 +49,7 @@ The embeddable bubble/panel your customers' visitors interact with. Shadow-DOM i
 | | Human handoff — staff can take over live (WebSocket) | ✅ |
 | | Typing indicators (visitor & agent) | ✅ |
 | | Session persisted in `sessionStorage` (survives refresh) | ✅ |
-| | WhatsApp parity — same AI answers on WhatsApp (Meta Cloud API) | ✅ |
+| | WhatsApp parity — same AI answers on WhatsApp (QR-paired number) | ✅ |
 | **Booking integrity** | Atomic slot locking — no double-bookings | ✅ |
 | | Email OTP verification before confirming | ✅ |
 | | Configurable fields to collect (name/email/phone/notes) | ✅ |
@@ -126,7 +126,7 @@ Next.js 15 / React 19 dashboard. Six main sections — perfect for alternating f
 ### 6️⃣ Integrations — *"Plays nicely with your stack"*
 - **Google Calendar** two-way sync
 - **Outlook Calendar** two-way sync
-- **WhatsApp** (Meta WhatsApp Cloud API — verified by `graph.facebook.com` client)
+- **WhatsApp** (QR-paired business number — verified by `graph.facebook.com` client)
 - **SMTP email** with delivery tracking
 - **Widget embed-code generator** + API keys with rotation
 

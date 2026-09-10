@@ -36,7 +36,7 @@ DATEISH_TOKEN_RE = re.compile(
 # the customer chat for 30+ seconds (C4). Values are deliberate for a
 # serverless/free-tier model; raise if a faster provider is configured.
 RERANK_HARD_TIMEOUT_SECONDS = 6.0
-MAIN_LLM_HARD_TIMEOUT_SECONDS = 20.0
+MAIN_LLM_HARD_TIMEOUT_SECONDS = 35.0
 
 _RAG_SKIP_PATTERNS = (
     re.compile(r"^\s*\d{1,2}(:\d{2})\s*(am|pm)?\s*$", flags=re.IGNORECASE),

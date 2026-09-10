@@ -12,6 +12,7 @@
 #   redis        → Redis cache/queue
 #   backend      → Your FastAPI Python API (port 8005)
 #   admin-panel  → Your Next.js admin dashboard (port 3002)
+#   wa-gateway   → WhatsApp Baileys sidecar (internal :3100, one socket per org)
 #   cloudflared  → Cloudflare Tunnel (makes backend + admin publicly accessible)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -111,6 +112,30 @@ services:
     networks:
       - app-network
 
+    # ── WhatsApp Gateway (Baileys QR transport) ──────────────────────────
+  # One WhatsApp Web socket per organization. Internal only (no published
+  # ports): the FastAPI backend is the sole client, authenticated via
+  # WA_GATEWAY_SERVICE_KEY. Auth state persists in the wa_auth volume.
+  wa-gateway:
+    build:
+      context: ./wa-gateway
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - PORT=3100
+      - WA_GATEWAY_SERVICE_KEY=${WA_GATEWAY_SERVICE_KEY}
+      - WA_AUTH_DIR=/data/wa-auth
+      - LOG_LEVEL=info
+    volumes:
+      - wa_auth:/data/wa-auth
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3100/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
   # ── Next.js Super Admin Panel (Phase 0) ──────────────────────────────────
   super-admin:
     build:
@@ -188,3 +213,4 @@ networks:
 volumes:
   postgres_data:
   org_logos:
+  wa_auth:

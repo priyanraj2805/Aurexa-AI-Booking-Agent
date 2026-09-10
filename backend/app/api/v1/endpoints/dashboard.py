@@ -1991,88 +1991,9 @@ async def get_conversation_messages(
 
 
 # ── WhatsApp Integration Config ──────────────────────────────
-
-
-class WhatsAppConfigResponse(BaseModel):
-    whatsapp_enabled: bool = False
-    whatsapp_phone_number_id: Optional[str] = None
-    whatsapp_business_account_id: Optional[str] = None
-    whatsapp_verify_token: Optional[str] = None
-    whatsapp_api_token_set: bool = False
-    webhook_url: str = ""
-
-
-class WhatsAppConfigUpdate(BaseModel):
-    whatsapp_enabled: Optional[bool] = None
-    whatsapp_phone_number_id: Optional[str] = None
-    whatsapp_business_account_id: Optional[str] = None
-    whatsapp_verify_token: Optional[str] = None
-    whatsapp_api_token: Optional[str] = None
-
-
-@router.get("/whatsapp-config", response_model=WhatsAppConfigResponse)
-async def get_whatsapp_config(
-    request: Request,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Get WhatsApp integration configuration."""
-    result = await db.execute(select(OrgConfig).where(OrgConfig.org_id == user.org_id))
-    config = result.scalars().first()
-    if not config:
-        raise HTTPException(status_code=404, detail="Configuration not found")
-
-    base_url = str(request.base_url).rstrip("/")
-    webhook_url = f"{base_url}/api/v1/whatsapp/webhook"
-
-    return WhatsAppConfigResponse(
-        whatsapp_enabled=config.whatsapp_enabled or False,
-        whatsapp_phone_number_id=config.whatsapp_phone_number_id,
-        whatsapp_business_account_id=config.whatsapp_business_account_id,
-        whatsapp_verify_token=config.whatsapp_verify_token,
-        whatsapp_api_token_set=config.whatsapp_api_token is not None,
-        webhook_url=webhook_url,
-    )
-
-
-@router.put("/whatsapp-config", response_model=WhatsAppConfigResponse)
-async def update_whatsapp_config(
-    request: Request,
-    update: WhatsAppConfigUpdate,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Update WhatsApp integration configuration."""
-    result = await db.execute(select(OrgConfig).where(OrgConfig.org_id == user.org_id))
-    config = result.scalars().first()
-    if not config:
-        raise HTTPException(status_code=404, detail="Configuration not found")
-
-    if update.whatsapp_enabled is not None:
-        config.whatsapp_enabled = update.whatsapp_enabled
-    if update.whatsapp_phone_number_id is not None:
-        config.whatsapp_phone_number_id = update.whatsapp_phone_number_id
-    if update.whatsapp_business_account_id is not None:
-        config.whatsapp_business_account_id = update.whatsapp_business_account_id
-    if update.whatsapp_verify_token is not None:
-        config.whatsapp_verify_token = update.whatsapp_verify_token
-    if update.whatsapp_api_token is not None:
-        config.whatsapp_api_token = update.whatsapp_api_token
-
-    await db.commit()
-    await db.refresh(config)
-
-    base_url = str(request.base_url).rstrip("/")
-    webhook_url = f"{base_url}/api/v1/whatsapp/webhook"
-
-    return WhatsAppConfigResponse(
-        whatsapp_enabled=config.whatsapp_enabled or False,
-        whatsapp_phone_number_id=config.whatsapp_phone_number_id,
-        whatsapp_business_account_id=config.whatsapp_business_account_id,
-        whatsapp_verify_token=config.whatsapp_verify_token,
-        whatsapp_api_token_set=config.whatsapp_api_token is not None,
-        webhook_url=webhook_url,
-    )
+# NOTE: Meta Cloud API config removed (QR/Baileys transport is the only
+# WhatsApp channel now). Pairing lives in endpoints/whatsapp_qr.py and
+# connection state in whatsapp_connections.
 
 
 # ══════════════════════════════════════════════════

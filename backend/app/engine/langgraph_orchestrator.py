@@ -1068,7 +1068,8 @@ async def process_message_with_graph(
         else:
             assistant_message = "Please verify your OTP code to continue."
     elif phone_otp_required:
-        # Phone verification to confirm booking — Zavu SMS
+        # Phone verification to confirm booking — provider abstraction
+        # (WhatsApp active, SMS fallback), same as legacy path + /generate.
         phone = str(chat_session.collected_data.get("phone") or "").strip()
         phone_event_key = f"otp_phone:{session_id}:{phone}:{chat_session.collected_data.get('date','')}:{chat_session.collected_data.get('time','')}"
         effect_state = _active_effect_state(chat_session)
@@ -1082,12 +1083,16 @@ async def process_message_with_graph(
                 otp_code = await otp_crud.generate_otp(
                     db, chat_session.session_id, channel="phone", resend=False
                 )
-                # Send via Zavu sms_oneway
+                # Delivery via provider abstraction (WhatsApp active, SMS fallback)
                 try:
-                    from app.core.sms import send_phone_otp_sms
-                    await send_phone_otp_sms(phone, otp_code)
+                    from app.core.config import settings as _cfg_otp
+                    from app.core.otp_delivery.whatsapp_provider import WhatsAppProvider
+                    from app.core.otp_delivery.sms_provider import SMSProvider
+                    _otp_provider = WhatsAppProvider() if (getattr(_cfg_otp, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else SMSProvider()
+                    await _otp_provider.send_otp(phone, otp_code, str(chat_session.session_id))
+                    logger.info(f"Phone OTP ({_otp_provider.__class__.__name__}) sent for {session_id}")
                 except Exception as sms_err:
-                    logger.error(f"Zavu phone OTP send failed for {session_id}: {sms_err}")
+                    logger.error(f"Phone OTP send failed for {session_id}: {sms_err}")
                     raise
                 sent_keys.append(phone_event_key)
                 await crud_chat.update_chat_session(db, session_id, chat_session)
@@ -1107,8 +1112,10 @@ async def process_message_with_graph(
         if otp_error:
             field_meta["validation_error"] = otp_error
         masked = phone[:4] + "***" + phone[-2:] if len(phone) > 6 else phone[:3] + "***"
+        from app.core.config import settings as _cfg_via
+        via = "WhatsApp" if (getattr(_cfg_via, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else "SMS"
         assistant_message = (
-            f"Perfect! I've sent a verification code to {masked} via SMS. "
+            f"Perfect! I've sent a verification code to {masked} via {via}. "
             "Please enter the 6-digit code here to confirm your booking."
         )
     elif directive == "REQUEST_CONFIRMATION":

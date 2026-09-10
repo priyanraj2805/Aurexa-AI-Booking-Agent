@@ -48,6 +48,10 @@ class AuditAction(str, Enum):
     IMPERSONATION_START = "impersonation.start"
     IMPERSONATION_END = "impersonation.end"
 
+    # WhatsApp QR-gateway operations (Baileys transport)
+    WHATSAPP_QR_CONNECT = "whatsapp.qr_connect"
+    WHATSAPP_QR_DISCONNECT = "whatsapp.qr_disconnect"
+
 
 class AuditLogCreate(BaseModel):
     """Schema for creating audit log entries."""

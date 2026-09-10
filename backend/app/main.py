@@ -30,6 +30,14 @@ setup_logging()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start background tasks on startup, cancel them on shutdown."""
+    # Production Razorpay config validation (live mode must be HTTPS etc.)
+    try:
+        errs = settings.validate_production_razorpay_config()
+        if errs:
+            import logging as _lg
+            _lg.getLogger(__name__).warning("Razorpay production config issues: %s", "; ".join(errs))
+    except Exception:
+        pass
     cleanup_task = asyncio.create_task(run_cleanup_loop())
     start_debouncer()
     yield
@@ -58,7 +66,6 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 CSRF_EXEMPT_PATHS = {
     "/api/v1/chat/message/dispatch",
-    "/api/v1/whatsapp/webhook",
     "/api/v1/auth/security/otp/verify",
     "/api/v1/auth/security/otp/generate",
     "/api/v1/auth/otp/verify",

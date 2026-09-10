@@ -1107,6 +1107,10 @@
             fieldMeta.placeholder || "Type a message...",
           );
           this._renderSkipAction(fieldMeta);
+        } else if (directive === "REQUIRE_PAYMENT") {
+          this._clearDirectiveCards();
+          this._appendPaymentCard(fieldMeta || {});
+          this._clearSkipAction();
         } else if (directive === "REQUIRE_OTP_MODAL") {
           this._clearDirectiveCards();
           this._appendOTPInterface(fieldMeta || {});
@@ -2304,6 +2308,103 @@
       };
 
       this._scrollToBottom();
+    }
+
+    async _loadRazorpay() {
+      if (window.Razorpay) return true;
+      try {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = "https://checkout.razorpay.com/v1/checkout.js";
+          s.onload = resolve;
+          s.onerror = () => reject(new Error("razorpay load failed"));
+          document.head.appendChild(s);
+        });
+        return !!window.Razorpay;
+      } catch { return false; }
+    }
+
+    _appendPaymentCard(fieldMeta = {}) {
+      const div = document.createElement("div");
+      div.className = "message agent payment-card";
+      div.setAttribute("role", "form");
+      const amountPaise = Number(fieldMeta.amount_paise || 0);
+      const amountDisplay = fieldMeta.amount_display || (amountPaise ? `₹${(amountPaise/100).toFixed(2)}` : "₹500.00");
+      const currency = fieldMeta.currency || "INR";
+      const h = document.createElement("div");
+      h.className = "card-header";
+      h.textContent = "Payment Required";
+      const p = document.createElement("p");
+      p.style.cssText = "font-size:13px;color:var(--text-sec);margin:8px 0;";
+      p.textContent = `Your appointment total is ${amountDisplay} (${currency}). Please pay to confirm your booking. UPI Intent on mobile, QR on desktop via Razorpay Checkout.`;
+      const btn = document.createElement("button");
+      btn.textContent = `Pay ${amountDisplay}`;
+      btn.style.cssText = "margin-top:10px;padding:12px 20px;border:none;border-radius:10px;background:var(--primary);color:#fff;font-weight:700;width:100%;cursor:pointer;";
+      const status = document.createElement("div");
+      status.id = "payment-status";
+      status.style.cssText = "font-size:12px;color:var(--text-sec);margin-top:8px;";
+      btn.onclick = async () => {
+        btn.disabled = true; btn.textContent = "Opening Razorpay…"; status.textContent = "";
+        try {
+          const ok = await this._loadRazorpay();
+          if (!ok) throw new Error("Failed to load Razorpay");
+          const base = CONFIG.apiBase.replace(/\/api\/v1\/?$/, "") + "/api/v1";
+          const orderRes = await fetch(`${base}/widget/payment/order`, {
+            method: "POST",
+            headers: {"Content-Type":"application/json", "X-Widget-Token": CONFIG.widgetToken || ""},
+            body: JSON.stringify({session_id: this.sessionId, widget_token: CONFIG.widgetToken})
+          });
+          if (!orderRes.ok) {
+            const e = await orderRes.json().catch(()=>({}));
+            throw new Error(e.detail || "Failed to create order");
+          }
+          const order = await orderRes.json();
+          const options = {
+            key: order.key,
+            amount: order.amount_paise,
+            currency: order.currency || "INR",
+            name: this._agentConfig?.business_name || "Aurexa",
+            description: "Appointment payment",
+            order_id: order.order_id,
+            handler: async (resp) => {
+              status.textContent = "Verifying payment…";
+              try {
+                const vr = await fetch(`${base}/widget/payment/verify`, {
+                  method: "POST",
+                  headers: {"Content-Type":"application/json", "X-Widget-Token": CONFIG.widgetToken || ""},
+                  body: JSON.stringify({
+                    session_id: this.sessionId,
+                    razorpay_order_id: resp.razorpay_order_id,
+                    razorpay_payment_id: resp.razorpay_payment_id,
+                    razorpay_signature: resp.razorpay_signature,
+                    widget_token: CONFIG.widgetToken
+                  })
+                });
+                const vj = await vr.json().catch(()=>({}));
+                if (!vr.ok) throw new Error(vj.detail || "Verification failed");
+                status.textContent = "Payment successful ✅";
+                this._appendSystem("Payment successful ✅ Appointment confirmed ✅");
+                // Trigger next step: ask backend to confirm booking (dispatch confirm)
+                this._input.value = "confirm";
+                await this._handleSend();
+              } catch (ve) {
+                status.textContent = "Payment verification failed: " + (ve.message || ve);
+                btn.disabled = false; btn.textContent = `Pay ${amountDisplay}`;
+              }
+            },
+            modal: { ondismiss: () => { btn.disabled = false; btn.textContent = `Pay ${amountDisplay}`; status.textContent = "Payment was not completed. Your appointment has not been confirmed. You can retry."; } },
+            theme: {color: this._agentConfig?.brand_color || "#3399CC"}
+          };
+          const rzp = new window.Razorpay(options);
+          rzp.on("payment.failed", (r) => { status.textContent = "Payment failed: " + (r.error?.description || "try again"); btn.disabled = false; btn.textContent = `Pay ${amountDisplay}`; });
+          rzp.open();
+        } catch (e) {
+          status.textContent = "Error: " + (e.message || e);
+          btn.disabled = false; btn.textContent = `Pay ${amountDisplay}`;
+        }
+      };
+      div.appendChild(h); div.appendChild(p); div.appendChild(btn); div.appendChild(status);
+      this._msgList.appendChild(div); this._scrollToBottom();
     }
 
     _appendConfirmedCard(message, fieldMeta = {}) {

@@ -10,7 +10,7 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "DotStark AI — AI-Powered Booking Assistant",
+  title: "Aurexa — AI-Powered Booking Assistant",
   description: "Automate your bookings with an intelligent AI agent. Works on your website and WhatsApp.",
 };
 

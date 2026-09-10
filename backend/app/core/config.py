@@ -68,8 +68,8 @@ class Settings(BaseSettings):
     FIREBASE_PROJECT_ID: str = os.getenv("FIREBASE_PROJECT_ID", "dotstark-833ec")
     FIREBASE_APP_ID: str = os.getenv("FIREBASE_APP_ID", "1:287417969813:web:7ba50454917fe54d4f3f9c")
 
-    # WhatsApp
-    WHATSAPP_APP_SECRET: str = os.getenv("WHATSAPP_APP_SECRET", "")
+    # NOTE: Meta Cloud API WhatsApp removed (QR/Baileys transport is the only
+    # WhatsApp channel now). OTP delivery keeps its own WHATSAPP_OTP_* settings.
 
     # Zavu SMS (phone OTP via Zavu shared/one-way sender)
     ZAVU_API_KEY: str = os.getenv("ZAVU_API_KEY", "")
@@ -116,6 +116,60 @@ class Settings(BaseSettings):
     SUPPORT_SERVICE_KEY: str = os.getenv(
         "SUPPORT_SERVICE_KEY", "dev_support_service_key_2026"
     )
+
+    # ── Razorpay (platform account for Route payouts) ────────────────────
+    # Booking payments are created on the platform account and split to
+    # providers via Razorpay Route. No per-org keys, no OAuth tokens.
+    RAZORPAY_PARTNER_MODE: str = os.getenv("RAZORPAY_PARTNER_MODE", "test")  # test|live
+    RAZORPAY_WEBHOOK_SECRET: str = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
+    RAZORPAY_KEY_ID: str = os.getenv("RAZORPAY_KEY_ID", "")
+    RAZORPAY_KEY_SECRET: str = os.getenv("RAZORPAY_KEY_SECRET", "")
+    # Default appointment price in paise (e.g., 50000 = ₹500). 0 = free/no payment.
+    RAZORPAY_DEFAULT_AMOUNT_PAISE: int = int(os.getenv("RAZORPAY_DEFAULT_AMOUNT_PAISE", "0"))
+
+    # ── Razorpay Route (provider payouts, additive to legacy sub-merchant flow) ──
+    # Kill switch: when false, all Route endpoints return 404 and no Route API
+    # call is made. Data is preserved. TEST mode only for initial rollout.
+    # Platform credentials are the existing RAZORPAY_KEY_ID/SECRET (rzp_*);
+    # Route MUST NOT read per-org OAuth tokens from OrgConfig.
+    RAZORPAY_ROUTE_ENABLED: bool = os.getenv("RAZORPAY_ROUTE_ENABLED", "false").lower() in ("true", "1", "yes")
+    RAZORPAY_ROUTE_API_BASE: str = os.getenv("RAZORPAY_ROUTE_API_BASE", "https://api.razorpay.com")
+    # Default platform commission in basis points (1000 = 10%). Integer math only.
+    # Per-transfer value is persisted; this is only the fallback default.
+    RAZORPAY_ROUTE_COMMISSION_BPS: int = int(os.getenv("RAZORPAY_ROUTE_COMMISSION_BPS", "1000"))
+
+    # ── OTP Phone Provider (SMS ↔ WhatsApp) ──────────────────────────────
+    # whatsapp = active (Meta Cloud API), sms = Zavu sms_oneway fallback
+    OTP_PHONE_PROVIDER: str = os.getenv("OTP_PHONE_PROVIDER", "whatsapp")  # whatsapp | sms
+    WHATSAPP_OTP_PHONE_NUMBER_ID: str = os.getenv("WHATSAPP_OTP_PHONE_NUMBER_ID", "")
+    WHATSAPP_OTP_ACCESS_TOKEN: str = os.getenv("WHATSAPP_OTP_ACCESS_TOKEN", "")
+    WHATSAPP_OTP_API_VERSION: str = os.getenv("WHATSAPP_OTP_API_VERSION", "v20.0")
+    WHATSAPP_OTP_TEMPLATE_NAME: str = os.getenv("WHATSAPP_OTP_TEMPLATE_NAME", "")  # empty = plain text for test
+    WHATSAPP_OTP_LANGUAGE: str = os.getenv("WHATSAPP_OTP_LANGUAGE", "en_US")
+
+    # ── WhatsApp QR gateway (Baileys transport, per-org sessions) ─────────
+    # Shared secret for backend<->wa-gateway HTTP auth (both sides must match).
+    WA_GATEWAY_SERVICE_KEY: str = os.getenv("WA_GATEWAY_SERVICE_KEY", "")
+    # Gateway base URL as seen from the backend container.
+    WA_GATEWAY_BASE_URL: str = os.getenv("WA_GATEWAY_BASE_URL", "http://wa-gateway:3100")
+
+    def validate_production_razorpay_config(self) -> list[str]:
+        """Return list of config errors when MODE=live. Does not log secrets."""
+        errors: list[str] = []
+        if (self.RAZORPAY_PARTNER_MODE or "test").lower() == "live":
+            if not self.RAZORPAY_KEY_ID or not str(self.RAZORPAY_KEY_ID).startswith("rzp_"):
+                errors.append("RAZORPAY_KEY_ID must be a platform rzp_* key in live mode")
+            if not self.RAZORPAY_KEY_SECRET:
+                errors.append("RAZORPAY_KEY_SECRET is required in live mode")
+            if not self.RAZORPAY_WEBHOOK_SECRET:
+                errors.append("RAZORPAY_WEBHOOK_SECRET is required in live mode")
+            if self.FRONTEND_URL and ("localhost" in self.FRONTEND_URL or self.FRONTEND_URL.startswith("http://")):
+                # Only warn if frontend is still localhost in live mode — indicates misconfiguration
+                errors.append("FRONTEND_URL should be https production domain in live mode (affects webhook URLs)")
+            if self.RAZORPAY_ROUTE_ENABLED:
+                if not (0 <= (self.RAZORPAY_ROUTE_COMMISSION_BPS or 0) <= 10000):
+                    errors.append("RAZORPAY_ROUTE_COMMISSION_BPS must be between 0 and 10000")
+        return errors
 
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> str:

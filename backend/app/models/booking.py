@@ -94,6 +94,13 @@ class Booking(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+    # ── Payment snapshot (paid appointment) ─────────────────────────────
+    payment_status = Column(String(20), nullable=False, default="not_required", server_default="not_required")  # not_required | pending | paid | failed | expired
+    razorpay_order_id = Column(String(64), nullable=True, index=True)
+    razorpay_payment_id = Column(String(64), nullable=True, index=True)
+    amount_paise = Column(Integer, nullable=True)
+    currency = Column(String(10), nullable=True)
+
     # Attendance tracking (online vs offline handled differently)
     attendance_status = Column(
         String(20),

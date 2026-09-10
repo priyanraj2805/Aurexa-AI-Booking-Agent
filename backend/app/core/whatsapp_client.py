@@ -1,144 +1,16 @@
 """
-WhatsApp Cloud API client for sending outbound messages.
+WhatsApp reply formatter (transport-agnostic).
 
-Uses Meta's Graph API v17.0:
-https://graph.facebook.com/v17.0/{phone_number_id}/messages
+Converts engine ActionPayloads into plain reply dicts consumed by whichever
+transport delivers them (Baileys gateway via the internal QR inbound route).
+The old Meta Cloud API send functions were removed with the Cloud transport;
+see wa-gateway/src/send.js for Baileys rendering.
 """
 
 import logging
-import httpx
-from typing import Optional, List, Dict
+from typing import Dict, List
 
 logger = logging.getLogger(__name__)
-
-GRAPH_API_BASE = "https://graph.facebook.com/v17.0"
-
-
-async def send_typing_indicator(
-    phone_number_id: str,
-    api_token: str,
-    to_phone: str,
-    is_typing: bool = True,
-) -> dict:
-    """
-    Send a typing indicator to show the user that the bot is composing a response.
-    WhatsApp Cloud API supports "typing_on" and "typing_off" signals.
-    """
-    url = f"{GRAPH_API_BASE}/{phone_number_id}/messages"
-    headers = {
-        "Authorization": f"Bearer {api_token}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_phone,
-        "type": "typing_signal",
-        "typing_signal": {"type": "typing_on" if is_typing else "typing_off"},
-    }
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            return resp.json()
-    except Exception as e:
-        logger.warning(f"Failed to send typing indicator: {e}")
-        return {}
-
-
-async def send_text_message(
-    phone_number_id: str,
-    api_token: str,
-    to_phone: str,
-    text: str,
-) -> dict:
-    """Send a plain text message via WhatsApp Cloud API."""
-    url = f"{GRAPH_API_BASE}/{phone_number_id}/messages"
-    headers = {
-        "Authorization": f"Bearer {api_token}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_phone,
-        "type": "text",
-        "text": {"body": text},
-    }
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
-
-
-async def send_interactive_buttons(
-    phone_number_id: str,
-    api_token: str,
-    to_phone: str,
-    body_text: str,
-    buttons: List[Dict[str, str]],
-) -> dict:
-    """
-    Send an interactive button message (max 3 buttons).
-    Each button: {"id": "btn_confirm", "title": "Confirm"}
-    """
-    url = f"{GRAPH_API_BASE}/{phone_number_id}/messages"
-    headers = {
-        "Authorization": f"Bearer {api_token}",
-        "Content-Type": "application/json",
-    }
-    button_rows = [
-        {"type": "reply", "reply": {"id": b["id"], "title": b["title"][:20]}}
-        for b in buttons[:3]
-    ]
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_phone,
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "body": {"text": body_text},
-            "action": {"buttons": button_rows},
-        },
-    }
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
-
-
-async def send_interactive_list(
-    phone_number_id: str,
-    api_token: str,
-    to_phone: str,
-    body_text: str,
-    button_text: str,
-    sections: List[Dict],
-) -> dict:
-    """
-    Send an interactive list message for selections (e.g., time slots).
-    sections: [{"title": "Available Times", "rows": [{"id": "...", "title": "...", "description": "..."}]}]
-    """
-    url = f"{GRAPH_API_BASE}/{phone_number_id}/messages"
-    headers = {
-        "Authorization": f"Bearer {api_token}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_phone,
-        "type": "interactive",
-        "interactive": {
-            "type": "list",
-            "body": {"text": body_text},
-            "action": {
-                "button": button_text[:20],
-                "sections": sections,
-            },
-        },
-    }
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
 
 
 def format_action_for_whatsapp(action_payload) -> dict:

@@ -243,6 +243,9 @@ async def check_expiring_subscriptions(db: AsyncSession, now: datetime | None = 
         try:
             from app.core.mail import _send_email_sync
 
+            from app.core.config import settings as _settings
+
+            _frontend_base = (_settings.FRONTEND_URL or "http://localhost:3002").rstrip("/")
             subject = f"Your {plan_name} plan expires in {days_left} days"
             body_html = f"""
             <div style="font-family: sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 12px;">
@@ -250,7 +253,7 @@ async def check_expiring_subscriptions(db: AsyncSession, now: datetime | None = 
               <p style="margin: 0 0 12px; color: #334155;">Hi {row['owner_name'] or 'there'},</p>
               <p style="margin: 0 0 12px; color: #334155;">Your <strong>{plan_name}</strong> plan for <strong>{org_name}</strong> expires on <strong>{expiry.strftime('%Y-%m-%d')}</strong> — in {days_left} days.</p>
               <p style="margin: 0 0 16px; color: #334155;">Renew now from your admin dashboard to avoid service interruption and keep your bookings active.</p>
-              <a href="{'http://localhost:3002/dashboard/billing'}" style="display:inline-block; background:#6366f1; color:#fff; padding:10px 16px; border-radius:8px; text-decoration:none; font-weight:600;">Renew in Billing & Plans</a>
+              <a href="{_frontend_base}/dashboard/billing" style="display:inline-block; background:#6366f1; color:#fff; padding:10px 16px; border-radius:8px; text-decoration:none; font-weight:600;">Renew in Billing & Plans</a>
               <p style="margin: 16px 0 0; color: #64748b; font-size: 12px;">If you already renewed, please ignore this reminder.</p>
             </div>
             """

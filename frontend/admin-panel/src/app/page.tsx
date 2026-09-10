@@ -62,9 +62,9 @@ export default function LandingPage() {
       <header className="relative z-10 flex items-center justify-between px-6 py-4 max-w-7xl mx-auto">
         <Link href="/" className="flex items-center gap-2">
           <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-gradient-to-br from-[#FF6B00] to-orange-600 text-white font-bold text-sm">
-            DS
+            A
           </div>
-          <span className="text-xl font-bold tracking-tight">DotStark AI</span>
+          <span className="text-xl font-bold tracking-tight">Aurexa</span>
         </Link>
         <nav className="hidden md:flex items-center gap-8">
           <button
@@ -112,12 +112,12 @@ export default function LandingPage() {
               AI-Powered Booking Assistant
             </div>
             <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold leading-tight mb-4">
-              <span className="text-white">DotStark AI</span> —{" "}
+              <span className="text-white">Aurexa</span> —{" "}
               <span className="text-[#FF6B00]">Your 24/7 Booking Agent</span>{" "}
               <span className="text-white">That Never Sleeps</span>
             </h1>
             <p className="text-lg font-medium text-white mb-3 max-w-xl mx-auto lg:mx-0">
-              DotStark AI is an AI-powered booking and appointment management platform for businesses.
+              Aurexa is an AI-powered booking and appointment management platform for businesses.
             </p>
             <p className="text-base text-zinc-400 mb-6 max-w-xl mx-auto lg:mx-0">
               Automatically handle appointments, answer questions, and confirm bookings. Integrate with your
@@ -166,7 +166,7 @@ export default function LandingPage() {
                   <Bot className="w-4 h-4" />
                 </div>
                 <div>
-                  <p className="text-sm font-semibold">DotStark AI Assistant</p>
+                  <p className="text-sm font-semibold">Aurexa Assistant</p>
                   <p className="text-xs text-zinc-500">Online — Ready to help</p>
                 </div>
                 <span className="ml-auto h-2 w-2 rounded-full bg-emerald-500 animate-pulse" aria-hidden />
@@ -174,7 +174,7 @@ export default function LandingPage() {
 
               <div className="space-y-3">
                 <div className="rounded-2xl bg-zinc-800/80 border border-zinc-700 px-4 py-3 text-sm text-zinc-200">
-                  Hi! I&apos;m DotStark AI — I can book your appointment in seconds. What service do you need?
+                  Hi! I&apos;m Aurexa — I can book your appointment in seconds. What service do you need?
                 </div>
                 <div className="ml-auto max-w-[80%] rounded-2xl bg-[#FF6B00] px-4 py-2.5 text-sm text-white">
                   I need a consultation tomorrow at 10am
@@ -274,7 +274,7 @@ export default function LandingPage() {
         <div className="max-w-4xl mx-auto text-center">
           <h2 className="text-3xl md:text-4xl font-bold mb-4">Ready to Automate Your Bookings?</h2>
           <p className="text-zinc-400 mb-8 max-w-2xl mx-auto">
-            Join businesses using DotStark AI to handle bookings 24/7, sync calendars, and create Google Meet
+            Join businesses using Aurexa to handle bookings 24/7, sync calendars, and create Google Meet
             links automatically.
           </p>
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
@@ -300,20 +300,17 @@ export default function LandingPage() {
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2">
             <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-gradient-to-br from-[#FF6B00] to-orange-600 text-white font-bold text-xs">
-              DS
+              A
             </div>
-            <span className="text-sm text-zinc-500">© 2026 DotStark AI. All rights reserved.</span>
+            <span className="text-sm text-zinc-500">© 2026 Aurexa. All rights reserved.</span>
           </div>
           <div className="flex items-center gap-6 text-sm text-zinc-500">
             <Link href="/privacy-policy" className="hover:text-white transition-colors">
               Privacy Policy
             </Link>
-            <a href="#" className="hover:text-white transition-colors">
-              Terms
-            </a>
-            <a href="#" className="hover:text-white transition-colors">
+            <Link href="/privacy-policy#contact" className="hover:text-white transition-colors">
               Contact
-            </a>
+            </Link>
           </div>
         </div>
       </footer>
