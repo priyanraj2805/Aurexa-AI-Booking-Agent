@@ -1,501 +1,416 @@
 """
-DotStark Email Templates
-Modern, design-system-aligned email templates matching the admin panel UI.
+DotStark Email Templates v2
+Clean, minimal, professional design.
 """
 from __future__ import annotations
 import html
 from typing import Optional
-from uuid import UUID
-from app.core.email_design_tokens import tokens, inline_styles, TEMPLATE_THEMES
+from app.core.email_design_tokens import tokens, TEMPLATE_THEMES
 
 
-def _escape(value: str) -> str:
-    """HTML escape a string."""
+def _esc(value: str) -> str:
+    """HTML escape."""
     return html.escape(str(value)) if value else ""
 
 
-def _build_base_template(
-    *,
-    theme_key: str,
-    preheader: str,
-    content_html: str,
-    footer_text: Optional[str] = None,
-) -> str:
-    """Build complete email with base layout."""
-    theme = TEMPLATE_THEMES.get(theme_key, TEMPLATE_THEMES["otp"])
-    footer = footer_text or f"© {2026} DotStark AI Booking System"
-    
+def _base(title: str, preheader: str, content: str, *, header_color: str = "#ef5d25", header_icon: str = "", footer: str = "") -> str:
+    """Minimal base template. Everything inline for email client compat."""
+    footer = footer or "DotStark AI Booking System"
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="color-scheme" content="light dark">
-    <meta name="supported-color-schemes" content="light dark">
-    <title>{_escape(theme["header_title"])}</title>
-    {inline_styles()}
-    <!--[if mso]>
-    <style>
-        .email-card {{ border: 1px solid #e5e5e5 !important; }}
-        .email-button {{ background-color: #ef5d25 !important; }}
-    </style>
-    <![endif]-->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{_esc(title)}</title>
+<!--[if mso]>
+<noscript><xml>
+<o:OfficeDocumentSettings>
+<o:PixelsPerInch>96</o:PixelsPerInch>
+</o:OfficeDocumentSettings>
+</xml></noscript>
+<![endif]-->
 </head>
-<body>
-    <div class="email-wrapper" role="article" aria-roledescription="email" aria-label="{_escape(theme["header_title"])}">
-        <!-- Preheader text (hidden, shown in inbox preview) -->
-        <div style="display: none; max-height: 0; overflow: hidden; font-size: 1px; line-height: 1px; color: transparent;">
-            {_escape(preheader)}
-        </div>
-        
-        <div class="email-card" role="main">
-            <!-- Header -->
-            <header class="email-header" style="background: {theme['header_bg']};">
-                <div class="email-header-icon" style="background: rgba(255,255,255,0.2);" aria-hidden="true">
-                    {theme["header_icon"]}
-                </div>
-                <h1 class="email-header-title" style="color: var(--color-primary-foreground);">
-                    {_escape(theme["header_title"])}
-                </h1>
-                <p class="email-header-subtitle" style="color: rgba(255,255,255,0.85);">
-                    {_escape(theme["header_subtitle"])}
-                </p>
-            </header>
-            
-            <!-- Content -->
-            <main class="email-content">
-                {content_html}
-            </main>
-            
-            <!-- Footer -->
-            <footer class="email-footer">
-                <p class="email-footer-text">{_escape(footer)}</p>
-            </footer>
-        </div>
-    </div>
+<body style="margin:0;padding:0;background-color:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color:#f4f4f5;">
+<tr><td align="center" style="padding:40px 16px;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="480" style="max-width:480px;background-color:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+
+<!-- HEADER -->
+<tr><td style="background-color:{header_color};padding:32px 32px 28px;text-align:center;">
+{f'<div style="width:48px;height:48px;margin:0 auto 12px;background:rgba(255,255,255,0.2);border-radius:50%;line-height:48px;font-size:24px;color:#fff;">{header_icon}</div>' if header_icon else ''}
+<h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:700;letter-spacing:-0.3px;">{_esc(title)}</h1>
+</td></tr>
+
+<!-- CONTENT -->
+<tr><td style="padding:28px 32px 32px;">
+{content}
+</td></tr>
+
+<!-- FOOTER -->
+<tr><td style="padding:16px 32px;border-top:1px solid #e5e5e5;text-align:center;">
+<p style="margin:0;font-size:11px;color:#a1a1aa;">{_esc(footer)}</p>
+</td></tr>
+
+</table>
+</td></tr>
+</table>
 </body>
 </html>"""
 
 
-def _build_greeting(name: str) -> str:
-    """Build greeting section."""
-    safe_name = _escape(name)
-    return f"""
-    <p style="margin: 0 0 8px; font-size: {tokens.typography.font_size_lg}; color: var(--color-foreground);">
-        Hello <strong style="color: var(--color-primary);">{safe_name}</strong>,
-    </p>
-    <p style="margin: 0 0 {tokens.spacing.xl}; font-size: {tokens.typography.font_size_md}; line-height: {tokens.typography.line_height_relaxed}; color: var(--color-muted-foreground);">
-        Great news! Your appointment has been successfully booked. We can't wait to see you!
-    </p>"""
+def _divider() -> str:
+    return '<hr style="border:none;border-top:1px solid #e5e5e5;margin:20px 0;">'
 
 
-def _build_appointment_card(details: dict) -> str:
-    """Build appointment details card."""
-    raw_source = details.get("source_channel") or "Web Widget"
-    date = _escape(details.get("date") or "TBD")
-    time = _escape(details.get("time") or "TBD")
-    source = _escape(raw_source)
-    source_emoji = "💬" if raw_source == "Web Widget" else "📱"
-    
-    return f"""
-    <div class="email-card-inner">
-        <div style="display: table; width: 100%; border-collapse: collapse; margin-bottom: {tokens.spacing.lg}; padding-bottom: {tokens.spacing.lg}; border-bottom: 1px dashed var(--color-border);">
-            <div style="display: table-row;">
-                <div style="display: table-cell; width: 48px; vertical-align: top;">
-                    <div style="width: 48px; height: 48px; background: var(--color-primary); border-radius: {tokens.radius.md}; display: flex; align-items: center; justify-content: center; font-size: 24px;" aria-hidden="true">📅</div>
-                </div>
-                <div style="display: table-cell; vertical-align: middle; padding-left: {tokens.spacing.md};">
-                    <p style="margin: 0; font-size: {tokens.typography.font_size_xs}; text-transform: uppercase; letter-spacing: 0.5px; color: var(--color-muted-foreground);">Appointment Details</p>
-                    <p style="margin: 4px 0 0; font-size: {tokens.typography.font_size_xl}; font-weight: {tokens.typography.font_weight_semibold}; color: var(--color-foreground);">{date}</p>
-                </div>
-            </div>
-        </div>
-        
-        <div class="email-grid">
-            <div class="email-grid-row">
-                <div class="email-grid-cell">
-                    <p class="email-label">⏰ Time</p>
-                    <p class="email-value">{time}</p>
-                </div>
-                <div class="email-grid-cell">
-                    <p class="email-label">{source_emoji} Booked via</p>
-                    <p class="email-value">{source}</p>
-                </div>
-            </div>
-        </div>
-    </div>"""
+def _label_value(label: str, value: str) -> str:
+    return f'<td style="width:50%;padding:8px 0;"><p style="margin:0 0 2px;font-size:11px;color:#71717a;text-transform:uppercase;letter-spacing:0.5px;">{_esc(label)}</p><p style="margin:0;font-size:14px;font-weight:600;color:#111111;">{_esc(value)}</p></td>'
 
 
-def _build_meeting_block(safe: dict, audience: str = "customer") -> str:
-    """Build meeting type/link status block."""
-    meeting_type = safe.get("meeting_type_snapshot") or "OFFLINE"
-    meeting_link_status = safe.get("meeting_link_status") or "NOT_REQUIRED"
-    meeting_link_url = safe.get("meeting_link_url") or ""
-    meeting_link_provider = safe.get("meeting_link_provider") or "Meeting Provider"
-    
-    if meeting_type != "ONLINE":
-        return f"""
-        <div class="meeting-block status-badge--offline">
-            <p style="margin: 0; font-size: {tokens.typography.font_size_sm}; color: var(--color-foreground);">
-                <strong>Meeting Type:</strong> Offline
-            </p>
-        </div>"""
-    
-    if meeting_link_status == "READY" and meeting_link_url:
-        safe_url = _escape(meeting_link_url)
-        safe_provider = _escape(meeting_link_provider)
-        return f"""
-        <div class="meeting-block meeting-block--ready">
-            <p style="margin: 0 0 8px; font-size: {tokens.typography.font_size_sm}; color: var(--color-foreground);">
-                <strong>Meeting Type:</strong> Online ({safe_provider})
-            </p>
-            <p style="margin: 0 0 8px; font-size: {tokens.typography.font_size_sm}; color: var(--color-success);">
-                <strong>Meeting link status:</strong> <span class="status-badge status-badge--ready">Ready</span>
-            </p>
-            <a href="{safe_url}" class="meeting-link">Join Meeting</a>
-        </div>"""
-    
-    if meeting_link_status == "UNAVAILABLE":
-        guidance = (
-            "Your meeting link is temporarily unavailable. Please retry shortly or contact support if this persists."
-            if audience == "customer"
-            else "Meeting link is temporarily unavailable. Please follow up with the customer and retry provider connection if needed."
-        )
-        return f"""
-        <div class="meeting-block meeting-block--unavailable">
-            <p style="margin: 0 0 8px; font-size: {tokens.typography.font_size_sm}; color: var(--color-foreground);">
-                <strong>Meeting Type:</strong> Online ({_escape(meeting_link_provider)})
-            </p>
-            <p style="margin: 0 0 8px; font-size: {tokens.typography.font_size_sm}; color: #92400e;">
-                <strong>Meeting link status:</strong> <span class="status-badge status-badge--unavailable">Unavailable</span>
-            </p>
-            <p style="margin: 0; font-size: {tokens.typography.font_size_sm}; line-height: {tokens.typography.line_height_relaxed}; color: #92400e;">{_escape(guidance)}</p>
-        </div>"""
-    
-    return f"""
-    <div class="meeting-block">
-        <p style="margin: 0 0 6px; font-size: {tokens.typography.font_size_sm}; color: var(--color-foreground);">
-            <strong>Meeting Type:</strong> Online ({_escape(meeting_link_provider)})
-        </p>
-        <p style="margin: 0; font-size: {tokens.typography.font_size_sm}; color: var(--color-muted-foreground);">
-            <strong>Meeting link status:</strong> {_escape(meeting_link_status)}
-        </p>
-    </div>"""
-
-
-def _build_dual_time_block(safe: dict) -> str:
-    """Build dual timezone block."""
-    user_timezone = safe.get("user_timezone")
-    user_slot_start_at = safe.get("user_slot_start_at")
-    user_slot_end_at = safe.get("user_slot_end_at")
-    org_timezone_snapshot = safe.get("org_timezone_snapshot")
-    org_slot_start_at = safe.get("org_slot_start_at")
-    org_slot_end_at = safe.get("org_slot_end_at")
-    
-    has_user = bool(user_timezone and user_slot_start_at and user_slot_end_at)
-    has_org = bool(org_timezone_snapshot and org_slot_start_at and org_slot_end_at)
-    
-    if not has_user and not has_org:
-        return ""
-    
-    rows = []
-    if has_user:
-        rows.append(f"""
-        <div class="email-grid-row">
-            <div class="email-grid-cell" style="width: 100%; padding: 0;">
-                <p class="email-label">User time ({_escape(user_timezone or "")})</p>
-                <p class="email-value">{_escape(user_slot_start_at or "")} → {_escape(user_slot_end_at or "")}</p>
-            </div>
-        </div>""")
-    if has_org:
-        rows.append(f"""
-        <div class="email-grid-row">
-            <div class="email-grid-cell" style="width: 100%; padding: 0; margin-top: {tokens.spacing.md};">
-                <p class="email-label">Business time ({_escape(org_timezone_snapshot or "")})</p>
-                <p class="email-value">{_escape(org_slot_start_at or "")} → {_escape(org_slot_end_at or "")}</p>
-            </div>
-        </div>""")
-    
-    return f"""
-    <div class="email-card-inner">
-        <p class="email-section-title">Time Context</p>
-        <div class="email-grid">
-            {''.join(rows)}
-        </div>
-    </div>"""
-
-
-def _build_info_box(text: str, icon: str = "⚠") -> str:
-    """Build info/warning box."""
-    return f"""
-    <div class="info-box">
-        <p class="info-box-title">{icon} <strong>Note</strong></p>
-        <p class="info-box-text">{_escape(text)}</p>
-    </div>"""
-
-
-def _build_admin_customer_card(safe: dict) -> str:
-    """Build customer info card for admin email."""
-    name = _escape(safe.get("name") or "Customer")
-    email = _escape(safe.get("email") or "")
-    phone = _escape(safe.get("phone") or "Not provided")
-    
-    return f"""
-    <div class="email-card-inner" style="background: linear-gradient(135deg, var(--color-info-bg) 0%, var(--color-muted) 100%); border-color: var(--color-info-border);">
-        <div style="display: table; width: 100%; border-collapse: collapse; margin-bottom: {tokens.spacing.lg};">
-            <div style="display: table-row;">
-                <div style="display: table-cell; width: 44px; vertical-align: top;">
-                    <div style="width: 44px; height: 44px; background: var(--color-info); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 20px;" aria-hidden="true">👤</div>
-                </div>
-                <div style="display: table-cell; vertical-align: middle; padding-left: {tokens.spacing.md};">
-                    <p style="margin: 0; font-size: {tokens.typography.font_size_xs}; text-transform: uppercase; letter-spacing: 0.5px; color: var(--color-muted-foreground);">Customer</p>
-                    <p style="margin: 4px 0 0; font-size: {tokens.typography.font_size_xl}; font-weight: {tokens.typography.font_weight_semibold}; color: var(--color-foreground);">{name}</p>
-                </div>
-                <div style="display: table-cell; vertical-align: middle; text-align: right;">
-                    <span style="background: var(--color-info-bg); color: var(--color-info); padding: 6px 12px; border-radius: {tokens.radius.pill}; font-size: {tokens.typography.font_size_xs}; font-weight: {tokens.typography.font_weight_medium};">New Customer</span>
-                </div>
-            </div>
-        </div>
-        
-        <div class="email-grid">
-            <div class="email-grid-row">
-                <div class="email-grid-cell">
-                    <div style="background: var(--color-card); border-radius: {tokens.radius.md}; padding: {tokens.spacing.md};">
-                        <p class="email-label">✉ Email</p>
-                        <p class="email-value" style="word-break: break-all;">{email}</p>
-                    </div>
-                </div>
-                <div class="email-grid-cell">
-                    <div style="background: var(--color-card); border-radius: {tokens.radius.md}; padding: {tokens.spacing.md};">
-                        <p class="email-label">📞 Phone</p>
-                        <p class="email-value">{phone}</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>"""
-
-
-def _build_admin_appointment_card(safe: dict) -> str:
-    """Build appointment card for admin email."""
-    date = _escape(safe.get("date") or "TBD")
-    time = _escape(safe.get("time") or "TBD")
-    source = _escape(safe.get("source_channel") or "Web Widget")
-    
-    return f"""
-    <div class="email-card-inner" style="background: linear-gradient(135deg, var(--color-success-bg) 0%, var(--color-muted) 100%); border-color: var(--color-success-border);">
-        <div style="display: table; width: 100%; border-collapse: collapse;">
-            <div style="display: table-row;">
-                <div style="display: table-cell; text-align: center; padding: 0 {tokens.spacing.md}; border-right: 1px solid var(--color-success-border);">
-                    <p style="margin: 0; font-size: {tokens.typography.font_size_xs}; text-transform: uppercase; letter-spacing: 0.5px; color: var(--color-success);">Date</p>
-                    <p style="margin: 6px 0 0; font-size: {tokens.typography.font_size_2xl}; font-weight: {tokens.typography.font_weight_bold}; color: var(--color-foreground);">{date}</p>
-                </div>
-                <div style="display: table-cell; text-align: center; padding: 0 {tokens.spacing.md}; border-right: 1px solid var(--color-success-border);">
-                    <p style="margin: 0; font-size: {tokens.typography.font_size_xs}; text-transform: uppercase; letter-spacing: 0.5px; color: var(--color-success);">Time</p>
-                    <p style="margin: 6px 0 0; font-size: {tokens.typography.font_size_2xl}; font-weight: {tokens.typography.font_weight_bold}; color: var(--color-foreground);">{time}</p>
-                </div>
-                <div style="display: table-cell; text-align: center; padding: 0 {tokens.spacing.md};">
-                    <p style="margin: 0; font-size: {tokens.typography.font_size_xs}; text-transform: uppercase; letter-spacing: 0.5px; color: var(--color-success);">Via</p>
-                    <p style="margin: 6px 0 0; font-size: {tokens.typography.font_size_md}; font-weight: {tokens.typography.font_weight_semibold}; color: var(--color-foreground);">{source}</p>
-                </div>
-            </div>
-        </div>
-    </div>"""
-
-
-def _build_cancelled_details(safe: dict) -> str:
-    """Build cancelled appointment details."""
-    date = _escape(safe.get("date") or "N/A")
-    time = _escape(safe.get("time") or "")
-    
-    return f"""
-    <div style="background: var(--color-destructive-bg); border: 1px solid var(--color-destructive-border); border-radius: {tokens.radius.lg}; padding: {tokens.spacing.lg}; margin-bottom: {tokens.spacing.lg}; display: inline-block; min-width: 200px; text-align: center;">
-        <p style="margin: 0 0 8px; font-size: {tokens.typography.font_size_xs}; text-transform: uppercase; letter-spacing: 0.5px; color: var(--color-destructive);">Former Appointment</p>
-        <p style="margin: 0; font-size: {tokens.typography.font_size_xl}; font-weight: {tokens.typography.font_weight_semibold}; color: var(--color-foreground);">{date}</p>
-        <p style="margin: 8px 0 0; font-size: {tokens.typography.font_size_md}; color: var(--color-muted-foreground);">{time}</p>
-    </div>"""
+def _status_pill(text: str, color: str, bg: str) -> str:
+    return f'<span style="display:inline-block;padding:3px 10px;border-radius:9999px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;background-color:{bg};color:{color};">{_esc(text)}</span>'
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Public Template Functions
+# PUBLIC TEMPLATES
 # ─────────────────────────────────────────────────────────────────────────────
 
-def render_otp_email(
-    code: str,
-    *,
-    org_name: str = "DotStark AI",
-    expiry_minutes: int = 5,
-) -> tuple[str, str]:
-    """Render OTP verification email (booking flow)."""
-    safe_code = _escape(code)
+def render_otp_email(code: str) -> tuple[str, str]:
+    title = "Verification Required"
     content = f"""
-    {_build_greeting("there")}
-    
-    <div class="code-box">
-        <span class="code-value">{safe_code}</span>
+<p style="margin:0 0 20px;font-size:14px;color:#52525b;line-height:1.6;">
+    We received a verification request. Use the code below to continue.
+</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+<tr><td align="center" style="padding:8px 0 24px;">
+    <div style="background-color:#f4f4f5;border:2px dashed #e5e5e5;border-radius:10px;padding:20px 32px;display:inline-block;">
+        <span style="font-family:'SF Mono',Monaco,Consolas,monospace;font-size:32px;font-weight:700;letter-spacing:8px;color:#111111;">{_esc(code)}</span>
     </div>
-    
-    <div class="info-box">
-        <p class="info-box-title">⏱ <strong>Expires in {expiry_minutes} minutes</strong></p>
-        <p class="info-box-text">If you didn't request this code, please ignore this email. This is an automated message from {_escape(org_name)}.</p>
-    </div>
-    """
-    subject = f"{code} - Your Verification Code"
-    preheader = f"Your verification code is {code}. Expires in {expiry_minutes} minutes."
-    html_body = _build_base_template(
-        theme_key="otp",
-        preheader=preheader,
-        content_html=content,
-    )
-    return subject, html_body
+</td></tr>
+</table>
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+<tr><td style="padding:12px 16px;background-color:#fefce8;border-radius:8px;">
+    <p style="margin:0;font-size:12px;color:#854d0e;line-height:1.5;">
+        <strong>Expires in 5 minutes.</strong> If you didn't request this, ignore this email.
+    </p>
+</td></tr>
+</table>
+"""
+    return title, _base(title, f"Your code: {code}", content, header_color="#ef5d25", header_icon="🔐")
 
 
-def render_auth_otp_email(
-    code: str,
-    purpose: str,
-) -> tuple[str, str]:
-    """Render auth OTP email (register/password_reset/signin)."""
-    safe_code = _escape(code)
-    theme_map = {
-        "register": "auth_register",
-        "password_reset": "auth_password_reset",
-        "signin": "auth_signin",
+def render_auth_otp_email(code: str, purpose: str) -> tuple[str, str]:
+    configs = {
+        "register": ("Verify Your Email", "Enter this code to finish creating your account", "Register"),
+        "password_reset": ("Reset Your Password", "Enter this code to set a new password", "Password Reset"),
+        "signin": ("Sign-In Verification", "Confirm it's really you", "Sign-In"),
     }
-    theme_key = theme_map.get(purpose, "auth_signin")
-    theme = TEMPLATE_THEMES[theme_key]
-    
-    expiry_minutes = 15
+    title, subtitle, label = configs.get(purpose, configs["signin"])
+
     content = f"""
-    <p style="margin: 0 0 {tokens.spacing.xl}; font-size: {tokens.typography.font_size_md}; line-height: {tokens.typography.line_height_relaxed}; color: var(--color-muted-foreground);">
-        {_escape(theme["header_subtitle"])}
+<p style="margin:0 0 20px;font-size:14px;color:#52525b;line-height:1.6;">
+    {_esc(subtitle)}
+</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+<tr><td align="center" style="padding:8px 0 24px;">
+    <div style="background-color:#f4f4f5;border:2px dashed #e5e5e5;border-radius:10px;padding:20px 32px;display:inline-block;">
+        <span style="font-family:'SF Mono',Monaco,Consolas,monospace;font-size:32px;font-weight:700;letter-spacing:8px;color:#111111;">{_esc(code)}</span>
+    </div>
+</td></tr>
+</table>
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+<tr><td style="padding:12px 16px;background-color:#fefce8;border-radius:8px;">
+    <p style="margin:0;font-size:12px;color:#854d0e;line-height:1.5;">
+        <strong>Expires in 15 minutes.</strong> This is a {_esc(label)} code for your DotStark account.
     </p>
-    
-    <div class="code-box">
-        <span class="code-value" style="background: linear-gradient(135deg, #ff6b00 0%, #e55f00 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">{safe_code}</span>
-    </div>
-    
-    <div class="info-box">
-        <p class="info-box-title">⏱ <strong>Expires in {expiry_minutes} minutes</strong></p>
-        <p class="info-box-text">If you didn't request this code, please ignore this email. This is an automated message from the DotStark AI Booking System.</p>
-    </div>
-    """
-    subject_map = {
-        "register": f"{code} - Verify your email",
-        "password_reset": f"{code} - Password Reset Code",
-        "signin": f"{code} - Your Sign-In Code",
-    }
-    subject = subject_map.get(purpose, f"{code} - Your Sign-In Code")
-    preheader = f"Your {purpose.replace('_', ' ')} code is {code}. Expires in {expiry_minutes} minutes."
-    html_body = _build_base_template(
-        theme_key=theme_key,
-        preheader=preheader,
-        content_html=content,
-    )
-    return subject, html_body
+</td></tr>
+</table>
+"""
+    return title, _base(title, f"Your {label.lower()} code: {code}", content, header_color="#ef5d25", header_icon="🔐")
 
 
-def render_booking_confirmation_customer(
-    booking_details: dict,
-    *,
-    org_name: str = "DotStark AI",
-) -> tuple[str, str]:
-    """Render booking confirmation email for customer."""
-    # NOTE: keep values raw here — inner builders (_build_*) HTML-escape
-    # each field exactly once. Pre-escaping here would double-escape
-    # (`&` -> `&amp;` -> `&amp;amp;`) and break URLs with query params.
-    safe = {k: str(v) if v else "" for k, v in booking_details.items()}
-    name = safe.get("name") or "Customer"
-    
+def render_booking_confirmation_customer(details: dict) -> tuple[str, str]:
+    name = _esc(details.get("name", "Customer"))
+    date = _esc(details.get("date", "TBD"))
+    time = _esc(details.get("time", "TBD"))
+    source = _esc(details.get("source_channel", "Web Widget"))
+    meeting_type = details.get("meeting_type_snapshot") or "OFFLINE"
+    meeting_status = details.get("meeting_link_status") or "NOT_REQUIRED"
+    meeting_url = details.get("meeting_link_url") or ""
+    meeting_provider = _esc(details.get("meeting_link_provider") or "")
+
+    user_tz = details.get("user_timezone") or ""
+    user_start = details.get("user_slot_start_at") or ""
+    user_end = details.get("user_slot_end_at") or ""
+    org_tz = details.get("org_timezone_snapshot") or ""
+    org_start = details.get("org_slot_start_at") or ""
+    org_end = details.get("org_slot_end_at") or ""
+    has_user_tz = bool(user_tz and user_start and user_end)
+    has_org_tz = bool(org_tz and org_start and org_end)
+
+    title = "Booking Confirmed"
+
+    # Appointment details block
     content = f"""
-    {_build_greeting(name)}
-    {_build_appointment_card(safe)}
-    {_build_meeting_block(safe, audience="customer")}
-    {_build_dual_time_block(safe)}
-    
-    <div class="info-box">
-        <p class="info-box-title">🔔 <strong>Reminder</strong></p>
-        <p class="info-box-text">We'll send you a reminder before your appointment. Need to make changes? Contact us directly.</p>
-    </div>
-    """
-    subject = "✔ Booking Confirmed!"
-    preheader = f"Your appointment on {safe.get('date', 'TBD')} at {safe.get('time', 'TBD')} is confirmed."
-    html_body = _build_base_template(
-        theme_key="booking_confirmation_customer",
-        preheader=preheader,
-        content_html=content,
-    )
-    return subject, html_body
+<p style="margin:0 0 20px;font-size:14px;color:#52525b;line-height:1.6;">
+    Hi <strong style="color:#111;">{name}</strong>, your appointment is confirmed.
+</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
+<tr><td style="padding:16px;background-color:#f4f4f5;border-radius:10px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+    <tr>
+        {_label_value("Date", date)}
+        <td style="width:1px;background:#e5e5e5;"></td>
+        {_label_value("Time", time)}
+    </tr>
+    </table>
+    <hr style="border:none;border-top:1px solid #e5e5e5;margin:12px 0;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+    <tr>{_label_value("Booked via", source)}</tr>
+    </table>
+</td></tr>
+</table>
+"""
+
+    # Meeting block (keep Meeting link status text for downstream tests + guidance)
+    if meeting_type == "ONLINE" and meeting_status == "READY" and meeting_url:
+        content += f"""
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
+<tr><td style="padding:16px;background-color:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;">
+    <p style="margin:0 0 4px;font-size:12px;color:#166534;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
+    <p style="margin:0 0 8px;font-size:12px;color:#166534;">Meeting link status: <span class="status-badge status-badge--ready">READY</span><strong> READY</strong></p>
+    <a href="{_esc(meeting_url)}" style="display:inline-block;background-color:#10b981;color:#ffffff;text-decoration:none;padding:8px 16px;border-radius:6px;font-size:12px;font-weight:600;">Join Meeting</a>
+</td></tr>
+</table>
+"""
+    elif meeting_type == "ONLINE" and meeting_status == "UNAVAILABLE":
+        content += f"""
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
+<tr><td style="padding:16px;background-color:#fef3c7;border:1px solid #fde68a;border-radius:10px;">
+    <p style="margin:0 0 4px;font-size:12px;color:#92400e;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
+    <p style="margin:0 0 8px;font-size:12px;color:#92400e;">Meeting link status: <span class="status-badge status-badge--unavailable">UNAVAILABLE</span><strong> UNAVAILABLE</strong></p>
+    <p style="margin:0;font-size:12px;color:#92400e;line-height:1.5;">Your meeting link is temporarily unavailable. Please retry shortly or contact support if this persists.</p>
+</td></tr>
+</table>
+"""
+    elif meeting_type == "ONLINE":
+        content += f"""
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
+<tr><td style="padding:16px;background-color:#f4f4f5;border:1px solid #e5e5e5;border-radius:10px;">
+    <p style="margin:0 0 4px;font-size:12px;color:#71717a;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
+    <p style="margin:0;font-size:12px;color:#71717a;">Meeting link status: {_esc(meeting_status)}</p>
+</td></tr>
+</table>
+"""
+
+    # Timezone block
+    if has_user_tz or has_org_tz:
+        tz_rows = ""
+        if has_user_tz:
+            tz_rows += f'<tr><td style="padding:4px 0;font-size:12px;color:#71717a;">User time ({_esc(user_tz)})</td><td style="padding:4px 0;font-size:13px;font-weight:600;color:#111;text-align:right;">{_esc(user_start)} &rarr; {_esc(user_end)}</td></tr>'
+        if has_org_tz:
+            tz_rows += f'<tr><td style="padding:4px 0;font-size:12px;color:#71717a;">Business time ({_esc(org_tz)})</td><td style="padding:4px 0;font-size:13px;font-weight:600;color:#111;text-align:right;">{_esc(org_start)} &rarr; {_esc(org_end)}</td></tr>'
+
+        content += f"""
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
+<tr><td style="padding:12px 16px;background-color:#f4f4f5;border-radius:10px;">
+    <p style="margin:0 0 8px;font-size:11px;color:#71717a;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">Time Context</p>
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">{tz_rows}</table>
+</td></tr>
+</table>
+"""
+
+    content += """
+<p style="margin:0;font-size:12px;color:#a1a1aa;text-align:center;">Need to make changes? Contact us directly.</p>
+"""
+    return title, _base(title, f"Your appointment on {date} at {time} is confirmed.", content, header_color="#10b981", header_icon="✔")
 
 
-def render_booking_confirmation_admin(
-    booking_details: dict,
-    *,
-    frontend_url: str = "",
-) -> tuple[str, str]:
-    """Render booking confirmation email for admin/org."""
-    # Keep raw — builders escape once; subject/preheader use raw values
-    # (preheader is escaped once inside _build_base_template).
-    safe = {k: str(v) if v else "" for k, v in booking_details.items()}
-    name = safe.get("name") or "Customer"
-    date = safe.get("date") or "TBD"
-    
+def render_booking_confirmation_admin(details: dict, *, frontend_url: str = "") -> tuple[str, str]:
+    name = _esc(details.get("name", "Customer"))
+    email = _esc(details.get("email", ""))
+    phone = _esc(details.get("phone", ""))
+    date = _esc(details.get("date", "TBD"))
+    time = _esc(details.get("time", "TBD"))
+    source = _esc(details.get("source_channel", "Web Widget"))
+    meeting_type = details.get("meeting_type_snapshot") or "OFFLINE"
+    meeting_status = details.get("meeting_link_status") or "NOT_REQUIRED"
+    meeting_url = details.get("meeting_link_url") or ""
+    meeting_provider = _esc(details.get("meeting_link_provider") or "")
+
+    user_tz = details.get("user_timezone") or ""
+    user_start = details.get("user_slot_start_at") or ""
+    user_end = details.get("user_slot_end_at") or ""
+    org_tz = details.get("org_timezone_snapshot") or ""
+    org_start = details.get("org_slot_start_at") or ""
+    org_end = details.get("org_slot_end_at") or ""
+    has_user_tz = bool(user_tz and user_start and user_end)
+    has_org_tz = bool(org_tz and org_start and org_end)
+
+    title = "New Booking"
+
     content = f"""
-    <p style="margin: 0 0 {tokens.spacing.xl}; font-size: {tokens.typography.font_size_md}; line-height: {tokens.typography.line_height_relaxed}; color: var(--color-muted-foreground);">
-        A new appointment has been booked through your AI Assistant. Details below:
-    </p>
-    
-    {_build_admin_customer_card(safe)}
-    {_build_admin_appointment_card(safe)}
-    {_build_meeting_block(safe, audience="admin")}
-    {_build_dual_time_block(safe)}
-    
-    <div style="text-align: center; margin-top: {tokens.spacing.xl};">
-        <a href="{_escape(frontend_url)}/dashboard/bookings" class="email-button">View All Bookings →</a>
-    </div>
-    """
-    subject = f"📅 New Booking: {name} - {date}"
-    preheader = f"New booking from {name} on {date} at {safe.get('time', 'TBD')}."
-    html_body = _build_base_template(
-        theme_key="booking_confirmation_admin",
-        preheader=preheader,
-        content_html=content,
-        footer_text=f"© {2026} DotStark AI Booking System",
-    )
-    return subject, html_body
+<p style="margin:0 0 20px;font-size:14px;color:#52525b;line-height:1.6;">
+    A new appointment has been booked through your AI assistant.
+</p>
+
+<!-- Customer card -->
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:16px;">
+<tr><td style="padding:16px;background-color:#f4f4f5;border-radius:10px;">
+    <p style="margin:0 0 8px;font-size:11px;color:#71717a;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">Customer</p>
+    <p style="margin:0 0 4px;font-size:16px;font-weight:700;color:#111;">{name}</p>
+    <p style="margin:0 0 2px;font-size:13px;color:#52525b;">{email}</p>
+    <p style="margin:0;font-size:13px;color:#52525b;">{phone}</p>
+</td></tr>
+</table>
+
+<!-- Appointment card -->
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:16px;">
+<tr><td style="padding:16px;background-color:#f4f4f5;border-radius:10px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+    <tr>
+        {_label_value("Date", date)}
+        <td style="width:1px;background:#e5e5e5;"></td>
+        {_label_value("Time", time)}
+    </tr>
+    </table>
+    <hr style="border:none;border-top:1px solid #e5e5e5;margin:12px 0;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+    <tr>{_label_value("Source", source)}</tr>
+    </table>
+</td></tr>
+</table>
+"""
+
+    # Meeting block (admin: guidance differs for UNAVAILABLE)
+    if meeting_type == "ONLINE" and meeting_status == "READY" and meeting_url:
+        content += f"""
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:16px;">
+<tr><td style="padding:16px;background-color:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;">
+    <p style="margin:0 0 4px;font-size:12px;color:#166534;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
+    <p style="margin:0 0 8px;font-size:12px;color:#166534;">Meeting link status: <span class="status-badge status-badge--ready">READY</span><strong> READY</strong></p>
+    <a href="{_esc(meeting_url)}" style="display:inline-block;background-color:#10b981;color:#ffffff;text-decoration:none;padding:8px 16px;border-radius:6px;font-size:12px;font-weight:600;">Join Meeting</a>
+</td></tr>
+</table>
+"""
+    elif meeting_type == "ONLINE" and meeting_status == "UNAVAILABLE":
+        content += f"""
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:16px;">
+<tr><td style="padding:16px;background-color:#fef3c7;border:1px solid #fde68a;border-radius:10px;">
+    <p style="margin:0 0 4px;font-size:12px;color:#92400e;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
+    <p style="margin:0 0 8px;font-size:12px;color:#92400e;">Meeting link status: <span class="status-badge status-badge--unavailable">UNAVAILABLE</span><strong> UNAVAILABLE</strong></p>
+    <p style="margin:0;font-size:12px;color:#92400e;line-height:1.5;">Meeting link is temporarily unavailable. Please follow up with the customer and retry provider connection if needed.</p>
+</td></tr>
+</table>
+"""
+    elif meeting_type == "ONLINE":
+        content += f"""
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:16px;">
+<tr><td style="padding:16px;background-color:#f4f4f5;border:1px solid #e5e5e5;border-radius:10px;">
+    <p style="margin:0 0 4px;font-size:12px;color:#71717a;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
+    <p style="margin:0;font-size:12px;color:#71717a;">Meeting link status: {_esc(meeting_status)}</p>
+</td></tr>
+</table>
+"""
+
+    # Timezone block
+    if has_user_tz or has_org_tz:
+        tz_rows = ""
+        if has_user_tz:
+            tz_rows += f'<tr><td style="padding:4px 0;font-size:12px;color:#71717a;">User time ({_esc(user_tz)})</td><td style="padding:4px 0;font-size:13px;font-weight:600;color:#111;text-align:right;">{_esc(user_start)} &rarr; {_esc(user_end)}</td></tr>'
+        if has_org_tz:
+            tz_rows += f'<tr><td style="padding:4px 0;font-size:12px;color:#71717a;">Business time ({_esc(org_tz)})</td><td style="padding:4px 0;font-size:13px;font-weight:600;color:#111;text-align:right;">{_esc(org_start)} &rarr; {_esc(org_end)}</td></tr>'
+
+        content += f"""
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:16px;">
+<tr><td style="padding:12px 16px;background-color:#f4f4f5;border-radius:10px;">
+    <p style="margin:0 0 8px;font-size:11px;color:#71717a;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">Time Context</p>
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">{tz_rows}</table>
+</td></tr>
+</table>
+"""
+
+    # CTA
+    url = _esc(frontend_url)
+    content += f"""
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+<tr><td align="center" style="padding:8px 0;">
+    <a href="{url}/dashboard/bookings" style="display:inline-block;background-color:#ef5d25;color:#ffffff;text-decoration:none;padding:10px 24px;border-radius:8px;font-size:13px;font-weight:600;">View Bookings &rarr;</a>
+</td></tr>
+</table>
+"""
+    return title, _base(title, f"New booking from {name} on {date}", content, header_color="#3b82f6", header_icon="📅")
 
 
-def render_booking_cancellation(
-    customer_name: str,
-    booking_details: dict,
-) -> tuple[str, str]:
-    """Render booking cancellation email for customer."""
-    # Builders escape fields once; escape direct insertions here once.
-    safe_name = _escape(customer_name or "Customer")
-    safe = {k: str(v) if v else "" for k, v in booking_details.items()}
-    
+def render_booking_cancellation(name: str, details: dict) -> tuple[str, str]:
+    safe_name = _esc(name)
+    date = _esc(details.get("date", "N/A"))
+    time = _esc(details.get("time", ""))
+    meeting_type = details.get("meeting_type_snapshot") or "OFFLINE"
+    meeting_status = details.get("meeting_link_status") or "NOT_REQUIRED"
+    meeting_url = details.get("meeting_link_url") or ""
+    meeting_provider = _esc(details.get("meeting_link_provider") or "")
+
+    title = "Appointment Cancelled"
+
     content = f"""
-    <p style="margin: 0 0 8px; font-size: {tokens.typography.font_size_lg}; color: var(--color-foreground); text-align: center;">
-        Hello <strong>{safe_name}</strong>,
-    </p>
-    <p style="margin: 0 0 {tokens.spacing.xl}; font-size: {tokens.typography.font_size_md}; line-height: {tokens.typography.line_height_relaxed}; color: var(--color-muted-foreground); text-align: center;">
-        Your appointment has been cancelled as requested. We're sorry to see you go!
-    </p>
-    
-    {_build_cancelled_details(safe)}
-    {_build_meeting_block(safe, audience="customer")}
-    
-    <p style="margin: {tokens.spacing.lg} 0 0; font-size: {tokens.typography.font_size_md}; line-height: {tokens.typography.line_height_relaxed}; color: var(--color-foreground); text-align: center;">
-        If you'd like to rebook, feel free to start a new conversation anytime. We'd love to see you again!
-    </p>
-    """
-    subject = "Appointment Cancelled"
-    preheader = f"Your appointment on {safe.get('date', 'N/A')} has been cancelled."
-    html_body = _build_base_template(
-        theme_key="booking_cancellation",
-        preheader=preheader,
-        content_html=content,
-    )
-    return subject, html_body
+<p style="margin:0 0 20px;font-size:14px;color:#52525b;line-height:1.6;">
+    Hi <strong style="color:#111;">{safe_name}</strong>, your appointment has been cancelled.
+</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
+<tr><td style="padding:16px;background-color:#fef2f2;border:1px solid #fecaca;border-radius:10px;">
+    <p style="margin:0 0 4px;font-size:11px;color:#991b1b;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">Cancelled Appointment</p>
+    <p style="margin:0;font-size:15px;font-weight:700;color:#111;">{date}</p>
+    <p style="margin:4px 0 0;font-size:13px;color:#52525b;">{time}</p>
+</td></tr>
+</table>
+"""
+
+    # Meeting block for cancellation (customer-facing)
+    if meeting_type == "ONLINE" and meeting_status == "READY" and meeting_url:
+        content += f"""
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
+<tr><td style="padding:16px;background-color:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;">
+    <p style="margin:0 0 4px;font-size:12px;color:#166534;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
+    <p style="margin:0 0 8px;font-size:12px;color:#166534;">Meeting link status: <span class="status-badge status-badge--ready">READY</span><strong> READY</strong></p>
+    <a href="{_esc(meeting_url)}" style="display:inline-block;background-color:#10b981;color:#ffffff;text-decoration:none;padding:8px 16px;border-radius:6px;font-size:12px;font-weight:600;">Join Meeting</a>
+</td></tr>
+</table>
+"""
+    elif meeting_type == "ONLINE" and meeting_status == "UNAVAILABLE":
+        content += f"""
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
+<tr><td style="padding:16px;background-color:#fef3c7;border:1px solid #fde68a;border-radius:10px;">
+    <p style="margin:0 0 4px;font-size:12px;color:#92400e;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
+    <p style="margin:0 0 8px;font-size:12px;color:#92400e;">Meeting link status: <span class="status-badge status-badge--unavailable">UNAVAILABLE</span><strong> UNAVAILABLE</strong></p>
+    <p style="margin:0;font-size:12px;color:#92400e;line-height:1.5;">Your meeting link is temporarily unavailable. Please retry shortly or contact support if this persists.</p>
+</td></tr>
+</table>
+"""
+    elif meeting_type == "ONLINE":
+        content += f"""
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
+<tr><td style="padding:16px;background-color:#f4f4f5;border:1px solid #e5e5e5;border-radius:10px;">
+    <p style="margin:0 0 4px;font-size:12px;color:#71717a;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
+    <p style="margin:0;font-size:12px;color:#71717a;">Meeting link status: {_esc(meeting_status)}</p>
+</td></tr>
+</table>
+"""
+
+    content += """
+<p style="margin:0 0 20px;font-size:14px;color:#52525b;line-height:1.6;">
+    If you'd like to rebook, feel free to start a new conversation anytime.
+</p>
+
+<p style="margin:0;font-size:12px;color:#a1a1aa;text-align:center;">We'd love to see you again!</p>
+"""
+    return title, _base(title, f"Your appointment on {date} has been cancelled.", content, header_color="#ef4444", header_icon="✖")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
