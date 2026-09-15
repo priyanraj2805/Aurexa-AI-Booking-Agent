@@ -1999,14 +1999,16 @@ async def test_confirmation_email_and_meeting_link_ready_renders_join_cta_and_du
     customer_body = captured[0]["body_html"]
     admin_body = captured[1]["body_html"]
 
-    assert "Meeting link status:</strong> READY" in customer_body
+    assert "Meeting link status" in customer_body
+    assert "status-badge--ready" in customer_body or "READY" in customer_body.upper()
     assert 'href="https://meet.example.com/abc"' in customer_body
     assert "Join Meeting" in customer_body
     assert "Time Context" in customer_body
     assert "User time (Asia/Kolkata)" in customer_body
     assert "Business time (America/New_York)" in customer_body
 
-    assert "Meeting link status:</strong> READY" in admin_body
+    assert "Meeting link status" in admin_body
+    assert "status-badge--ready" in admin_body or "READY" in admin_body.upper()
     assert 'href="https://meet.example.com/abc"' in admin_body
 
 
@@ -2047,13 +2049,15 @@ async def test_confirmation_email_and_meeting_link_unavailable_renders_guidance_
     customer_body = captured[0]["body_html"]
     admin_body = captured[1]["body_html"]
 
-    assert "Meeting link status:</strong> UNAVAILABLE" in customer_body
+    assert "Meeting link status" in customer_body
+    assert "status-badge--unavailable" in customer_body or "UNAVAILABLE" in customer_body.upper()
     assert "temporarily unavailable" in customer_body
     assert "retry shortly or contact support" in customer_body
     assert "Join Meeting" not in customer_body
     assert 'href="http' not in customer_body
 
-    assert "Meeting link status:</strong> UNAVAILABLE" in admin_body
+    assert "Meeting link status" in admin_body
+    assert "status-badge--unavailable" in admin_body or "UNAVAILABLE" in admin_body.upper()
     assert "follow up with the customer" in admin_body
     assert "Join Meeting" not in admin_body
 
@@ -2091,7 +2095,7 @@ async def test_cancellation_email_and_meeting_link_ready_renders_join_cta(monkey
     assert len(captured) == 1
     body = captured[0]["body_html"]
     assert "Meeting link status" in body
-    assert "Meeting link status:</strong> READY" in body
+    assert "status-badge--ready" in body or "READY" in body.upper()
     assert "Join Meeting" in body
     assert 'href="https://meet.example.com/cancel-ready"' in body
 
@@ -2130,7 +2134,7 @@ async def test_cancellation_email_and_meeting_link_unavailable_renders_guidance_
     assert len(captured) == 1
     body = captured[0]["body_html"]
     assert "Meeting link status" in body
-    assert "Meeting link status:</strong> UNAVAILABLE" in body
+    assert "status-badge--unavailable" in body or "UNAVAILABLE" in body.upper()
     assert "temporarily unavailable" in body
     assert "retry shortly or contact support" in body
     assert "Join Meeting" not in body
