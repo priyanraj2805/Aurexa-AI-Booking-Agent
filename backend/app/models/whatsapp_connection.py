@@ -7,7 +7,7 @@ here — never in OrgConfig and never in logs.
 """
 
 import uuid
-from sqlalchemy import Column, DateTime, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -44,6 +44,14 @@ class WhatsAppConnection(Base):
         nullable=False,
         default=WhatsAppConnectionStatus.PENDING_QR,
         server_default="PENDING_QR",
+    )
+
+    # Admin kill switch for booking autoreplies on this connection.
+    # Effective booking additionally requires meeting_mode ONLINE_ONLY/HYBRID
+    # (OFFLINE_ONLY always disables). Defaults to false: merely connecting
+    # the number never enables replies by itself.
+    whatsapp_booking_enabled = Column(
+        Boolean, nullable=False, default=False, server_default="false"
     )
 
     connected_at = Column(DateTime(timezone=True), nullable=True)

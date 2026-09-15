@@ -1,5 +1,7 @@
 import os
 import json
+import re
+import time
 import httpx
 import asyncio
 from dataclasses import dataclass
@@ -45,6 +47,10 @@ class LLMOrchestrator:
         self.client = httpx.AsyncClient(timeout=30.0)
         self.max_retries = 3
         self.max_backoff_seconds = 8.0
+        # Total wall-clock budget per logical LLM call. The per-attempt
+        # 30s client timeout is routinely hit by slow providers, so 3 blind
+        # retries could burn ~94s on one call — cap the whole call instead.
+        self.max_total_seconds = 45.0
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -114,9 +120,23 @@ class LLMOrchestrator:
             payload["response_format"] = {"type": "json_object"}
 
         last_error = None
+        deadline = time.monotonic() + self.max_total_seconds
         for attempt in range(self.max_retries):
+            remaining = deadline - time.monotonic()
+            if remaining <= 2.0:
+                logger.warning(
+                    "LLM retry budget exhausted after attempt %s/%s; failing fast",
+                    attempt,
+                    self.max_retries,
+                )
+                break
             try:
-                response = await self.client.post(self.base_url, headers=headers, json=payload)
+                response = await self.client.post(
+                    self.base_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=min(30.0, remaining),
+                )
                 response.raise_for_status()
                 data = response.json()
                 content = data["choices"][0]["message"]["content"].strip()
@@ -148,6 +168,13 @@ class LLMOrchestrator:
                         logger.warning("llm.alert.emit.failed: %s", alert_err)
                     break
                 wait_time = min(self.max_backoff_seconds, (2 ** attempt) + 0.5)
+                if time.monotonic() + wait_time >= deadline:
+                    logger.warning(
+                        "LLM retry budget exhausted; failing fast without sleeping (attempt %s/%s)",
+                        attempt + 1,
+                        self.max_retries,
+                    )
+                    break
                 logger.warning(f"LLM API attempt {attempt + 1}/{self.max_retries} failed: {e}. Retrying in {wait_time:.1f}s...")
                 await asyncio.sleep(wait_time)
             except Exception as e:
@@ -253,7 +280,12 @@ class LLMOrchestrator:
                 clean_result = result.split("```json")[-1].split("```")[0].strip()
             elif "```" in result:
                 clean_result = result.split("```")[-1].split("```")[0].strip()
-            
+
+            # Providers sometimes wrap the object in prose despite the
+            # json_object request — salvage the first {...} span before parsing.
+            match = re.search(r"\{.*\}", clean_result, re.DOTALL)
+            if match:
+                clean_result = match.group(0)
             parsed = json.loads(clean_result)
             return self._validate_unified_response(parsed)
         except json.JSONDecodeError:
@@ -304,7 +336,11 @@ class LLMOrchestrator:
                 clean_result = result.split("```json")[-1].split("```")[0].strip()
             elif "```" in result:
                 clean_result = result.split("```")[-1].split("```")[0].strip()
-            
+
+            # Same prose-wrapping salvage as process_turn above.
+            match = re.search(r"\{.*\}", clean_result, re.DOTALL)
+            if match:
+                clean_result = match.group(0)
             extracted = json.loads(clean_result)
             return extracted
         except json.JSONDecodeError:

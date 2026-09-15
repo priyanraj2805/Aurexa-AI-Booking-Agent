@@ -46,7 +46,7 @@ test('default manager wiring POSTs inbound to the backend and sends the reply', 
     });
     assert.deepStrictEqual(out, { delivered: true, replied: true });
     assert.strictEqual(calls.length, 1);
-    assert.ok(calls[0].url.endsWith('/internal/whatsapp-qr/inbound'), calls[0].url);
+    assert.ok(calls[0].url.endsWith('/api/v1/internal/whatsapp-qr/inbound'), calls[0].url);
     assert.strictEqual(calls[0].headers['X-Gateway-Key'], 'wiring-test-key');
     assert.strictEqual(calls[0].body.connectionId, ID_A);
     assert.strictEqual(calls[0].body.text, 'Hi');

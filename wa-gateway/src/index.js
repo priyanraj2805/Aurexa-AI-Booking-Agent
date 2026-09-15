@@ -57,7 +57,7 @@ async function deliverToBackend(connectionId, envelope) {
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res;
   try {
-    res = await fetch(`${BACKEND_BASE_URL}/internal/whatsapp-qr/inbound`, {
+    res = await fetch(`${BACKEND_BASE_URL}/api/v1/internal/whatsapp-qr/inbound`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Gateway-Key': key },
       body: JSON.stringify({ connectionId, ...envelope }),

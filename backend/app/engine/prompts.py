@@ -251,5 +251,5 @@ You MUST return ONLY a valid JSON object with these keys:
 - "extracted_entities": (object - MUST contain ONLY the next field: {next_field_label})
 - "response_message": (string - your polite reply asking ONLY for: {next_field_label})
 
-Output ONLY valid JSON:"""
+Output ONLY valid JSON. Do not include explanations, greetings, markdown fences, or any text outside the single JSON object. Your ENTIRE response must be exactly one parseable JSON object, with the conversational reply confined to the response_message string value. No other text is allowed before or after the JSON object."""
         return prompt

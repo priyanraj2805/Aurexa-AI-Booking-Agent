@@ -21,7 +21,21 @@ function extractText(message) {
     if (t && String(t).trim()) return String(t).trim();
   }
   const list = message.listResponseMessage;
-  if (list && list.title && String(list.title).trim()) return String(list.title).trim();
+  if (list) {
+    // Baileys list tap: singleSelectReply holds the stable rowId
+    const sel = list.singleSelectReply;
+    if (sel && typeof sel.selectedRowId === 'string' && sel.selectedRowId.trim()) return sel.selectedRowId.trim();
+    if (list.title && String(list.title).trim()) return String(list.title).trim();
+  }
+  return null;
+}
+
+function extractOptionId(message) {
+  if (!message || typeof message !== 'object') return null;
+  const btn = message.buttonsResponseMessage;
+  if (btn && typeof btn.selectedButtonId === 'string' && btn.selectedButtonId.trim()) return btn.selectedButtonId.trim();
+  const list = message.listResponseMessage;
+  if (list && list.singleSelectReply && typeof list.singleSelectReply.selectedRowId === 'string' && list.singleSelectReply.selectedRowId.trim()) return list.singleSelectReply.selectedRowId.trim();
   return null;
 }
 
@@ -44,12 +58,14 @@ function normalizeInbound(msg) {
   if (from.length < 7) return { skip: 'bad-sender' };
   const text = extractText(msg.message);
   if (!text) return { skip: 'no-text' };
+  const optionId = extractOptionId(msg.message);
   return {
     envelope: {
       messageId: String(key.id),
       from,
       chatJid: remoteJid,
       text,
+      optionId: optionId || null,
       timestamp: Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000),
       pushName: typeof msg.pushName === 'string' ? msg.pushName.slice(0, 128) : null,
     },

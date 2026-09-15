@@ -17,6 +17,11 @@ const { sendViaHandle } = require('./send');
 const DELIVER_ATTEMPTS = 3;
 const DELIVER_BACKOFF_MS = [1000, 2000, 4000];
 
+// Typing heartbeat: WhatsApp shows "typing…" only for a few seconds per
+// composing stanza, while our engine turn takes 20-90s+. Refresh on a beat
+// so the customer sees continuous typing until the reply (or failure).
+const TYPING_BEAT_MS = 8000;
+
 const ID_RE = /^[0-9a-fA-F-]{36}$/;
 
 const RECONNECT_BASE_MS = 2000;
@@ -53,8 +58,9 @@ function snapshot(id, rec) {
   };
 }
 
-function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, deliverInbound, sendReply, outbox }) {
+function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, deliverInbound, sendReply, outbox, typingBeatMs }) {
   const clock = now || (() => Date.now());
+  const beatMs = typingBeatMs || TYPING_BEAT_MS;
   const log = logger || { info: () => {}, warn: () => {}, error: () => {} };
   // P7 inbound pipeline (wired by index.js; tests inject fakes).
   const deliver = deliverInbound || (async () => null);
@@ -133,6 +139,31 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
       `msgid=${String(envelope.messageId).slice(0, 24)} text_len=${envelope.text.length}`
     );
     touch(id);
+    // Typing heartbeat for the whole turn: immediate composing plus refresh
+    // on a beat until the reply is handed off (or we give up). Best-effort;
+    // a stale handle after reconnect just no-ops into the catch.
+    let typingTimer = null;
+    const sendPresence = async (state) => {
+      try {
+        const live = sessions.get(id);
+        const handle = live && live.handle;
+        if (handle && typeof handle.presence === 'function') {
+          await handle.presence(envelope.chatJid, state);
+        }
+      } catch (_) { /* presence never fails the turn */ }
+    };
+    const stopTyping = async () => {
+      if (typingTimer) {
+        clearInterval(typingTimer);
+        typingTimer = null;
+      }
+      await sendPresence('paused');
+    };
+    await sendPresence('composing');
+    typingTimer = setInterval(() => {
+      sendPresence('composing').catch(() => {});
+    }, beatMs);
+    if (typingTimer.unref) typingTimer.unref();
     // Deliver to the backend with retries; Baileys won't redeliver, so a
     // final failure is logged loudly (message is lost by design, V1 scope).
     let result = null;
@@ -147,6 +178,7 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
         // Backend doesn't know this connection (row deleted?) — retrying is pointless.
         if (err && err.code === 'UNKNOWN_CONNECTION') {
           log.warn(`backend has no such connection; dropping inbound`);
+          await stopTyping();
           return { dropped: 'unknown-connection' };
         }
         lastErr = err;
@@ -157,6 +189,7 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
     }
     if (lastErr) {
       log.error(`inbound deliver exhausted, message lost (msgid logged only)`);
+      await stopTyping();
       return { dropped: 'deliver-exhausted' };
     }
     const replyDict = result && result.reply ? result.reply : null;
@@ -167,12 +200,15 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
       try {
         await replyVia(id, envelope.chatJid, replyDict, `qr-reply:${envelope.messageId}`);
         log.info(`reply handed to outbox for delivery`);
+        await stopTyping();
         return { delivered: true, replied: true };
       } catch (err) {
         log.error(`reply send failed: ${err.message}`);
+        await stopTyping();
         return { delivered: true, replied: false };
       }
     }
+    await stopTyping();
     return { delivered: true, replied: false };
   }
 

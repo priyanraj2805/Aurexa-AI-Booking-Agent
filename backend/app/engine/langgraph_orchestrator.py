@@ -557,6 +557,89 @@ async def process_message_with_graph(
             db, org, chat_session, message_text, background_tasks
         )
 
+    # Fast-path: 6-digit OTP code sent as chat message (WhatsApp phone OTP
+    # or email OTP). Verify deterministically before the LLM sees it — the
+    # LLM hallucinates "no pending" otherwise and the code is lost.
+    _stripped = str(message_text or "").strip()
+    _is_six = bool(re.fullmatch(r"\d{6}", _stripped))
+    _awaiting = _is_awaiting_otp(chat_session)
+    _phone_pending_log = bool(getattr(org_config, "require_phone_otp", False) and not bool(getattr(chat_session, "phone_otp_verified", False)))
+    logger.info(f"OTP chat check: msg='{_stripped[:20]}' is_6digit={_is_six} awaiting={_awaiting} phone_pending={_phone_pending_log}")
+    if _is_six:
+        # Determine which OTP channel is actually pending for this org/session.
+        _phone_pending = (
+            bool(getattr(org_config, "require_phone_otp", False))
+            and not bool(getattr(chat_session, "phone_otp_verified", False))
+            and bool(str((chat_session.collected_data or {}).get("phone") or "").strip())
+        )
+        _email_pending = (
+            bool(getattr(org_config, "require_otp", True))
+            and not bool(getattr(chat_session, "otp_verified", False))
+        )
+        # Try the more likely channel first: phone for WhatsApp, email otherwise.
+        # whatsapp_cloud (Meta Cloud API) is WhatsApp-class: same OTP routing.
+        _is_whatsapp = str(getattr(chat_session, "channel", "")).lower() in ("whatsapp", "whatsapp_cloud")
+        _channels = []
+        if _phone_pending and _email_pending:
+            _channels = ["phone", "email"] if _is_whatsapp else ["email", "phone"]
+        elif _phone_pending:
+            _channels = ["phone"]
+        elif _email_pending:
+            _channels = ["email"]
+        # Only attempt verify if at least one channel is pending and we have
+        # a corresponding OTP sent key (prevents treating booking numbers as OTP).
+        if _channels and _is_awaiting_otp(chat_session):
+            _verified_channel = None
+            for _ch in _channels:
+                try:
+                    if await otp_crud.verify_otp(db, session_id, code=_stripped, channel=_ch):
+                        _verified_channel = _ch
+                        break
+                except ValueError:
+                    # Too many attempts / cooldown — surface as invalid
+                    pass
+                except Exception:
+                    pass
+            if _verified_channel:
+                # Mark verified in session so the graph sees it and proceeds to
+                # booking in the same turn. Persist before graph invocation.
+                if _verified_channel == "phone":
+                    chat_session.phone_otp_verified = True
+                    try:
+                        _es = _active_effect_state(chat_session)
+                        _sk = _es.get("otp_sent_keys")
+                        if isinstance(_sk, list):
+                            # Clear phone OTP keys; keep email keys if any
+                            _es["otp_sent_keys"] = [k for k in _sk if not str(k).startswith("otp_phone:")]
+                            if not _es["otp_sent_keys"]:
+                                _es.pop("otp_sent_keys", None)
+                    except Exception:
+                        pass
+                else:
+                    chat_session.otp_verified = True
+                    # Clear the email OTP pending keys so _is_awaiting_otp flips
+                    try:
+                        _es = _active_effect_state(chat_session)
+                        _es.pop("otp_sent_keys", None)
+                    except Exception:
+                        pass
+                await crud_chat.update_chat_session(db, session_id, chat_session)
+                # Fall through to graph — with verified flag set, it will
+                # proceed to booking confirmation instead of re-asking for OTP.
+            else:
+                # Invalid / expired code — return deterministically, don't let
+                # the LLM invent a booking number or "no pending" hallucination.
+                _msg = "That code is incorrect or has expired. Please check the 6-digit code and try again, or say 'resend' to get a new code."
+                _field_meta: Dict[str, Any] = {"channel": _channels[0] if _channels else "phone"}
+                try:
+                    _meta = await otp_crud.get_otp_policy_metadata(db, session_id, channel=_channels[0])
+                    _field_meta.update(_meta)
+                except Exception:
+                    pass
+                _action = ActionPayload(message=_msg, widget_directive="REQUIRE_OTP_MODAL", field_meta=_field_meta)
+                await _persist_transcript_best_effort(db, session_id=session_id, user_message=message_text, assistant_message=_msg, directive="REQUIRE_OTP_MODAL", intent=chat_session.current_intent)
+                return _action
+
     # Post-booking gate: a finished session (CONFIRMED / CANCELLED / EXPIRED)
     # must NEVER re-enter the booking flow. The graph has no status awareness
     # and would happily re-collect fields (e.g. "sure" after a confirmed
@@ -886,6 +969,224 @@ async def process_message_with_graph(
         )
         directive = str(next_action.get("directive") or "TEXT_INPUT")
         directive_meta = next_action.get("field_meta")
+    # DIAGNOSTIC for WhatsApp time-slot directive (as requested, no code change beyond logging)
+    try:
+        _diag_state_data = getattr(chat_session, "collected_data", {}) or {}
+        _diag_active = _diag_state_data.get("active_directive_id") if isinstance(_diag_state_data, dict) else None
+        # Also check state_data via ChatSessionState mapping
+        _diag_missing = getattr(chat_session, "missing_fields", None)
+        _diag_date = _diag_state_data.get("date") if isinstance(_diag_state_data, dict) else None
+        logger.info(
+            f"DIRECTIVE_DIAG _is_whatsapp={str(getattr(chat_session, 'channel', '')).lower() in ('whatsapp', 'whatsapp_cloud')} directive={directive} missing_fields={_diag_missing} "
+            f"directive_meta={str(directive_meta)[:300] if directive_meta else None} "
+            f"options_count={len(directive_meta.get('options') or []) if isinstance(directive_meta, dict) and directive_meta.get('options') else 0} "
+            f"directive_type_map={directive} -> { {'REQUIRE_DATE_PICKER': 'SELECT_DATE', 'REQUIRE_TIME_SLOT_GRID': 'SELECT_SLOT', 'REQUIRE_SELECT': 'SELECT_SLOT', 'SELECT_DROPDOWN': 'SELECT_SLOT', 'REQUEST_CONFIRMATION': 'CONFIRM_BOOKING'}.get(directive, 'UNKNOWN')} "
+            f"booking_date={_diag_date} active_directive_id={str(_diag_active)[:8] if _diag_active else None} state_data_keys={list(_diag_state_data.keys())[:6] if isinstance(_diag_state_data, dict) else 'not_dict'}"
+        )
+    except Exception as _diag_e:
+        logger.warning(f"DIRECTIVE_DIAG failed: {_diag_e}")
+    # WhatsApp BookingDirective — create persisted directive for structured UI
+    # (WhatsApp-only, behind no flag for now as requested — widget keeps its own path)
+    # whatsapp_cloud (Meta Cloud API) is WhatsApp-class: same directives/IDs/handler.
+    _is_whatsapp = str(getattr(chat_session, "channel", "")).lower() in ("whatsapp", "whatsapp_cloud")
+    _directive_created = None
+    if _is_whatsapp and directive in ("REQUIRE_DATE_PICKER", "REQUIRE_TIME_SLOT_GRID", "REQUIRE_SELECT", "SELECT_DROPDOWN", "REQUEST_CONFIRMATION", "BOOKING_SUMMARY_CARD"):
+        try:
+            from app.engine.booking_directive.service import create_directive as _create_dir
+            from app.engine.booking_directive.service import DirectiveType as _DT
+
+            _type_map = {
+                "REQUIRE_DATE_PICKER": _DT.SELECT_DATE,
+                "REQUIRE_TIME_SLOT_GRID": _DT.SELECT_SLOT,
+                "REQUIRE_SELECT": _DT.SELECT_SLOT,
+                "SELECT_DROPDOWN": _DT.SELECT_SLOT,
+                "REQUEST_CONFIRMATION": _DT.CONFIRM_BOOKING,
+                "BOOKING_SUMMARY_CARD": _DT.CONFIRM_BOOKING,
+            }
+            _dtype = _type_map.get(directive)
+            if _dtype:
+                _opts = []
+                _raw = directive_meta.get("options") if isinstance(directive_meta, dict) else []
+                # If raw is empty for SELECT_DATE/SLOT, generate authoritatively so directive is never skipped
+                if not _raw and _dtype in (_DT.SELECT_DATE, _DT.SELECT_SLOT):
+                    try:
+                        if _dtype == _DT.SELECT_DATE:
+                            from app.engine.message_processor import _upcoming_date_options
+
+                            _tz = str(getattr(org_config, "timezone", None) or "UTC")
+                            _max = int(getattr(org_config, "max_booking_days_ahead", 30) or 30)
+                            _gen = _upcoming_date_options(_tz, _max)
+                            _raw = _gen if _gen else []
+                        elif _dtype == _DT.SELECT_SLOT:
+                            # Generate real slots for the current booking date
+                            _target = None
+                            if isinstance(directive_meta, dict):
+                                _target = directive_meta.get("target_date") or directive_meta.get("date")
+                            if not _target:
+                                _target = (chat_session.collected_data or {}).get("date")
+                            if _target:
+                                from dateutil.parser import parse as _parse
+                                from app.engine.slot_engine import compute_slot_inventory, format_slot_time
+                                from app.engine.scheduling_policy import resolve_effective_timezone_policy
+
+                                _parsed = _parse(str(_target)).date()
+                                _org_cfg = org_config
+                                _tz_name = str(getattr(_org_cfg, "timezone", None) or "UTC")
+                                _inv, _stat = await compute_slot_inventory(db, org.id, _parsed, org_config=_org_cfg)
+                                _tz_res = resolve_effective_timezone_policy(
+                                    requested_tz=(chat_session.collected_data or {}).get("user_timezone"),
+                                    org_tz=_tz_name,
+                                    requested_source=(chat_session.collected_data or {}).get("timezone_source"),
+                                )
+                                from app.engine.slot_engine import apply_scheduling_policy_to_inventory
+
+                                _inv, _stat, _ = apply_scheduling_policy_to_inventory(
+                                    _inv, _parsed, base_status=_stat, effective_timezone=str(_tz_res.get("effective_timezone") or _tz_name), allow_same_day_booking=False, slot_cutoff_minutes=5
+                                )
+                                try:
+                                    from zoneinfo import ZoneInfo
+                                except ImportError:
+                                    from backports.zoneinfo import ZoneInfo
+                                try:
+                                    _tz_obj = ZoneInfo(str(_tz_res.get("effective_timezone") or _tz_name))
+                                except Exception:
+                                    import datetime as _dt
+
+                                    _tz_obj = _dt.timezone.utc
+                                _slot_labels = []
+                                for _it in _inv:
+                                    if not _it.get("available"):
+                                        continue
+                                    _s = _it.get("start_utc")
+                                    if _s is None:
+                                        continue
+                                    try:
+                                        if getattr(_s, "tzinfo", None) is None:
+                                            import datetime as _dt2
+
+                                            _s = _s.replace(tzinfo=_dt2.timezone.utc)
+                                        _slot_labels.append(format_slot_time(_s.astimezone(_tz_obj).time()))
+                                    except Exception:
+                                        continue
+                                    if len(_slot_labels) >= 10:
+                                        break
+                                _raw = _slot_labels
+                    except Exception as _e:
+                        logger.warning(f"Directive option generation failed for {_dtype}: {_e}", exc_info=True)
+                        _raw = []
+                for _i, _o in enumerate((_raw or [])[:10]):
+                    _label = str(_o) if isinstance(_o, str) else str(_o.get("label") or _o.get("title") or _o)
+                    # For SELECT_DATE, value must be ISO
+                    _value = _label
+                    _oid = f"{_dtype.lower()}_{_i}_{_label.replace(' ', '_')[:20]}"
+                    if _dtype == _DT.SELECT_DATE:
+                        try:
+                            from dateutil.parser import parse as _parse_date
+
+                            _parsed = _parse_date(_label)
+                            if _parsed.year < 2000:
+                                from datetime import datetime as _dt
+
+                                _now_year = _dt.now().year
+                                try:
+                                    _parsed = _parse_date(f"{_label} {_now_year}")
+                                except Exception:
+                                    pass
+                            _value = _parsed.date().isoformat()
+                            _oid = f"date_{_value.replace('-', '')}"
+                        except Exception:
+                            _value = _label
+                            _oid = f"date_{_label.replace(' ', '_').replace(',', '')[:20]}"
+                    elif _dtype == _DT.SELECT_SLOT:
+                        # Stable id with date prefix
+                        _target_for_id = None
+                        if isinstance(directive_meta, dict):
+                            _target_for_id = directive_meta.get("target_date") or directive_meta.get("date")
+                        if not _target_for_id:
+                            _target_for_id = (chat_session.collected_data or {}).get("date") or "slot"
+                        _oid = f"slot_{str(_target_for_id).replace('-', '')}_{_label.replace(':', '').replace(' ', '')}"
+                        _value = _label
+                    _opts.append({"id": _oid, "label": _label, "value": _value})
+                if _dtype == _DT.CONFIRM_BOOKING and not _opts:
+                    _opts = [{"id": "confirm_booking", "label": "CONFIRM", "value": "confirm"}, {"id": "change_booking", "label": "CHANGE", "value": "change"}]
+                if _opts or _dtype == _DT.CONFIRM_BOOKING:
+                    # Use stable WhatsApp sender identity (channel_user_id) as customer_id
+                    # Do NOT fallback to session_id — booking_directives.customer_id must equal whatsapp from_phone
+                    _customer_id = str(getattr(chat_session, "channel_user_id", "") or "").strip()
+                    if not _customer_id:
+                        # Fallback: try to derive from collected_data phone if channel_user_id not yet set (first turn race)
+                        _phone_from_data = str((chat_session.collected_data or {}).get("phone") or "").strip()
+                        import re as _re2
+                        _digits = _re2.sub(r"\D", "", _phone_from_data)
+                        _customer_id = _digits if len(_digits) >= 7 else ""
+                    if not _customer_id:
+                        logger.warning(f"Directive create skipped: no customer_id for session {str(chat_session.session_id)[:8]} channel={getattr(chat_session, 'channel', '')}")
+                    else:
+                        _directive_created = await _create_dir(
+                            db,
+                            org_id=org.id,
+                            customer_id=_customer_id,
+                            session_id=chat_session.session_id,
+                            type=_dtype,
+                            title="Select your preferred date" if _dtype == _DT.SELECT_DATE else "Select your preferred time" if _dtype in (_DT.SELECT_SLOT, "SELECT_TIME") else "Please confirm your booking",
+                            description="",
+                            options=_opts,
+                            required=True,
+                            expires_in_seconds=300 if _dtype in (_DT.SELECT_SLOT, "SELECT_TIME") else 600,
+                            meta={"field_name": directive_meta.get("name") if isinstance(directive_meta, dict) else None, "directive": directive, **(directive_meta if isinstance(directive_meta, dict) else {})},
+                        )
+                        # Persist active_directive_id synchronously before response
+                        _cd = dict(chat_session.collected_data or {})
+                        _cd["active_directive_id"] = str(_directive_created.id)
+                        chat_session.collected_data = _cd
+                        await db.flush()
+                        await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+                        await db.flush()
+                        logger.info(f"Directive persisted: id={str(_directive_created.id)[:8]} type={_dtype} customer={_customer_id[-4:]} session={str(chat_session.session_id)[:8]}")
+                        # Ensure the rendered reply uses the persisted directive's stable IDs/values
+                        if isinstance(directive_meta, dict):
+                            directive_meta["options"] = [dict(o) for o in _directive_created.options]
+                        if isinstance(field_meta, dict) and isinstance(directive_meta, dict):
+                            for _k, _v in directive_meta.items():
+                                field_meta[_k] = _v
+        except Exception as _e:
+            logger.exception(f"Directive create failed: {_e}")
+    # WhatsApp parity: date picker needs tappable options just like the widget's
+    # calendar. The widget ignores field_meta.options for dates, but WhatsApp
+    # renders them as a list — ensure 7 upcoming days are present.
+    if directive == "REQUIRE_DATE_PICKER" and isinstance(directive_meta, dict) and not directive_meta.get("options"):
+        try:
+            from app.engine.message_processor import _upcoming_date_options
+
+            _org_tz = str(getattr(org_config, "timezone", None) or "UTC")
+            _max_days = int(getattr(org_config, "max_booking_days_ahead", 90) or 90)
+            _opts = _upcoming_date_options(_org_tz, _max_days)
+            directive_meta["options"] = _opts
+            field_meta.update(directive_meta)
+            logger.info(f"DATE_LIST_INJECTED directive={directive} opts={len(_opts)}")
+        except Exception as _e:
+            logger.warning(f"DATE_LIST_INJECT failed: {_e}")
+    elif directive == "REQUIRE_DATE_PICKER":
+        logger.info(f"DATE_LIST_SKIP directive={directive} has_options={bool(directive_meta.get('options')) if isinstance(directive_meta, dict) else 'no_meta'}")
+    # Proactive hours for WhatsApp parity: when asking for date/time, show
+    # a concise hours line contextually as per message flow (no verbose block).
+    if directive in ("REQUIRE_DATE_PICKER", "REQUIRE_TIME_SLOT_GRID"):
+        try:
+            _short = "Hours: Mon-Fri 9:00 AM–5:00 PM, Sat 9:00 AM–4:00 PM, Sun Closed (Asia/Calcutta)"
+            try:
+                from app.engine.scheduling_policy import load_weekly_hours_block
+
+                _full = await load_weekly_hours_block(db, str(org.id))
+                if _full and "Monday" in _full:
+                    _first = _full.split("\n")[0].replace("## ", "").replace(" (authoritative — answer timing questions from this)", "")
+                    if len(_first) < 120:
+                        _short = _first.strip()
+            except Exception:
+                pass
+            if isinstance(assistant_message, str) and "Hours:" not in assistant_message and "business hours" not in assistant_message.lower():
+                assistant_message = f"{_short}\n{assistant_message}"
+        except Exception:
+            pass
     is_valid_directive, validation_error = StateEvaluator.validate_directive_payload(
         directive,
         directive_meta,
@@ -1321,11 +1622,36 @@ async def process_message_with_graph(
                         ),
                     )
                 )
-                options = [
-                    format_slot_time(item["start_utc"].time())
-                    for item in inventory
-                    if item["available"]
-                ]
+                # Convert UTC slot times to the effective timezone for display
+                try:
+                    from zoneinfo import ZoneInfo
+                except ImportError:
+                    from backports.zoneinfo import ZoneInfo  # type: ignore
+                try:
+                    _tz_for_slots = ZoneInfo(str(timezone_resolution.get("effective_timezone") or org_timezone or "UTC"))
+                except Exception:
+                    import datetime as _dt
+
+                    _tz_for_slots = _dt.timezone.utc
+                options = []
+                for item in inventory:
+                    if not item.get("available"):
+                        continue
+                    _start = item.get("start_utc")
+                    if _start is None:
+                        continue
+                    try:
+                        if getattr(_start, "tzinfo", None) is None:
+                            import datetime as _dt2
+
+                            _start = _start.replace(tzinfo=_dt2.timezone.utc)
+                        _local_time = _start.astimezone(_tz_for_slots).time()
+                        options.append(format_slot_time(_local_time))
+                    except Exception:
+                        try:
+                            options.append(format_slot_time(item["start_utc"].time()))
+                        except Exception:
+                            continue
                 field_meta["options"] = options
                 field_meta["availability_status"] = availability_status
                 if policy_reason_code:
@@ -1395,6 +1721,26 @@ async def process_message_with_graph(
                     "I couldn't load the available times right now. "
                     "Please pick a date and I'll try again."
                 )
+
+    # Proactive hours for WhatsApp parity: when asking for date/time, show
+    # a concise hours line contextually as per message flow (no full paragraph)
+    if directive in ("REQUIRE_DATE_PICKER", "REQUIRE_TIME_SLOT_GRID"):
+        try:
+            _short = "Hours: Mon-Fri 9:00 AM–5:00 PM, Sat 9:00 AM–4:00 PM, Sun Closed (Asia/Calcutta)"
+            try:
+                from app.engine.scheduling_policy import load_weekly_hours_block
+
+                _full = await load_weekly_hours_block(db, str(org.id))
+                if _full and "Monday" in _full:
+                    _first = _full.split("\n")[0].replace("## ", "").replace(" (authoritative — answer timing questions from this)", "")
+                    if len(_first) < 120:
+                        _short = _first.strip()
+            except Exception:
+                pass
+            if isinstance(assistant_message, str) and "Hours:" not in assistant_message and "business hours" not in assistant_message.lower():
+                assistant_message = f"{_short}\n{assistant_message}"
+        except Exception:
+            pass
 
     # Enforce one-by-one flow: override LLM dump of "provide name, email, phone, date, time" with deterministic single-field ask
     _single_field_directives = {

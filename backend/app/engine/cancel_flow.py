@@ -723,8 +723,46 @@ async def _handle_otp_stage(
         )
 
     # User typed the 6-digit code in the chat instead of the code box.
-    # Re-show the modal deterministically — no LLM call needed.
+    # On WhatsApp there is no code box — verify directly. On web, re-show the modal.
     if re.fullmatch(r"\d{6}", text):
+        # whatsapp_cloud has no code box either — same direct-verify path.
+        _is_whatsapp = str(getattr(chat_session, "channel", "")).lower() in ("whatsapp", "whatsapp_cloud")
+        if _is_whatsapp:
+            try:
+                _code = text.strip()
+                # Try email channel first (cancel OTP is email-based), then phone
+                _verified = False
+                for _ch in ("email", "phone"):
+                    try:
+                        if await otp_crud.verify_otp(db, chat_session.session_id, code=_code, channel=_ch):
+                            _verified = True
+                            _ver_channel = _ch
+                            break
+                    except ValueError:
+                        # Too many attempts etc. — surface as invalid
+                        pass
+                if _verified:
+                    flow["otp_verified"] = True
+                    set_cancel_flow(chat_session, stage="otp", otp_verified=True, booking_id=str(flow.get("booking_id") or ""), email=str(flow.get("email") or ""))
+                    await _persist_session(db, chat_session)
+                    return await _execute_cancellation(db, org, org_config, chat_session, flow, background_tasks)
+                # Invalid code — show error and re-prompt, don't loop silently
+                email = str(flow.get("email") or "your email address")
+                meta: Dict[str, Any] = {"cancel_flow": True, "validation_error": "That code is incorrect or has expired. Please try again."}
+                try:
+                    meta.update(await otp_crud.get_otp_policy_metadata(db, chat_session.session_id))
+                except Exception:
+                    pass
+                action = ActionPayload(
+                    message=f"That code is incorrect or has expired. Please enter the correct code sent to **{email}**.",
+                    widget_directive="REQUIRE_OTP_MODAL",
+                    field_meta=meta,
+                )
+                await _save_transcript(db, chat_session.session_id, message_text, action.message, action.widget_directive, intent="CANCEL_BOOKING")
+                return action
+            except Exception as _e:
+                logger.warning(f"Cancel OTP chat verify failed: {_e}")
+        # Web: re-show the modal deterministically — no LLM call needed.
         email = str(flow.get("email") or "your email address")
         meta: Dict[str, Any] = {"cancel_flow": True}
         try:

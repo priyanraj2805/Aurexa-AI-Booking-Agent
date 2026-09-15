@@ -147,6 +147,14 @@ class Settings(BaseSettings):
     WHATSAPP_OTP_TEMPLATE_NAME: str = os.getenv("WHATSAPP_OTP_TEMPLATE_NAME", "")  # empty = plain text for test
     WHATSAPP_OTP_LANGUAGE: str = os.getenv("WHATSAPP_OTP_LANGUAGE", "en_US")
 
+    # ── Meta WhatsApp Cloud API webhook (receive-only foundation) ────────
+    # WABA phone number id this webhook belongs to (e.g. 1288066011058334).
+    # Compared against metadata.phone_number_id; mismatches are logged + skipped.
+    META_WHATSAPP_PHONE_NUMBER_ID: str = os.getenv("META_WHATSAPP_PHONE_NUMBER_ID", "")
+    # Webhook verification token for Meta's GET handshake (hub.verify_token).
+    # Never the Meta access token. Fail-closed when empty.
+    META_WHATSAPP_WEBHOOK_VERIFY_TOKEN: str = os.getenv("META_WHATSAPP_WEBHOOK_VERIFY_TOKEN", "")
+
     # ── WhatsApp QR gateway (Baileys transport, per-org sessions) ─────────
     # Shared secret for backend<->wa-gateway HTTP auth (both sides must match).
     WA_GATEWAY_SERVICE_KEY: str = os.getenv("WA_GATEWAY_SERVICE_KEY", "")

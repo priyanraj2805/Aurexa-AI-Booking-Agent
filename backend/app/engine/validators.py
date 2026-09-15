@@ -144,6 +144,26 @@ class DataValidator:
                     return canonical, None, metadata
             except NumberParseException:
                 pass
+            # WhatsApp free text carries no country selector. For this
+            # deployment (IN org, Asia/Calcutta) a bare 10-digit mobile
+            # starting 6-9 is Indian — retry as IN so Cloud/OTP gets a
+            # routable +91 E.164 instead of a bare +<10 digits>.
+            if not normalized_country:
+                _digits_only = re.sub(r"\D", "", raw_input)
+                if len(_digits_only) == 10 and _digits_only[0] in "6789":
+                    try:
+                        _parsed_in = phonenumbers.parse(_digits_only, "IN")
+                        if phonenumbers.is_valid_number(_parsed_in):
+                            metadata["country_code"] = "IN"
+                            return (
+                                phonenumbers.format_number(
+                                    _parsed_in, phonenumbers.PhoneNumberFormat.E164
+                                ),
+                                None,
+                                metadata,
+                            )
+                    except NumberParseException:
+                        pass
             # Not strictly valid per the national numbering plan (e.g. test
             # numbers like "+91 456781230"). Fall through to the lenient
             # digit-length check below instead of hard-rejecting the input.

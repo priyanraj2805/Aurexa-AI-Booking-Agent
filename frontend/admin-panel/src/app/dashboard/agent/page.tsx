@@ -479,6 +479,21 @@ export default function AgentCorePage() {
   // Booking settings state
   const [requireOtp, setRequireOtp] = useState(true);
   const [requirePhoneOtp, setRequirePhoneOtp] = useState(false);
+  // WhatsApp booking toggle state (Integrations → WhatsApp). Phone OTP is
+  // only meaningful while WhatsApp booking is enabled; null = not loaded yet.
+  const [waBookingEnabled, setWaBookingEnabled] = useState<boolean | null>(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await api.get<{ booking_enabled?: boolean }>(
+          "/dashboard/whatsapp-qr/status"
+        );
+        setWaBookingEnabled(data.booking_enabled ?? false);
+      } catch {
+        setWaBookingEnabled(false);
+      }
+    })();
+  }, []);
   const [meetingMode, setMeetingMode] = useState<"OFFLINE_ONLY" | "ONLINE_ONLY" | "HYBRID">("OFFLINE_ONLY");
   const [allowHybridSelection, setAllowHybridSelection] = useState(true);
   const [meetingProviderDefault, setMeetingProviderDefault] = useState<"NONE" | "GOOGLE_MEET">("NONE");
@@ -1112,6 +1127,7 @@ export default function AgentCorePage() {
                   type="button"
                   role="switch"
                   aria-checked={requirePhoneOtp}
+                  aria-label="Phone OTP Verification"
                   onClick={() => setRequirePhoneOtp(!requirePhoneOtp)}
                   className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                     requirePhoneOtp ? "bg-primary" : "bg-secondary"

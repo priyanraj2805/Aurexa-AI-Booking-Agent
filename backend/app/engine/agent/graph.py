@@ -150,12 +150,22 @@ if _normalized_llm_base_url != settings.LLM_BASE_URL:
         },
     )
 
-llm = ChatOpenAI(
-    base_url=_normalized_llm_base_url,
-    api_key=settings.LLM_API_KEY,
-    model=settings.LLM_MODEL,
-    temperature=0
-)
+# Mercury (Inception Labs) uses reasoning_effort param; pass only for that family
+if "mercury" in settings.LLM_MODEL.lower():
+    llm = ChatOpenAI(
+        base_url=_normalized_llm_base_url,
+        api_key=settings.LLM_API_KEY,
+        model=settings.LLM_MODEL,
+        temperature=0,
+        reasoning_effort="low",
+    )
+else:
+    llm = ChatOpenAI(
+        base_url=_normalized_llm_base_url,
+        api_key=settings.LLM_API_KEY,
+        model=settings.LLM_MODEL,
+        temperature=0,
+    )
 
 # Fallback LLM — used when the primary provider fails (rate limit, timeout,
 # 5xx). Disabled entirely when the fallback env vars are empty.

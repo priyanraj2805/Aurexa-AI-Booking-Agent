@@ -46,8 +46,9 @@ def format_action_for_whatsapp(action_payload) -> dict:
     if directive == "BOOKING_CONFIRMED_CARD":
         return {"type": "text", "body": message}
 
-    # Select dropdown → interactive list or buttons
-    if directive == "SELECT_DROPDOWN" and action_payload.field_meta:
+    # Select dropdown / select field → interactive list or buttons
+    # Chat widget uses REQUIRE_SELECT for custom select fields, SELECT_DROPDOWN is legacy
+    if directive in ("SELECT_DROPDOWN", "REQUIRE_SELECT") and action_payload.field_meta:
         options = action_payload.field_meta.get("options", [])
         if 1 <= len(options) <= 3:
             return {
@@ -68,8 +69,41 @@ def format_action_for_whatsapp(action_payload) -> dict:
                 "sections": [{"title": "Options", "rows": rows}],
             }
 
-    # Date/time pickers → plain text (WhatsApp has no native pickers)
+    # Date picker / time slots → interactive list when options exist.
+    # WhatsApp has no native pickers, but tappable rows beat free text — and
+    # taps arrive as plain text that parses through the normal validators.
+    # Without options, fall back to plain text (unchanged behavior).
     if directive in ("REQUIRE_DATE_PICKER", "REQUIRE_TIME_SLOT_GRID"):
+        try:
+            options = [
+                str(o).strip()
+                for o in ((action_payload.field_meta or {}).get("options") or [])
+                if str(o).strip()
+            ]
+        except Exception:
+            options = []
+        if options:
+            shown, extra = options[:10], max(0, len(options) - 10)
+            body = message
+            if extra:
+                body = f"{message}\n\n…and {extra} more — reply with your preferred time."
+            return {
+                "type": "interactive_list",
+                "body": body,
+                "button_text": "Choose date"
+                if directive == "REQUIRE_DATE_PICKER"
+                else "Choose time",
+                "sections": [
+                    {
+                        "title": "Upcoming days"
+                        if directive == "REQUIRE_DATE_PICKER"
+                        else "Available times",
+                        "rows": [
+                            {"id": o[:64], "title": o[:24]} for o in shown
+                        ],
+                    }
+                ],
+            }
         return {"type": "text", "body": message}
 
     # Default: plain text

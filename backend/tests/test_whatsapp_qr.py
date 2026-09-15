@@ -302,7 +302,15 @@ class TestQrInbound:
             await db_session.execute(select(OrgConfig).where(OrgConfig.org_id == org_id))
         ).scalars().first()
         assert cfg is not None  # registration creates it
-        row = WhatsAppConnection(org_id=org_id, status="CONNECTED", phone_number="919521433306")
+        from app.models.config import MeetingMode
+
+        cfg.meeting_mode = MeetingMode.HYBRID
+        row = WhatsAppConnection(
+            org_id=org_id,
+            status="CONNECTED",
+            phone_number="919521433306",
+            whatsapp_booking_enabled=True,
+        )
         db_session.add(row)
         await db_session.commit()
         await db_session.refresh(row)
@@ -372,10 +380,16 @@ class TestQrInbound:
 
         monkeypatch.setattr(runtime_router, "route_whatsapp_message", fake_route)
         org_id = registered_user["user"]["org_id"]
-        assert (
+        from app.models.config import MeetingMode
+
+        cfg = (
             await db_session.execute(select(OrgConfig).where(OrgConfig.org_id == org_id))
-        ).scalars().first() is not None
-        row = WhatsAppConnection(org_id=org_id, status="CONNECTED")
+        ).scalars().first()
+        assert cfg is not None  # registration creates it
+        cfg.meeting_mode = MeetingMode.HYBRID
+        row = WhatsAppConnection(
+            org_id=org_id, status="CONNECTED", whatsapp_booking_enabled=True
+        )
         db_session.add(row)
         await db_session.commit()
         await db_session.refresh(row)
@@ -390,3 +404,192 @@ class TestQrInbound:
         assert body["status"] == "ok"
         assert body["reply"]["type"] == "text"
         assert "₹500.00" in body["reply"]["body"]
+
+
+# ── Booking toggle gate ──────────────────────────────────────────────────
+
+class TestBookingToggle:
+    def _headers(self, monkeypatch):
+        monkeypatch.setattr(settings, "WA_GATEWAY_SERVICE_KEY", "test-gw-key")
+        return {"X-Gateway-Key": "test-gw-key"}
+
+    def _payload(self, connection_id, **over):
+        body = {
+            "connectionId": str(connection_id),
+            "messageId": "wamid.HBgMtoggle1",
+            "from": "919521433306",
+            "chatJid": "919521433306@s.whatsapp.net",
+            "text": "Hi, I need an appointment",
+        }
+        body.update(over)
+        return body
+
+    async def _cfg(self, db_session, org_id):
+        from app.models.config import OrgConfig
+
+        cfg = (
+            await db_session.execute(select(OrgConfig).where(OrgConfig.org_id == org_id))
+        ).scalars().first()
+        assert cfg is not None  # registration creates it
+        return cfg
+
+    async def test_toggle_requires_existing_row(
+        self, client, registered_user
+    ):
+        h = registered_user["headers"]
+        r = await client.post(
+            "/api/v1/dashboard/whatsapp-qr/booking-toggle",
+            json={"enabled": True},
+            headers=h,
+        )
+        assert r.status_code == 404
+
+    async def test_toggle_roundtrip_updates_snapshot(
+        self, client, registered_user, monkeypatch, db_session
+    ):
+        h = registered_user["headers"]
+        org_id = registered_user["user"]["org_id"]
+        db_session.add(
+            WhatsAppConnection(org_id=org_id, status="CONNECTED")
+        )
+        await db_session.commit()
+        fake = FakeGateway()
+        _patch(monkeypatch, fake)
+
+        r = await client.get(
+            "/api/v1/dashboard/whatsapp-qr/status", headers=h
+        )
+        assert r.status_code == 200
+        assert r.json()["booking_enabled"] is False
+        assert r.json()["booking_active"] is False
+
+        # Enabling WhatsApp booking auto-enables email OTP (default channel):
+        # force it off first so the toggle-on must turn it back on.
+        from app.models.config import OrgConfig
+
+        cfg = (
+            await db_session.execute(
+                select(OrgConfig).where(
+                    OrgConfig.org_id == registered_user["user"]["org_id"]
+                )
+            )
+        ).scalars().first()
+        cfg.require_otp = False
+        cfg.require_phone_otp = True
+        await db_session.commit()
+
+        r = await client.post(
+            "/api/v1/dashboard/whatsapp-qr/booking-toggle",
+            json={"enabled": True},
+            headers=h,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["booking_enabled"] is True
+        await db_session.refresh(cfg)
+        assert cfg.require_otp is True
+        assert cfg.require_phone_otp is True  # phone OTP stays independently controllable
+
+        r = await client.post(
+            "/api/v1/dashboard/whatsapp-qr/booking-toggle",
+            json={"enabled": False},
+            headers=h,
+        )
+        assert r.status_code == 200
+        assert r.json()["booking_enabled"] is False
+
+    async def test_inbound_ignored_when_toggle_off(
+        self, client, registered_user, monkeypatch, db_session
+    ):
+        from types import SimpleNamespace
+        from app.engine import runtime_router
+
+        calls = []
+
+        async def fake_route(*, db, org, org_config, chat_session, message_text, background_tasks=None):
+            calls.append(message_text)
+            return SimpleNamespace(widget_directive="TEXT_INPUT", message="Hi!", field_meta=None)
+
+        monkeypatch.setattr(runtime_router, "route_whatsapp_message", fake_route)
+        org_id = registered_user["user"]["org_id"]
+        row = WhatsAppConnection(org_id=org_id, status="CONNECTED")
+        db_session.add(row)
+        await db_session.commit()
+        await db_session.refresh(row)
+
+        r = await client.post(
+            "/api/v1/internal/whatsapp-qr/inbound",
+            json=self._payload(row.id),
+            headers=self._headers(monkeypatch),
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "ignored"
+        assert r.json()["reason"] == "disabled_by_admin"
+        assert calls == []  # engine never invoked
+
+    async def test_inbound_proceeds_regardless_of_meeting_mode(
+        self, client, registered_user, monkeypatch, db_session
+    ):
+        """Meeting mode describes the meeting type, not channel permission:
+        toggle ON + OFFLINE_ONLY still processes inbound."""
+        from types import SimpleNamespace
+        from app.engine import runtime_router
+        from app.models.config import MeetingMode
+
+        calls = []
+
+        async def fake_route(*, db, org, org_config, chat_session, message_text, background_tasks=None):
+            calls.append(message_text)
+            return SimpleNamespace(widget_directive="TEXT_INPUT", message="Hi!", field_meta=None)
+
+        monkeypatch.setattr(runtime_router, "route_whatsapp_message", fake_route)
+        org_id = registered_user["user"]["org_id"]
+        cfg = await self._cfg(db_session, org_id)
+        cfg.meeting_mode = MeetingMode.OFFLINE_ONLY  # explicit offline
+        row = WhatsAppConnection(
+            org_id=org_id, status="CONNECTED", whatsapp_booking_enabled=True
+        )
+        db_session.add(row)
+        await db_session.commit()
+        await db_session.refresh(row)
+
+        r = await client.post(
+            "/api/v1/internal/whatsapp-qr/inbound",
+            json=self._payload(row.id, messageId="wamid.HBgMtoggle2"),
+            headers=self._headers(monkeypatch),
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "ok"
+        assert calls == ["Hi, I need an appointment"]
+
+    async def test_inbound_proceeds_when_enabled_and_hybrid(
+        self, client, registered_user, monkeypatch, db_session
+    ):
+        from types import SimpleNamespace
+        from app.engine import runtime_router
+        from app.models.config import MeetingMode
+
+        calls = []
+
+        async def fake_route(*, db, org, org_config, chat_session, message_text, background_tasks=None):
+            calls.append(message_text)
+            return SimpleNamespace(widget_directive="TEXT_INPUT", message="Hi!", field_meta=None)
+
+        monkeypatch.setattr(runtime_router, "route_whatsapp_message", fake_route)
+        org_id = registered_user["user"]["org_id"]
+        cfg = await self._cfg(db_session, org_id)
+        cfg.meeting_mode = MeetingMode.HYBRID
+        row = WhatsAppConnection(
+            org_id=org_id, status="CONNECTED", whatsapp_booking_enabled=True
+        )
+        db_session.add(row)
+        await db_session.commit()
+        await db_session.refresh(row)
+
+        r = await client.post(
+            "/api/v1/internal/whatsapp-qr/inbound",
+            json=self._payload(row.id, messageId="wamid.HBgMtoggle3"),
+            headers=self._headers(monkeypatch),
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "ok"
+        assert calls == ["Hi, I need an appointment"]

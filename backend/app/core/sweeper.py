@@ -107,3 +107,18 @@ async def cleanup_expired_slot_locks(db: AsyncSession) -> int:
         logger.info(f"Deleted {count} expired lock-only slot rows")
 
     return count
+
+
+async def cleanup_expired_directives(db: AsyncSession) -> int:
+    """Expire PENDING directives past expires_at. Used by sweeper (no new table impact)."""
+    from app.engine.booking_directive.service import expire_stale
+
+    try:
+        count = await expire_stale(db)
+        if count:
+            await db.commit()
+            logger.info(f"Expired {count} stale booking directives")
+        return count
+    except Exception as exc:  # pragma: no cover - never break slot cleanup
+        logger.warning(f"Directive expire failed: {exc}")
+        return 0

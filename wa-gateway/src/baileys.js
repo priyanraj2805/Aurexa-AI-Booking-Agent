@@ -32,7 +32,39 @@ async function defaultMakeSocket({ authDir, state, saveCreds, hooks, log }) {
   }
   let childLogger;
   try {
-    childLogger = require('pino')({ level: 'warn' });
+    const base = require('pino')({ level: 'warn' });
+    // Downgrade the noisy post-connect init-queries timeout (408) from
+    // error → warn. It's transient (one per fresh socket) and messaging
+    // continues fine — no need for a red error in combined logs.
+    const wrap = (fn, lvl) => (...args) => {
+      try {
+        const text = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+        if (text.includes('init queries') && text.includes('Timed Out')) {
+          return base.warn(...args);
+        }
+      } catch (_) {}
+      return fn(...args);
+    };
+    childLogger = {
+      trace: base.trace.bind(base),
+      debug: base.debug.bind(base),
+      info: base.info.bind(base),
+      warn: base.warn.bind(base),
+      error: wrap(base.error.bind(base), 'error'),
+      fatal: base.fatal.bind(base),
+      child: (...a) => {
+        const c = base.child(...a);
+        return {
+          trace: c.trace.bind(c),
+          debug: c.debug.bind(c),
+          info: c.info.bind(c),
+          warn: c.warn.bind(c),
+          error: wrap(c.error.bind(c), 'error'),
+          fatal: c.fatal.bind(c),
+          child: c.child.bind(c),
+        };
+      },
+    };
   } catch (_) {
     childLogger = undefined;
   }

@@ -10,6 +10,7 @@ from app.api.v1.endpoints import (
     email,
     monitoring,
     whatsapp_qr,
+    whatsapp_webhook,
     widget,
     widget_ws,
     slots_bulk,
@@ -33,6 +34,7 @@ api_router.include_router(otp.router, prefix="/auth/security/otp", tags=["auth"]
 # Backward-compatible alias for legacy widget clients.
 api_router.include_router(otp.router, prefix="/auth/otp", tags=["auth"])
 api_router.include_router(whatsapp_qr.router, prefix="", tags=["whatsapp-qr"])
+api_router.include_router(whatsapp_webhook.router, prefix="/whatsapp", tags=["whatsapp-webhook"])
 api_router.include_router(slots.router, prefix="/slots", tags=["slots"])
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])

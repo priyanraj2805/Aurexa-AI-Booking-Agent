@@ -508,11 +508,11 @@ async def lookup_schedule_business_hours_answer(
     # Generic timing questions ("what are your timings?") carry no date —
     # answer with the full weekly summary instead of falling through to the
     # LLM. Gated on question phrasing so booking-flow statements like
-    # "that timing works" never hijack the conversation, and skipped entirely
-    # mid-booking-flow so the LLM (which has the hours block in its prompt)
-    # can answer while continuing the flow.
+    # "that timing works" never hijack the conversation. For WhatsApp
+    # parity, we answer even mid-booking-flow (with re-ask of current field)
+    # so the user sees hours as per message flow.
     if target_date is None:
-        if in_booking_flow or not _looks_like_question(user_message):
+        if not _looks_like_question(user_message):
             return None
         if not schedule:
             return {

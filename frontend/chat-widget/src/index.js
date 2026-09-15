@@ -1368,12 +1368,14 @@
       const localNumber = fieldMeta?.raw_input || previous.localNumber || "";
 
       const countries = [
-        { code: "US", dial: "+1" },
-        { code: "GB", dial: "+44" },
-        { code: "IN", dial: "+91" },
-        { code: "AU", dial: "+61" },
-        { code: "CA", dial: "+1" },
+        { code: "US", dial: "+1", example: "(555) 000-0000" },
+        { code: "GB", dial: "+44", example: "7700 900000" },
+        { code: "IN", dial: "+91", example: "98765 43210" },
+        { code: "AU", dial: "+61", example: "400 000 000" },
+        { code: "CA", dial: "+1", example: "(555) 000-0000" },
       ];
+      const exampleFor = (code) =>
+        (countries.find((entry) => entry.code === code)?.example) || "98765 43210";
 
       const div = document.createElement("div");
       div.className = "message agent field-input-card directive-card";
@@ -1399,8 +1401,13 @@
       const localInput = document.createElement("input");
       localInput.type = "tel";
       localInput.className = "widget-phone-local";
-      localInput.placeholder = fieldMeta?.placeholder || "Enter local phone number";
+      // Per-country example beats any stale backend placeholder (e.g. a US
+      // example while IN is selected). Updates live on country change.
+      localInput.placeholder = exampleFor(countryCode);
       localInput.value = localNumber;
+      countrySelect.onchange = () => {
+        localInput.placeholder = exampleFor(countrySelect.value);
+      };
 
       row.appendChild(countrySelect);
       row.appendChild(localInput);

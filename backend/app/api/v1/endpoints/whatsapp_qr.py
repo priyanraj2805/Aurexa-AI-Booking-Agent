@@ -8,6 +8,7 @@ additionally require a non-impersonated session.
 
 import hmac
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -47,6 +48,9 @@ class ConnectionSnapshot(BaseModel):
     connected_at: Optional[str] = None
     disconnected_at: Optional[str] = None
     last_seen_at: Optional[str] = None
+    booking_enabled: bool = False
+    booking_active: bool = False
+    booking_inactive_reason: Optional[str] = None
 
 
 class QrResponse(BaseModel):
@@ -55,9 +59,30 @@ class QrResponse(BaseModel):
     expires_at: int
 
 
+class BookingToggleRequest(BaseModel):
+    enabled: bool
+
+
+def _booking_state(
+    row: Optional[WhatsAppConnection],
+) -> tuple[bool, bool, Optional[str]]:
+    """Effective WhatsApp booking state.
+
+    Booking autoreplies work if and only if the admin toggle is ON.
+    Meeting mode (online/offline/hybrid) describes the meeting type, not
+    channel permission, so it plays no part here.
+    Returns (toggle_enabled, effective_active, inactive_reason).
+    """
+    enabled = bool(row is not None and getattr(row, "whatsapp_booking_enabled", False))
+    if not enabled:
+        return enabled, False, "disabled_by_admin"
+    return enabled, True, None
+
+
 def _snapshot(row: Optional[WhatsAppConnection]) -> ConnectionSnapshot:
     if row is None:
         return ConnectionSnapshot(status="NOT_CONNECTED")
+    enabled, active, reason = _booking_state(row)
     return ConnectionSnapshot(
         status=row.status,
         phone_number=row.phone_number,
@@ -65,6 +90,9 @@ def _snapshot(row: Optional[WhatsAppConnection]) -> ConnectionSnapshot:
         connected_at=row.connected_at.isoformat() if row.connected_at else None,
         disconnected_at=row.disconnected_at.isoformat() if row.disconnected_at else None,
         last_seen_at=row.last_seen_at.isoformat() if row.last_seen_at else None,
+        booking_enabled=enabled,
+        booking_active=active,
+        booking_inactive_reason=reason,
     )
 
 
@@ -78,10 +106,12 @@ async def _get_row(db: AsyncSession, org_id: object) -> Optional[WhatsAppConnect
 def _apply_gateway_status(row: WhatsAppConnection, gw: dict) -> None:
     """Merge live socket truth into the row (identity + mapped status)."""
     gw_status = str(gw.get("status") or "")
-    if gw.get("phoneNumber"):
-        row.phone_number = str(gw["phoneNumber"])[:32]
-    if gw.get("displayName"):
-        row.display_name = str(gw["displayName"])[:255]
+    # Always sync identity when gateway provides it — including clearing
+    # stale display_name when new account has no profile name set.
+    if "phoneNumber" in gw:
+        row.phone_number = str(gw["phoneNumber"])[:32] if gw["phoneNumber"] else None
+    if "displayName" in gw:
+        row.display_name = str(gw["displayName"])[:255] if gw["displayName"] else None
     mapping = {
         "connected": WhatsAppConnectionStatus.CONNECTED,
         "awaiting_qr": WhatsAppConnectionStatus.PENDING_QR,
@@ -261,8 +291,53 @@ async def reconnect(
     return _snapshot(row)
 
 
-# ── Internal inbound from wa-gateway (service-key auth, no JWT) ──────────
+@router.post("/dashboard/whatsapp-qr/booking-toggle", response_model=ConnectionSnapshot)
+@limiter.limit("10/minute")
+async def booking_toggle(
+    body: BookingToggleRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin kill switch for WhatsApp booking autoreplies.
 
+    Connecting the number alone never enables replies — only this toggle does.
+    """
+    row = await _get_row(db, user.org_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="No WhatsApp connection. Connect first.")
+    row.whatsapp_booking_enabled = bool(body.enabled)
+    if body.enabled:
+        # WhatsApp bookings verify over email by default — enabling booking
+        # auto-enables email OTP (never auto-disables). Phone OTP remains
+        # independently controllable so OTP can still be sent on WhatsApp
+        # even while WhatsApp booking is on.
+        from app.models.config import OrgConfig as _OrgConfig
+
+        _cfg_res = await db.execute(
+            select(_OrgConfig).where(_OrgConfig.org_id == user.org_id)  # type: ignore[arg-type]
+        )
+        _cfg = _cfg_res.scalars().first()
+        if _cfg is not None and not bool(getattr(_cfg, "require_otp", True)):
+            _cfg.require_otp = True
+            logger.info(
+                "whatsapp-qr booking toggle auto-enabled email OTP org=%s",
+                user.org_id,
+            )
+    await db.commit()
+    await db.refresh(row)
+    _audit(request, background_tasks, user, AuditAction.WHATSAPP_QR_BOOKING_TOGGLE)
+    logger.info(
+        "whatsapp-qr booking toggle org=%s enabled=%s",
+        user.org_id,
+        row.whatsapp_booking_enabled,
+    )
+    return _snapshot(row)
+
+
+# ── Internal inbound from wa-gateway (service-key auth, no JWT) ──────────
 class QrInboundPayload(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -271,6 +346,7 @@ class QrInboundPayload(BaseModel):
     from_number: str = Field(alias="from")
     chatJid: str
     text: str
+    optionId: Optional[str] = Field(default=None, alias="optionId")
     timestamp: Optional[int] = None
     pushName: Optional[str] = None
 
@@ -337,11 +413,23 @@ async def qr_inbound(
     if len(from_phone) < 7 or not text:
         return {"status": "ignored"}
 
-    count = _inbound_rate_cache.get(from_phone, 0)
-    if count >= 10:
-        logger.warning("QR inbound rate limit exceeded")
-        return {"status": "rate_limited"}
-    _inbound_rate_cache[from_phone] = count + 1
+    # OTP codes and knowledge questions must never be rate-limited — they are
+    # critical paths (booking confirmation and RAG) and knowledge bursts are
+    # expected (author? → summary? → price?).
+    is_otp_code = bool(re.match(r"^\d{6}$", text))
+    is_knowledge = False
+    try:
+        from app.engine.agent.graph import _is_potential_knowledge_question
+
+        is_knowledge = _is_potential_knowledge_question(text)
+    except Exception:
+        is_knowledge = False
+    if not is_otp_code and not is_knowledge:
+        count = _inbound_rate_cache.get(from_phone, 0)
+        if count >= 10:
+            logger.warning("QR inbound rate limit exceeded")
+            return {"status": "rate_limited"}
+        _inbound_rate_cache[from_phone] = count + 1
 
     from app.crud import chat as crud_chat
     from app.engine import runtime_router
@@ -353,9 +441,97 @@ async def qr_inbound(
     if org_config is None:  # pragma: no cover — every org has one
         return {"status": "ignored"}
 
+    # Booking kill switch: replies work only when the admin toggle is ON.
+    # Merely connecting the number never enables replies.
+    _bk_enabled, _bk_active, _bk_reason = _booking_state(row)
+    if not _bk_active:
+        logger.info(
+            "qr inbound ignored (whatsapp booking disabled: %s)",
+            _bk_reason or "unknown",
+        )
+        return {"status": "ignored", "reason": _bk_reason or "whatsapp_booking_disabled"}
+
     chat_session = await crud_chat.get_or_create_channel_session(
         db, str(org.id), "whatsapp", from_phone
     )
+    # Structured directive tap — handle without LLM if text matches active directive's option
+    try:
+        _active_id = None
+        if isinstance(chat_session.collected_data, dict):
+            _active_id = chat_session.collected_data.get("active_directive_id")
+        if _active_id:
+            from app.engine.booking_directive.service import get_by_id as _get_dir
+            from app.engine.booking_directive import handler as _dir_handler
+
+            _dir = await _get_dir(db, _active_id)
+            if _dir and _dir.status == "PENDING" and _dir.customer_id == from_phone:
+                # Check expiry
+                from datetime import datetime, timezone as _tz
+
+                if _dir.expires_at and _dir.expires_at < datetime.now(_tz.utc):
+                    _dir.status = "EXPIRED"
+                    await db.flush()
+                    logger.info(f"Directive {str(_dir.id)[:8]} expired on tap")
+                else:
+                    # Prefer stable optionId from Baileys (buttonId/rowId) if present, else match text
+                    _matched = None
+                    _incoming_oid = str(getattr(payload, "optionId", "") or "").strip()
+                    if _incoming_oid:
+                        for _opt in (_dir.options or []):
+                            if str(_opt.get("id") or "").strip() == _incoming_oid:
+                                _matched = _opt
+                                break
+                    if not _matched:
+                        _norm_text = text.strip().lower()
+                        for _opt in (_dir.options or []):
+                            _label = str(_opt.get("label") or "").strip().lower()
+                            _value = str(_opt.get("value") or "").strip().lower()
+                            _oid = str(_opt.get("id") or "").strip().lower()
+                            if _norm_text in (_label, _value, _oid) or _norm_text == _label.replace(" ", ""):
+                                _matched = _opt
+                                break
+                            try:
+                                _idx = int(_norm_text) - 1
+                                if 0 <= _idx < len(_dir.options or []) and _dir.options[_idx] == _opt:
+                                    _matched = _opt
+                                    break
+                            except Exception:
+                                pass
+                    if _matched:
+                        _res = await _dir_handler.handle_directive_response(
+                            db, directive_id=_dir.id, customer_id=from_phone, option_id=_matched.get("id"), booking_id=None
+                        )
+                        if _res.get("ok"):
+                            # Update collected_data with selected value
+                            try:
+                                _field = (_dir.meta or {}).get("field_name") or (_dir.type.lower().replace("select_", "") if _dir.type.startswith("SELECT_") else None)
+                                if _field:
+                                    _cd = dict(chat_session.collected_data or {})
+                                    # Map directive type to field name
+                                    _field_map = {"SELECT_DATE": "date", "SELECT_SLOT": "time", "SELECT_TIME": "time"}
+                                    _fname = _field_map.get(_dir.type, _field)
+                                    _cd[_fname] = _matched.get("value") or _matched.get("label")
+                                    # Clear active directive, recalc missing
+                                    _cd.pop("active_directive_id", None)
+                                    chat_session.collected_data = _cd
+                                    from app.engine.evaluator import StateEvaluator
+                                    from app.schemas.agent import parse_field_definitions, order_field_definitions
+
+                                    _fds = order_field_definitions(parse_field_definitions(chat_session.collected_data.get("field_definitions_snapshot") or org_config.field_definitions or org_config.required_fields))
+                                    _req = [f.name for f in _fds if f.required]
+                                    chat_session.missing_fields = StateEvaluator.calculate_missing_fields(_req, _cd)
+                                    await db.commit()
+                                    logger.info(f"Directive {str(_dir.id)[:8]} completed via tap: {str(_matched.get('label'))[:20]}")
+                            except Exception as _e:
+                                logger.warning(f"Directive tap state update failed: {_e}")
+                            # Generate next directive or proceed to booking via normal engine on next turn
+                            # For now, let next turn's engine handle next step — return a short ack
+                            # But to avoid an extra round-trip, we can directly invoke the engine for the next step
+                            # Fall through to normal engine with the selected value as message_text
+                            text = str(_matched.get("value") or _matched.get("label") or text)
+    except Exception as _e:
+        logger.warning(f"Directive tap handling failed, falling back to LLM: {_e}")
+
     logger.info("qr inbound session=%s (org resolved, engine next)", chat_session.session_id)
     session_lock = get_session_lock(str(chat_session.session_id))
     async with session_lock:
@@ -374,7 +550,68 @@ async def qr_inbound(
             logger.exception("qr inbound engine raised")
             raise
         _dt = _time.monotonic() - _t0
-        wa_msg = whatsapp_client.format_action_for_whatsapp(action)
+        # If a BookingDirective was just created for this turn, render it via the
+        # dedicated WhatsAppDirectiveRenderer (stable IDs) instead of the generic
+        # field_meta path. This ensures the outgoing Baileys payload contains
+        # the persisted directive's option IDs.
+        _active_id_after = None
+        try:
+            if isinstance(chat_session.collected_data, dict):
+                _active_id_after = chat_session.collected_data.get("active_directive_id")
+        except Exception:
+            pass
+        wa_msg = None
+        if _active_id_after:
+            try:
+                from app.engine.booking_directive.service import get_by_id as _get_dir2
+                from app.core.whatsapp_directive_renderer import render as _render_dir
+
+                _dir_after = await _get_dir2(db, _active_id_after)
+                if _dir_after and _dir_after.status == "PENDING":
+                    wa_msg = _render_dir(_dir_after)
+                    logger.info(f"Rendered via WhatsAppDirectiveRenderer type={_dir_after.type} directive={str(_dir_after.id)[:8]}")
+            except Exception as _e:
+                logger.warning(f"Directive render failed, falling back: {_e}")
+        if wa_msg is None:
+            wa_msg = whatsapp_client.format_action_for_whatsapp(action)
+        # Approved Marketing templates via Cloud API (language `en`), Baileys stays as fallback.
+        # Sends Cloud copy for Meta compliance; the Baileys `wa_msg` above is still
+        # returned so the QR thread keeps working (dual-sender, same as OTP today).
+        try:
+            from app.core import whatsapp_templates as _wtemplates
+
+            if _wtemplates.templates_enabled():
+                _directive = getattr(action, "widget_directive", "") or ""
+                _fmeta = getattr(action, "field_meta", None) or {}
+                _sdata = chat_session.state_data if isinstance(getattr(chat_session, "state_data", None), dict) else {}
+                _cname = str(_sdata.get("name") or "").strip() or None
+                try:
+                    _cname = _cname or str((_sdata.get("pushName") or "")).strip() or "there"
+                except Exception:
+                    _cname = _cname or "there"
+                _business = str(getattr(org, "name", "") or "Dotstark Technologies")[:60]
+                # Cloud `to` must be a routable E.164 number. `from_phone` on
+                # Baileys is often a LID (e.g. 1443.../2482...), not the real
+                # MSISDN — Meta accepts it (wamid) but never delivers. Prefer
+                # the validated phone already in state_data (now +91 by
+                # default via validators), fall back to from_phone.
+                import re as _re_tpl
+
+                _e164 = "".join(_re_tpl.findall(r"\d", str(_sdata.get("phone") or "")))
+                if len(_e164) == 10 and _e164[0] in "6789":
+                    _e164 = "91" + _e164
+                _cloud_to = _e164 if len(_e164) >= 12 else from_phone
+                if _directive == "REQUIRE_EMAIL_INPUT":
+                    _tres = await _wtemplates.send_request_email(_cloud_to, _cname if _cname != "there" else "there")
+                    logger.info("booking-template email to=%s*** sent=%s wamid=%s", str(_cloud_to)[:6], _tres.get("success"), _tres.get("wamid"))
+                elif _directive == "REQUIRE_PHONE_INPUT":
+                    _tres = await _wtemplates.send_request_phone(_cloud_to)
+                    logger.info("booking-template phone to=%s*** sent=%s wamid=%s", str(_cloud_to)[:6], _tres.get("success"), _tres.get("wamid"))
+                elif _directive == "TEXT_INPUT" and str(_fmeta.get("name") or "") == "name":
+                    _tres = await _wtemplates.send_welcome(_cloud_to, _cname, _business)
+                    logger.info("booking-template welcome to=%s*** sent=%s wamid=%s", str(_cloud_to)[:6], _tres.get("success"), _tres.get("wamid"))
+        except Exception as _e:
+            logger.warning(f"booking-template cloud send failed, Baileys fallback kept: {_e}")
         logger.info(
             "qr inbound engine done in %.1fs reply_type=%s reply_len=%s",
             _dt,

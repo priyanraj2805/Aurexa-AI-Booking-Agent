@@ -91,7 +91,10 @@ class FieldDefinition(BaseModel):
                 name="phone",
                 type="phone",
                 label="Phone Number",
-                placeholder="e.g. +1 555-000-0000",
+                # Country-neutral: the widget shows a per-country example
+                # based on the selected dial code (IN -> 98765 43210, etc.).
+                # A hardcoded US example here mismatches IN selection.
+                placeholder="e.g. 98765 43210",
                 icon="📞",
                 order=2,
             ),

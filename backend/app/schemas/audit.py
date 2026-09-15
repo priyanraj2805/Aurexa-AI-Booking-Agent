@@ -51,6 +51,7 @@ class AuditAction(str, Enum):
     # WhatsApp QR-gateway operations (Baileys transport)
     WHATSAPP_QR_CONNECT = "whatsapp.qr_connect"
     WHATSAPP_QR_DISCONNECT = "whatsapp.qr_disconnect"
+    WHATSAPP_QR_BOOKING_TOGGLE = "whatsapp.qr_booking_toggle"
 
 
 class AuditLogCreate(BaseModel):

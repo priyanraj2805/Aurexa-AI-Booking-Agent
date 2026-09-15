@@ -376,6 +376,87 @@ def _looks_like_date_candidate(value: str) -> bool:
     return False
 
 
+_GREETING_ONLY_RE = re.compile(
+    r"^(hi+|hello+|hey+|yo|sup|namaste|namaskar|salaam+|hola|bonjour|good\s*(morning|afternoon|evening|day))[\s.!…?,]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_greeting_only(text: str) -> bool:
+    """True when the message is just a greeting (punctuation tolerated).
+
+    Guards the LLM-extracted `name` slot: greetings like "Hii.." carry no
+    identity and must never become the customer's name.
+    """
+    return bool(_GREETING_ONLY_RE.match((text or "").strip()))
+
+
+# Words that can never be a person's name — the model sometimes echoes the
+# field/topic word itself ("Email ka code..." → name="Email"). Matched
+# case-insensitively against the whole normalized value.
+_RESERVED_NAME_VALUES = frozenset(
+    {
+        "email",
+        "e-mail",
+        "mail",
+        "phone",
+        "mobile",
+        "number",
+        "date",
+        "time",
+        "day",
+        "otp",
+        "code",
+        "booking",
+        "appointment",
+        "slot",
+        "name",
+        "verification",
+    }
+)
+
+
+def _is_reserved_name_value(value: object) -> bool:
+    text = re.sub(r"[^a-z]+", "", str(value or "").lower())
+    return text in _RESERVED_NAME_VALUES
+
+
+_COLLECTION_INTENTS = ("START_BOOKING", "PROVIDE_DATA")
+
+
+def _field_request_cues(field_name: Optional[str], field_label: Optional[str]) -> set:
+    """Keyword cues proving a reply asks for a given field."""
+    name = (field_name or "").strip().lower()
+    cues = {name.replace("_", " "), name} if name else set()
+    if field_label:
+        cues |= {
+            word
+            for word in re.split(r"[^a-z]+", field_label.lower())
+            if len(word) > 2
+        }
+    if name == "email":
+        cues |= {"e-mail", "mail", "verification code"}
+    elif name == "phone":
+        cues |= {"mobile", "number", "contact", "whatsapp"}
+    elif name == "date":
+        cues |= {"day", "when"}
+    elif name == "time":
+        cues |= {"slot", "timing"}
+    elif name == "name":
+        cues |= {"called", "call you", "your name"}
+    return {cue for cue in cues if cue}
+
+
+def _response_asks_for_field(
+    response: str, field_name: Optional[str], field_label: Optional[str]
+) -> bool:
+    """True when a free-form reply visibly asks for the given field."""
+    text = (response or "").lower()
+    if not text or not field_name:
+        return False
+    return any(cue in text for cue in _field_request_cues(field_name, field_label))
+
+
 def _looks_like_name_candidate(value: str) -> bool:
     raw = " ".join((value or "").split())
     if not raw:
@@ -498,6 +579,29 @@ def _extract_entities_without_llm(
             extracted[field_name] = valid[field_name]
 
     return extracted
+
+
+def _upcoming_date_options(
+    org_timezone: str, max_booking_days: int, count: int = 7
+) -> list:
+    """Next bookable day labels for WhatsApp list rows.
+
+    Titles stay plain ("Sat, Sep 13") so both taps and typed text parse
+    through the normal date validator. Availability itself is still enforced
+    downstream (empty day falls back to the date re-ask flow).
+    """
+    try:
+        tz = ZoneInfo(str(org_timezone or "UTC"))
+    except Exception:
+        tz = timezone.utc
+    today = datetime.now(tz).date()
+    days = []
+    for offset in range(count):
+        day = today + timedelta(days=offset)
+        if (day - today).days > int(max_booking_days or 90):
+            break
+        days.append(day.strftime("%a, %b %d"))
+    return days
 
 
 def _label_to_request(label: str, verb: str = "share") -> str:
@@ -772,6 +876,39 @@ async def process_message(
     )
     fd_map = {fd.name: fd for fd in field_definitions}
 
+    # ── Hours question mid-flow — answer deterministically even while booking ─
+    # If the user asks about hours/timings while mid-booking, answer from
+    # the authoritative schedule instead of letting the LLM re-ask the field.
+    # This keeps the message flow natural: hours answer + re-ask current field.
+    from app.engine.scheduling_policy import (
+        is_schedule_business_hours_query,
+        lookup_schedule_business_hours_answer,
+        resolve_effective_timezone_policy as _resolve_tz,
+    )
+    _is_hours_q = False
+    try:
+        _is_hours_q = is_schedule_business_hours_query(message_text)
+    except Exception:
+        _is_hours_q = False
+    _hours_answer = None
+    if _is_hours_q:
+        try:
+            _tz_for_hours = _resolve_tz(
+                requested_tz=str(chat_session.collected_data.get("user_timezone") or "") or None,
+                org_tz=str(org_config.timezone or "UTC"),
+                requested_source="user_selected",
+            )
+            _hours_answer = await lookup_schedule_business_hours_answer(
+                db=db,
+                org_id=str(org.id) if org else "",
+                user_message=message_text,
+                effective_timezone=str(_tz_for_hours.get("effective_timezone") or org_timezone),
+                org_timezone=str(org_config.timezone or "UTC"),
+                in_booking_flow=bool(chat_session.collected_data),
+            )
+        except Exception:
+            _hours_answer = None
+
     # ── Deterministic scope guard — before LLM to prevent hallucination ────
     # Build business scope dynamically from actual configured context, no hardcoded lists
     _scope_parts = []
@@ -784,6 +921,34 @@ async def process_message(
     # ── LLM Orchestration (Intent + Extraction + Response) ────
     prior_intent = chat_session.current_intent
     previous_missing_fields = list(chat_session.missing_fields or [])
+    # Hours question mid-booking: answer deterministically and re-ask current field
+    if _hours_answer and isinstance(_hours_answer, dict) and _hours_answer.get("response_text"):
+        hours_text = str(_hours_answer.get("response_text") or "").strip()
+        # Determine what to ask next (current missing field) to keep flow
+        _next_for_hours = StateEvaluator.determine_next_action(
+            chat_session.missing_fields or [], chat_session.current_intent, field_definitions
+        )
+        _dir_for_hours = str(_next_for_hours.get("directive") or "TEXT_INPUT")
+        _meta_for_hours = _next_for_hours.get("field_meta")
+        # If the next ask is date/time, ensure options are populated for WhatsApp lists
+        if _dir_for_hours == "REQUIRE_DATE_PICKER" and isinstance(_meta_for_hours, dict) and not _meta_for_hours.get("options"):
+            _meta_for_hours["options"] = _upcoming_date_options(org_timezone, max_booking_days)
+        # For time, the slot options will be populated later in the post-processing block,
+        # but we need to set the directive so the WhatsApp list renders.
+        _combined_msg = f"{hours_text}\n\n" + _build_context_aware_response(
+            directive=_dir_for_hours,
+            field_meta=_meta_for_hours,
+            collected_data=chat_session.collected_data,
+            valid_data={},
+            errors={},
+            llm_generated_msg=hours_text,
+            agent_name=persona.get("agent_name", "Booking Assistant"),
+        )
+        # Persist and return directly — no LLM needed, and booking progress is preserved
+        await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+        _action = ActionPayload(message=_combined_msg, widget_directive=_dir_for_hours, field_meta=_meta_for_hours)
+        await _save_transcript(db, chat_session.session_id, message_text, _combined_msg, _dir_for_hours)
+        return _action
     if is_oos:
         scope_label = persona.get("industry_context") or "our services"
         clarifying_msg = (
@@ -1128,6 +1293,17 @@ async def process_message(
     primary_missing = (
         chat_session.missing_fields[0] if chat_session.missing_fields else None
     )
+    # Greeting guard (F2): a greeting-only message ("Hii..", "hello!") carries
+    # no identity — drop any LLM-extracted `name` so greetings can never
+    # poison the name slot and confuse later turns. Same for reserved words:
+    # the model sometimes echoes the topic word itself ("Email ka code..."
+    # -> name="Email"), which is never a person's name.
+    if isinstance(raw_entities, dict) and "name" in raw_entities and (
+        _is_greeting_only(message_text)
+        or _is_reserved_name_value(raw_entities.get("name"))
+    ):
+        logger.info("greeting guard: dropping bad LLM-extracted name value")
+        raw_entities = {k: v for k, v in raw_entities.items() if k != "name"}
     if raw_entities and primary_missing:
         filtered_entities = {}
         for field, value in raw_entities.items():
@@ -1252,10 +1428,38 @@ async def process_message(
             directive = next_step.get("directive", "TEXT_INPUT")
         else:
             # User didn't try to provide data — conversational turn.
-            # Let the LLM handle it naturally (answer questions, explain why
-            # fields are needed, handle complaints).
-            directive = next_step.get("directive", "TEXT_INPUT")
-            msg = llm_generated_msg
+            # Deterministic next-field guard (F1): in collection intents the
+            # reply must ask for the true next missing field. Free-form prose
+            # that re-asks an already-collected field (the "stuck on email"
+            # loop) is replaced with the deterministic single-field ask.
+            _need_field = (chat_session.missing_fields or [None])[0]
+            _fm = next_step.get("field_meta") if isinstance(next_step, dict) else None
+            if (
+                intent in _COLLECTION_INTENTS
+                and _need_field
+                and isinstance(next_step, dict)
+                and not _response_asks_for_field(
+                    llm_generated_msg, _need_field, (_fm or {}).get("label")
+                )
+            ):
+                logger.info(
+                    "next_field_guard: free-form reply missed '%s'; using deterministic ask",
+                    _need_field,
+                )
+                msg = _build_context_aware_response(
+                    directive=next_step.get("directive", "TEXT_INPUT"),
+                    field_meta=_fm,
+                    collected_data=chat_session.collected_data,
+                    valid_data=valid_data,
+                    errors=errors,
+                    llm_generated_msg=llm_generated_msg,
+                    agent_name=persona.get("agent_name", "Booking Assistant"),
+                )
+            else:
+                # Let the LLM handle it naturally (answer questions, explain why
+                # fields are needed, handle complaints).
+                directive = next_step.get("directive", "TEXT_INPUT")
+                msg = llm_generated_msg
     elif next_step["directive"] == "PROCESS_BOOKING":
         msg, directive, booking_field_meta = await _handle_booking_flow(
             db,
@@ -1353,11 +1557,49 @@ async def process_message(
         f"DEBUG: directive={directive}, field_meta has options: {field_meta.get('options') if field_meta else None}, has_collected_data={has_collected_data}, collected_keys={collected_keys}"
     )
 
+    # WhatsApp parity: offer upcoming dates as tappable options. The widget
+    # renders its own calendar and ignores `options` on date fields, so this
+    # is a no-op everywhere except WhatsApp list rendering.
+    if (
+        directive == "REQUIRE_DATE_PICKER"
+        and isinstance(field_meta, dict)
+        and not field_meta.get("options")
+    ):
+        field_meta["options"] = _upcoming_date_options(
+            org_timezone, max_booking_days
+        )
+
+    # For date/time asks on WhatsApp, include a concise hours line contextually
+    # so the user sees hours with the picker, per message flow. No full paragraph
+    # at start — each step shows only its own options.
+    if directive in ("REQUIRE_DATE_PICKER", "REQUIRE_TIME_SLOT_GRID"):
+        try:
+            # Use a short hours line, not the full verbose block
+            _hours_short = "Hours: Mon-Fri 9:00 AM–5:00 PM, Sat 9:00 AM–4:00 PM, Sun Closed (Asia/Calcutta)"
+            # Try to build a concise line from actual schedule if available
+            try:
+                _full_hours = await load_weekly_hours_block(db, str(org.id) if org else "")
+                if _full_hours and "Monday" in _full_hours:
+                    # Extract first line which has the summary, keep it short
+                    _first_line = _full_hours.split("\n")[0].replace("## ", "").replace(" (authoritative — answer timing questions from this)", "")
+                    if len(_first_line) < 120:
+                        _hours_short = _first_line.strip()
+            except Exception:
+                pass
+            if isinstance(msg, str) and "Hours:" not in msg and "business hours" not in msg.lower():
+                # Prepend concise hours line to the ask
+                msg = f"{_hours_short}\n{msg}"
+        except Exception:
+            pass
+
     # Fetch available time slots when directive is REQUIRE_TIME_SLOT_GRID
-    if directive == "REQUIRE_TIME_SLOT_GRID" and field_meta:
+    # For WhatsApp, ensure we always have a list even if field_meta was empty (the widget's calendar ignores it, but WA needs it)
+    if directive == "REQUIRE_TIME_SLOT_GRID":
+        if not field_meta:
+            field_meta = {"name": "time", "type": "time", "label": "Preferred Time"}
         target_date = chat_session.collected_data.get("date")
-        logger.info(f"DEBUG: target_date={target_date}, org.id={org.id}")
-        if target_date:
+        logger.info(f"DEBUG: target_date={target_date}, org.id={org.id} directive={directive} has_options={bool(field_meta.get('options')) if isinstance(field_meta, dict) else False}")
+        if target_date and (not field_meta.get("options") if isinstance(field_meta, dict) else True):
             from dateutil.parser import parse as date_parse
             from app.engine.slot_engine import (
                 compute_slot_inventory,
@@ -1389,11 +1631,29 @@ async def process_message(
                         ),
                     )
                 )
-                options = [
-                    format_slot_time(item["start_utc"].time())
-                    for item in inventory
-                    if item["available"]
-                ]
+                # Convert UTC slot times to the effective (business/user) timezone
+                # so WhatsApp shows local times, not UTC (e.g., 9:30 AM IST, not 3:30 AM UTC)
+                try:
+                    _tz_for_slots = ZoneInfo(str(timezone_resolution.get("effective_timezone") or org_timezone or "UTC"))
+                except Exception:
+                    _tz_for_slots = timezone.utc
+                options = []
+                for item in inventory:
+                    if not item.get("available"):
+                        continue
+                    _start = item.get("start_utc")
+                    if _start is None:
+                        continue
+                    try:
+                        if getattr(_start, "tzinfo", None) is None:
+                            _start = _start.replace(tzinfo=timezone.utc)
+                        _local_time = _start.astimezone(_tz_for_slots).time()
+                        options.append(format_slot_time(_local_time))
+                    except Exception:
+                        try:
+                            options.append(format_slot_time(item["start_utc"].time()))
+                        except Exception:
+                            continue
                 field_meta["options"] = options
                 field_meta["availability_status"] = availability_status
                 if policy_reason_code:

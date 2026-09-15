@@ -53,6 +53,8 @@ export function AnnouncementBell() {
   const [tab, setTab] = React.useState<"announcements" | "bookings">("announcements");
   const [bookingItems, setBookingItems] = React.useState<InboxItem[]>([]);
   const [bookingUnread, setBookingUnread] = React.useState(0);
+  // Billing notices have their own server-side count (they live under Announcements)
+  const [billingUnread, setBillingUnread] = React.useState(0);
 
   // Billing notices (plan expiry, subscription) belong to Announcements,
   // not booking activity. Partitioned client-side from the same inbox feed.
@@ -62,7 +64,6 @@ export function AnnouncementBell() {
     i.resource_type === "subscription";
   const billingItems = bookingItems.filter(isBillingItem);
   const activityItems = bookingItems.filter((i) => !isBillingItem(i));
-  const billingUnread = billingItems.filter((i) => !i.is_read).length;
 
   const loadCount = React.useCallback(async () => {
     try {
@@ -73,11 +74,19 @@ export function AnnouncementBell() {
     }
     try {
       const r = await api.get<{ unread: number }>(
-        "/dashboard/notifications/unread-count"
+        "/dashboard/notifications/unread-count?exclude_billing=true"
       );
       setBookingUnread(r.unread);
     } catch (err) {
       console.error("[announcement-bell] failed to load booking unread count", err);
+    }
+    try {
+      const r = await api.get<{ unread: number }>(
+        "/dashboard/notifications/unread-count?billing_only=true"
+      );
+      setBillingUnread(r.unread);
+    } catch (err) {
+      console.error("[announcement-bell] failed to load billing unread count", err);
     }
   }, []);
 
@@ -169,7 +178,7 @@ export function AnnouncementBell() {
         setBookingItems((prev) =>
           prev.map((i) => (ids.has(i.id) ? { ...i, is_read: true } : i))
         );
-        setBookingUnread((prev) => Math.max(0, prev - unreadBilling.length));
+        setBillingUnread((prev) => Math.max(0, prev - unreadBilling.length));
       }
     } catch (err) {
       console.error("[announcement-bell] mark all read failed", err);
@@ -187,7 +196,7 @@ export function AnnouncementBell() {
       setBookingItems((prev) =>
         prev.map((i) => (i.id === item.id ? { ...i, is_read: true } : i))
       );
-      setBookingUnread((prev) => Math.max(0, prev - 1));
+      setBillingUnread((prev) => Math.max(0, prev - 1));
     }
     router.push("/dashboard/billing");
   };
@@ -244,7 +253,7 @@ export function AnnouncementBell() {
     }
   };
 
-  const totalUnread = unread + bookingUnread;
+  const totalUnread = unread + bookingUnread + billingUnread;
 
   return (
     <div className="relative" ref={panelRef}>

@@ -38,6 +38,7 @@ from app.models.system_alert import SystemAlert
 from app.models.payment import PaymentAttempt, RazorpayWebhookEvent
 from app.models.razorpay_route import RazorpayLinkedAccount, RazorpayTransfer
 from app.models.whatsapp_connection import WhatsAppConnection
+from app.models.booking_directive import BookingDirective
 from app.core.config import settings
 
 target_metadata = Base.metadata

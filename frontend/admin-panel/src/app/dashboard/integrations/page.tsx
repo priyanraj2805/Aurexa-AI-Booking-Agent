@@ -149,6 +149,7 @@ export default function IntegrationsPage() {
   type QrConnection = {
     status: string; phone_number?: string; display_name?: string;
     connected_at?: string; disconnected_at?: string; last_seen_at?: string;
+    booking_enabled?: boolean; booking_active?: boolean; booking_inactive_reason?: string | null;
   };
   const [qrStatus, setQrStatus] = useState<QrConnection | null>(null);
   const [qrLoading, setQrLoading] = useState(true);
@@ -214,6 +215,18 @@ export default function IntegrationsPage() {
       toast.success("Reconnect requested");
     } catch (err) {
       setQrMsg({ type: "error", text: err instanceof Error ? err.message : "Failed to reconnect" });
+    } finally {
+      setQrBusy(false);
+    }
+  };
+  const toggleQrBooking = async (enabled: boolean) => {
+    setQrBusy(true);
+    try {
+      const data = await api.post<QrConnection>("/dashboard/whatsapp-qr/booking-toggle", { enabled });
+      setQrStatus(data);
+      toast.success(enabled ? "WhatsApp booking enabled" : "WhatsApp booking disabled");
+    } catch (err) {
+      setQrMsg({ type: "error", text: err instanceof Error ? err.message : "Failed to update booking toggle" });
     } finally {
       setQrBusy(false);
     }
@@ -1323,6 +1336,28 @@ export default function IntegrationsPage() {
                         {qrStatus.phone_number ? <span className="font-mono">+{qrStatus.phone_number}</span> : null}
                       </div>
                       {qrStatus.display_name ? <p className="text-xs text-muted-foreground mt-1">{qrStatus.display_name}</p> : null}
+                      <div className="mt-4 rounded-xl border border-border bg-background p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium">Booking autoreplies</p>
+                            <p className="text-xs text-muted-foreground mt-0.5">
+                              {qrStatus.booking_active
+                                ? "Active — customers messaging this number get booking replies."
+                                : "Off — connected number stays silent until you enable this."}
+                            </p>
+                          </div>
+                          <button
+                            role="switch"
+                            aria-checked={!!qrStatus.booking_enabled}
+                            aria-label="Toggle WhatsApp booking autoreplies"
+                            onClick={() => void toggleQrBooking(!qrStatus.booking_enabled)}
+                            disabled={qrBusy}
+                            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${qrStatus.booking_enabled ? "bg-emerald-600" : "bg-muted"}`}
+                          >
+                            <span className={`inline-block size-4 transform rounded-full bg-white shadow transition-transform ${qrStatus.booking_enabled ? "translate-x-6" : "translate-x-1"}`} />
+                          </button>
+                        </div>
+                      </div>
                       <div className="flex gap-2 mt-3">
                         <button onClick={reconnectQr} disabled={qrBusy} className="text-xs border px-3 py-1.5 rounded-lg hover:bg-accent disabled:opacity-50">Reconnect</button>
                         <button onClick={disconnectQr} disabled={qrBusy} className="text-xs border border-destructive/20 text-destructive px-3 py-1.5 rounded-lg hover:bg-destructive/10 disabled:opacity-50">Disconnect</button>

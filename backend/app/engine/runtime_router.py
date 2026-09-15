@@ -162,11 +162,30 @@ async def route_whatsapp_message(
     message_text: str,
     background_tasks: Optional[BackgroundTasks] = None,
 ) -> ActionPayload:
-    return await process_message(
-        db=db,
-        org=org,
-        org_config=org_config,
-        chat_session=chat_session,
-        message_text=message_text,
-        background_tasks=background_tasks,
-    )
+    """WhatsApp uses the same LangGraph runtime as the web widget, so both
+    channels share booking flow, RAG grounding, validators, and OTP handling.
+
+    The legacy pipeline remains as a loud fallback: WhatsApp has no error UI,
+    so a graph failure must never silently kill customer replies. Fallback
+    activations are logged with full tracebacks for ops visibility.
+    """
+    try:
+        return await process_message_with_graph(
+            db=db,
+            org=org,
+            org_config=org_config,
+            chat_session=chat_session,
+            message_text=message_text,
+            background_tasks=background_tasks,
+        )
+    except Exception as error:
+        logger.exception("route_whatsapp_message graph failed; falling back to legacy")
+        emit_fallback_event(_build_fallback_event("whatsapp", chat_session, error))
+        return await process_message(
+            db=db,
+            org=org,
+            org_config=org_config,
+            chat_session=chat_session,
+            message_text=message_text,
+            background_tasks=background_tasks,
+        )

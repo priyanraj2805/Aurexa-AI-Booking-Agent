@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import func as sa_func, update
+from sqlalchemy import func as sa_func, or_ as sa_or, update
 
 from app.db.database import get_db
 from app.api.v1.endpoints.auth import get_current_user
@@ -19,6 +19,17 @@ from app.models.org_notification import OrgNotification
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _billing_predicate():
+    """Rows that belong to the Announcements surface, not booking activity.
+
+    Mirrors AnnouncementBell.isBillingItem on the frontend — keep both in sync.
+    """
+    return sa_or(
+        OrgNotification.kind.like("billing\\_%", escape="\\"),
+        OrgNotification.resource_type == "subscription",
+    )
 
 
 @router.get("")
@@ -60,16 +71,21 @@ async def list_notifications(
 
 @router.get("/unread-count")
 async def unread_count(
+    exclude_billing: bool = Query(False),
+    billing_only: bool = Query(False),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    count = (
-        await db.execute(
-            select(sa_func.count())
-            .select_from(OrgNotification)
-            .where(OrgNotification.org_id == user.org_id, OrgNotification.is_read.is_(False))
-        )
-    ).scalar()
+    stmt = (
+        select(sa_func.count())
+        .select_from(OrgNotification)
+        .where(OrgNotification.org_id == user.org_id, OrgNotification.is_read.is_(False))
+    )
+    if billing_only:
+        stmt = stmt.where(_billing_predicate())
+    elif exclude_billing:
+        stmt = stmt.where(~_billing_predicate())
+    count = (await db.execute(stmt)).scalar()
     return {"unread": int(count or 0)}
 
 
