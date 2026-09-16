@@ -1438,17 +1438,22 @@ async def process_message_with_graph(
     require_otp = True if raw_require_otp is None else bool(raw_require_otp)
     raw_require_phone_otp = getattr(org_config, "require_phone_otp", False)
     require_phone_otp = bool(raw_require_phone_otp)
+    # OTP (email) — only when user explicitly CONFIRMS booking (PROCESS_BOOKING directive)
+    directive = str(result.get("directive") or "")
     otp_required = (
         require_otp
-        and result.get("otp_required") is True
+        and directive == "PROCESS_BOOKING"
         and not chat_session.otp_verified
     )
     # Phone OTP — Zavu sms_oneway (kd78m7agx48rpyegpfrmhp5rsx8dm8t9) BYO-OTP; independent of email gate
+    # Only require phone OTP when user explicitly CONFIRMS the booking (PROCESS_BOOKING directive)
+    # Not when all fields are merely collected (REQUEST_CONFIRMATION)
+    directive = str(result.get("directive") or "")
     phone_otp_required = (
         require_phone_otp
         and not getattr(chat_session, "phone_otp_verified", False)
         and str(chat_session.collected_data.get("phone") or "").strip() != ""
-        and not result.get("follow_up_fields")  # all fields collected
+        and directive == "PROCESS_BOOKING"  # user explicitly confirmed
     )
     otp_event_key = str(
         result.get("otp_event_key")
