@@ -119,13 +119,6 @@ SCHEDULE_QUERY_KEYWORDS = (
     "schedule",
     "timing",
     "timings",
-    "available",
-    "availability",
-    "slot",
-    "slots",
-    "bookable",
-    "preferred date",
-    "preferred dates",
 )
 
 _QUESTION_PREFIXES = (

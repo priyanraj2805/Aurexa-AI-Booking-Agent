@@ -212,17 +212,24 @@ class WhatsAppPresenter:
             parsed = json.loads(clean)
             intro = _sanitize_intro_outro(str(parsed.get("intro") or ""), 600)
             outro = _sanitize_intro_outro(str(parsed.get("outro") or ""), 300)
+            # Ensure horizon/booking-hours from directive description is in same message (smooth)
+            # If intro doesn't already contain horizon (We are available...), append desc
+            if desc and desc.strip() and desc.strip().lower() not in intro.lower():
+                # Only append if horizon not already present to keep single smooth message
+                if "we are available" in desc.lower() or "available from" in desc.lower() or "booking hours" in desc.lower():
+                    if desc.strip() not in intro:
+                        intro = f"{intro}\n\n{desc.strip()}" if intro else desc.strip()
             # Enforce contextual greeting / closing rules (backend is truth)
             if not is_first and not user_is_greeting:
-                # Strip leading greeting if LLM ignored rule
+                # Strip leading greeting ONLY (hello/hi/hey/welcome), NOT "Thank you for providing..." which is contextual acknowledge
                 intro = re.sub(
-                    r"^\s*(hello[^\n]{0,60}?[\.!]?\s+|hi[^\n]{0,60}?[\.!]?\s+|hey[^\n]{0,60}?[\.!]?\s+|welcome[^\n]{0,60}?[\.!]?\s+|thank you[^.!\n]{0,50}?[\.!]?\s+)+",
+                    r"^\s*(hello[^\n]{0,60}?[\.!]?\s+|hi[^\n]{0,60}?[\.!]?\s+|hey[^\n]{0,60}?[\.!]?\s+|welcome[^\n]{0,60}?[\.!]?\s+)+",
                     "",
                     intro,
                     flags=re.I,
                 ).strip()
-                # Remove "Hello from <business>" / "Hello, this is ..." leakage
-                intro = re.sub(r"^\s*hello[^:]*:\s*", "", intro, flags=re.I).strip()
+                # Remove "Hello from <business>" leakage but keep "Thank you for providing..."
+                intro = re.sub(r"^\s*hello\s+from\s+[^\n]*?[\.!]?\s+", "", intro, flags=re.I).strip()
             # Strip generic closing sentences on non-terminal steps
             if outro and dtype not in ("CONFIRM_BOOKING", "BOOKING_CONFIRMED"):
                 low_out = outro.lower()
