@@ -162,12 +162,31 @@ async def generate_for_next_step(db, org_id, session_id, customer_id, missing_fi
     raw_opts = meta.get("options") or []
     if dtype == DirectiveType.SELECT_DATE and not raw_opts:
         try:
-            from app.engine.message_processor import _upcoming_date_options
+            from app.engine.message_processor import _format_available_dates_for_prompt, _upcoming_date_options
 
-            _gen_labels = _upcoming_date_options("UTC", 30)
+            # Prefer org timezone + horizon from DB if we have org_id, else fallback
+            _tz = "UTC"
+            _max = 30
+            try:
+                from sqlalchemy.future import select as _sel2
+                from app.models.config import OrgConfig as _OC2
+                _cfg2_res = await db.execute(_sel2(_OC2).where(_OC2.org_id == org_id))
+                _cfg2 = _cfg2_res.scalars().first()
+                if _cfg2:
+                    _tz = str(getattr(_cfg2, "timezone", None) or "UTC")
+                    _max = int(getattr(_cfg2, "max_booking_days_ahead", 30) or 30)
+            except Exception:
+                pass
+            _gen_labels = _upcoming_date_options(_tz, _max)
             if _gen_labels:
                 raw_opts = _gen_labels
                 meta["options"] = list(raw_opts)
+                # Add helpful description with format guidance + availability
+                if not meta.get("description"):
+                    try:
+                        meta["description"] = _format_available_dates_for_prompt(_tz, _max, count=min(7, len(_gen_labels)))
+                    except Exception:
+                        pass
         except Exception:
             raw_opts = []
     if dtype == DirectiveType.SELECT_SLOT and not raw_opts:

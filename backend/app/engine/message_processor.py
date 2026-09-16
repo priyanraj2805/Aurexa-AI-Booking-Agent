@@ -369,6 +369,7 @@ def _looks_like_date_candidate(value: str) -> bool:
         return True
     if re.search(
         r"\b(today|tomorrow|next|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+        r"jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|"
         r"january|february|march|april|may|june|july|august|september|october|november|december)\b",
         raw,
     ):
@@ -587,8 +588,8 @@ def _upcoming_date_options(
     """Next bookable day labels for WhatsApp list rows.
 
     Titles stay plain ("Sat, Sep 13") so both taps and typed text parse
-    through the normal date validator. Availability itself is still enforced
-    downstream (empty day falls back to the date re-ask flow).
+    through the normal date validator. Shows next `count` bookable days
+    within horizon — caller can filter further via slot_engine if needed.
     """
     try:
         tz = ZoneInfo(str(org_timezone or "UTC"))
@@ -596,12 +597,35 @@ def _upcoming_date_options(
         tz = timezone.utc
     today = datetime.now(tz).date()
     days = []
-    for offset in range(count):
+    for offset in range(int(max_booking_days or 90) + 1):
+        if len(days) >= count:
+            break
         day = today + timedelta(days=offset)
         if (day - today).days > int(max_booking_days or 90):
             break
+        # Include day — availability (slots/closed) is enforced downstream
+        # but we already honour horizon; keeping this broad avoids empty lists
+        # when callers want a quick prompt. Use filtered helper for strict view.
         days.append(day.strftime("%a, %b %d"))
     return days
+
+
+def _format_available_dates_for_prompt(
+    org_timezone: str, max_booking_days: int, count: int = 7
+) -> str:
+    """Human-readable availability hint for the date prompt.
+
+    Returns e.g. "Available dates: Sat, Sep 13 · Sun, Sep 14 · Mon, Sep 15 (Asia/Calcutta, next 7 days, 30d horizon)"
+    so the user knows what to type. Does NOT filter by slot fullness — that's dynamic.
+    """
+    opts = _upcoming_date_options(org_timezone, max_booking_days, count=count)
+    if not opts:
+        return ""
+    return (
+        f"Available dates ({org_timezone}, next {len(opts)} days within {max_booking_days}d): "
+        + " · ".join(opts)
+        + ". You can also type any date like '16 September', '16 Sep' or '18/09/2026'."
+    )
 
 
 def _label_to_request(label: str, verb: str = "share") -> str:

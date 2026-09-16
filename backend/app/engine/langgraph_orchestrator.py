@@ -1011,12 +1011,21 @@ async def process_message_with_graph(
                 if not _raw and _dtype in (_DT.SELECT_DATE, _DT.SELECT_SLOT):
                     try:
                         if _dtype == _DT.SELECT_DATE:
-                            from app.engine.message_processor import _upcoming_date_options
+                            from app.engine.message_processor import (
+                                _format_available_dates_for_prompt,
+                                _upcoming_date_options,
+                            )
 
                             _tz = str(getattr(org_config, "timezone", None) or "UTC")
                             _max = int(getattr(org_config, "max_booking_days_ahead", 30) or 30)
                             _gen = _upcoming_date_options(_tz, _max)
                             _raw = _gen if _gen else []
+                            # attach helpful description with format + availability
+                            if _raw and not directive_meta.get("description"):
+                                try:
+                                    directive_meta["description"] = _format_available_dates_for_prompt(_tz, _max, count=min(7, len(_raw)))
+                                except Exception:
+                                    pass
                         elif _dtype == _DT.SELECT_SLOT:
                             # Generate real slots for the current booking date
                             _target = None
