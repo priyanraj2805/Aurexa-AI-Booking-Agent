@@ -560,74 +560,26 @@ async def qr_inbound(
                 _active_id_after = chat_session.collected_data.get("active_directive_id")
         except Exception:
             pass
-        # ── WhatsApp presenter (LLM intro/outro) + renderer — WhatsApp-only ──
-        # Backend decides text vs directive (active_directive_id); LLM only rewrites intro/outro around authoritative options.
+        # ── Simple text booking system — directive interactive disabled per product decision ──
+        # No interactive buttons/lists, just plain text. Booking engine + directive remain source of truth for validation,
+        # but WhatsApp presentation is text-only (user types date like "17 sep" or "18/09/2026").
         wa_msg = None
-        _tone = None
-        _org_name = str(getattr(org, "name", "") or "Aurexa")
-        try:
-            _tone = (getattr(org_config, "custom_prompts", None) or {}).get("tone") or "friendly"
-        except Exception:
-            _tone = "friendly"
         if _active_id_after:
             try:
                 from app.engine.booking_directive.service import get_by_id as _get_dir2
 
                 _dir_after = await _get_dir2(db, _active_id_after)
                 if _dir_after and _dir_after.status == "PENDING":
-                    # Try presenter (LLM intro/outro) → renderer, fallback to direct renderer
-                    try:
-                        from app.engine.whatsapp_presenter import WhatsAppPresenter
-                        from app.core.whatsapp_renderer import render_structured
-
-                        _presenter = WhatsAppPresenter()
-                        # Resolve names correctly: agent/business vs customer, avoid "Hello from <customer>"
-                        _custom = getattr(org_config, "custom_prompts", None) or {}
-                        _agent = str(_custom.get("agent_name") or "").strip() or None
-                        _biz = str(_custom.get("business_name") or getattr(org, "name", "") or "").strip() or "Aurexa"
-                        _cust = str((chat_session.collected_data or {}).get("name") or "").strip() or None
-                        # is_first_turn: only first exchange (≤2 messages) should allow greeting
-                        _is_first = False
-                        _turn_idx = None
-                        try:
-                            from sqlalchemy import func as _func
-                            from sqlalchemy.future import select as _sel_msg
-                            from app.models.message import ChatMessage as _CM
-                            _cnt_res = await db.execute(_sel_msg(_func.count()).select_from(_CM).where(_CM.session_id == chat_session.session_id))
-                            _cnt = int(_cnt_res.scalar() or 0)
-                            _turn_idx = _cnt
-                            _is_first = _cnt <= 2
-                        except Exception:
-                            _is_first = False
-                        _structured = await _presenter.present_directive(
-                            directive=_dir_after,
-                            tone=_tone,
-                            org_name=_biz,
-                            user_message=getattr(payload, "text", "") or "",
-                            is_first_turn=_is_first,
-                            turn_index=_turn_idx,
-                            collected_data=chat_session.collected_data or {},
-                            agent_name=_agent,
-                            business_name=_biz,
-                            customer_name=_cust,
-                        )
-                        wa_msg = render_structured(_structured, transport="baileys")
-                        logger.info(
-                            "whatsapp.presenter.render",
-                            extra={
-                                "event": "whatsapp.presenter.render",
-                                "directive_type": _dir_after.type,
-                                "directive_id": str(_dir_after.id)[:8],
-                                "transport": "baileys",
-                                "tone": _tone,
-                            },
-                        )
-                    except Exception as _pe:
-                        logger.warning("whatsapp.presenter.fallback directive", extra={"event": "whatsapp.presenter.fallback", "reason": str(_pe)[:120]})
-                        from app.core.whatsapp_directive_renderer import render as _render_dir
-
-                        wa_msg = _render_dir(_dir_after)
-                        logger.info(f"Rendered via WhatsAppDirectiveRenderer type={_dir_after.type} directive={str(_dir_after.id)[:8]}")
+                    _title = str(getattr(_dir_after, "title", "") or "").strip()
+                    _desc = str(getattr(_dir_after, "description", "") or "").strip()
+                    _opts = list(getattr(_dir_after, "options", None) or [])
+                    _parts = [p for p in [_title, _desc] if p]
+                    if _opts:
+                        _lines = [f"{i}. {str(o.get('label') or o.get('id') or '').strip()}" for i, o in enumerate(_opts[:7], 1)]
+                        _parts.append("\n".join(_lines))
+                    _body = "\n\n".join(_parts).strip()
+                    wa_msg = {"type": "text", "body": _body[:4096]}
+                    logger.info(f"Rendered simple-text directive type={_dir_after.type} directive={str(_dir_after.id)[:8]} opts={len(_opts)}")
             except Exception as _e:
                 logger.warning(f"Directive render failed, falling back: {_e}")
         if wa_msg is None:

@@ -299,70 +299,24 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                     _active_id_after = chat_session.collected_data.get("active_directive_id")
             except Exception:
                 pass
-            # ── WhatsApp presenter + renderer — WhatsApp-only (Cloud text fallback) ──
+            # ── Simple text booking system — directive interactive disabled ──
             wa_msg = None
-            _tone_c = None
-            _org_name_c = str(getattr(org, "name", "") or "Aurexa")
-            try:
-                _tone_c = (getattr(org_config, "custom_prompts", None) or {}).get("tone") or "friendly"
-            except Exception:
-                _tone_c = "friendly"
             if _active_id_after:
                 try:
                     from app.engine.booking_directive.service import get_by_id as _get_dir2
 
                     _dir_after = await _get_dir2(db, _active_id_after)
                     if _dir_after and _dir_after.status == "PENDING":
-                        try:
-                            from app.engine.whatsapp_presenter import WhatsAppPresenter
-                            from app.core.whatsapp_renderer import render_structured
-
-                            _presenter_c = WhatsAppPresenter()
-                            _custom_c = getattr(org_config, "custom_prompts", None) or {}
-                            _agent_c = str(_custom_c.get("agent_name") or "").strip() or None
-                            _biz_c = str(_custom_c.get("business_name") or getattr(org, "name", "") or "").strip() or "Aurexa"
-                            _cust_c = str((chat_session.collected_data or {}).get("name") or "").strip() or None
-                            _is_first_c = False
-                            _turn_idx_c = None
-                            try:
-                                from sqlalchemy import func as _func_c
-                                from sqlalchemy.future import select as _sel_c
-                                from app.models.message import ChatMessage as _CMc
-                                _cnt_res_c = await db.execute(_sel_c(_func_c.count()).select_from(_CMc).where(_CMc.session_id == chat_session.session_id))
-                                _cnt_c = int(_cnt_res_c.scalar() or 0)
-                                _turn_idx_c = _cnt_c
-                                _is_first_c = _cnt_c <= 2
-                            except Exception:
-                                _is_first_c = False
-                            _structured_c = await _presenter_c.present_directive(
-                                directive=_dir_after,
-                                tone=_tone_c,
-                                org_name=_biz_c,
-                                user_message=text or "",
-                                is_first_turn=_is_first_c,
-                                turn_index=_turn_idx_c,
-                                collected_data=chat_session.collected_data or {},
-                                agent_name=_agent_c,
-                                business_name=_biz_c,
-                                customer_name=_cust_c,
-                            )
-                            wa_msg = render_structured(_structured_c, transport="cloud")
-                            logger.info(
-                                "whatsapp.presenter.render",
-                                extra={
-                                    "event": "whatsapp.presenter.render",
-                                    "directive_type": _dir_after.type,
-                                    "directive_id": str(_dir_after.id)[:8],
-                                    "transport": "cloud",
-                                    "tone": _tone_c,
-                                },
-                            )
-                        except Exception as _pe:
-                            logger.warning("whatsapp.presenter.fallback directive cloud", extra={"event": "whatsapp.presenter.fallback", "reason": str(_pe)[:120]})
-                            from app.core.whatsapp_directive_renderer import render as _render_dir
-
-                            wa_msg = _render_dir(_dir_after)
-                            logger.info(f"Rendered via WhatsAppDirectiveRenderer (cloud) type={_dir_after.type} directive={str(_dir_after.id)[:8]}")
+                        _title = str(getattr(_dir_after, "title", "") or "").strip()
+                        _desc = str(getattr(_dir_after, "description", "") or "").strip()
+                        _opts = list(getattr(_dir_after, "options", None) or [])
+                        _parts = [p for p in [_title, _desc] if p]
+                        if _opts:
+                            _lines = [f"{i}. {str(o.get('label') or o.get('id') or '').strip()}" for i, o in enumerate(_opts[:7], 1)]
+                            _parts.append("\n".join(_lines))
+                        _body = "\n\n".join(_parts).strip()
+                        wa_msg = {"type": "text", "body": _body[:4096]}
+                        logger.info(f"Rendered simple-text directive (cloud) type={_dir_after.type} directive={str(_dir_after.id)[:8]} opts={len(_opts)}")
                 except Exception as _e:
                     logger.warning(f"Directive render failed (cloud), falling back: {_e}")
             if wa_msg is None:
