@@ -257,7 +257,8 @@ async def generate_otp(
     except Exception:
         pass
 
-    await db.flush()  # ensure OTPRecord is flushed before session update
+    await db.flush()
+    await db.commit()  # commit OTPRecord alone so it persists even if session state_data is huge/corrupted
     # Keep _otp_*_policy shallow, never duplicate runtime_checkpoint inside collected_data
     if resend:
         resend_count += 1
