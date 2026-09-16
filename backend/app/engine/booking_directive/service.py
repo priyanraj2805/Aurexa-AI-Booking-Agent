@@ -180,8 +180,9 @@ async def generate_for_next_step(db, org_id, session_id, customer_id, missing_fi
                 if _cfg2:
                     _tz = str(getattr(_cfg2, "timezone", None) or "UTC")
                     _max = int(getattr(_cfg2, "max_booking_days_ahead", 30) or 30)
-                # try business hours summary
+                # try business hours summary (clean WhatsApp style, no horizon)
                 try:
+                    from app.engine.message_processor import _format_business_hours_for_whatsapp as _fmt_bh
                     _sched_res = await db.execute(_sel2(_BS).where(_BS.org_id == org_id))
                     _sched = _sched_res.scalars().first()
                     if _sched:
@@ -192,7 +193,10 @@ async def generate_for_next_step(db, org_id, session_id, customer_id, missing_fi
                             {"day_of_week": r.day_of_week, "is_active": r.is_active, "open_time": r.open_time, "close_time": r.close_time}
                             for r in _sched_days
                         ]
-                        _business_hours_summary = _fmt_hours(_weekly, _tz, slot_minutes=_slot_mins, booking_window_days=_max)
+                        _business_hours_summary = _fmt_bh(_weekly, _tz, slot_minutes=_slot_mins)
+                        # fallback to old if helper empty
+                        if not _business_hours_summary:
+                            _business_hours_summary = _fmt_hours(_weekly, _tz, slot_minutes=_slot_mins, booking_window_days=None)
                 except Exception:
                     pass
             except Exception:
@@ -201,19 +205,16 @@ async def generate_for_next_step(db, org_id, session_id, customer_id, missing_fi
             if _gen_labels:
                 raw_opts = _gen_labels
                 meta["options"] = list(raw_opts)
-                # Add helpful description with format guidance + availability + booking hours
+                # Add helpful description with clean WhatsApp formatting
                 if not meta.get("description"):
                     try:
                         _avail = _format_available_dates_for_prompt(_tz, _max, count=min(7, len(_gen_labels)))
-                        parts = []
-                        if _business_hours_summary:
-                            parts.append(_business_hours_summary)
-                        if _avail:
-                            parts.append(_avail)
-                        # fallback if no business hours
-                        if not parts:
-                            parts.append(_avail)
-                        meta["description"] = " ".join([p for p in parts if p])
+                        if _business_hours_summary and _avail:
+                            meta["description"] = f"🕘 {_business_hours_summary}\n\n{_avail}"
+                        elif _business_hours_summary:
+                            meta["description"] = f"🕘 {_business_hours_summary}\n\n{_avail or ''}".strip()
+                        else:
+                            meta["description"] = _avail
                     except Exception:
                         pass
         except Exception:
@@ -311,10 +312,11 @@ async def generate_for_next_step(db, org_id, session_id, customer_id, missing_fi
                                 pass
                             _tz_label = _tz_name
                             _slots_str = " · ".join(raw_opts[:7])
+                            _pretty_date = _parsed_date.strftime("%a, %b %d") if '_parsed_date' in locals() else _date_str
                             meta["description"] = (
-                                f"Available times for {_date_str} ({_tz_label}): {_slots_str}."
-                                + (f" Each appointment is {_slot_mins} minutes." if _slot_mins else "")
-                                + " Reply with a time like '9:30 AM' or tap below."
+                                f"🕒 Available times for {_pretty_date} ({_tz_label}):\n{_slots_str}"
+                                + (f"\nEach appointment is {_slot_mins} minutes." if _slot_mins else "")
+                                + "\nTap below or reply like *9:30 AM*."
                             )
                         except Exception:
                             pass

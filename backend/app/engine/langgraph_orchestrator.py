@@ -1080,13 +1080,12 @@ async def process_message_with_graph(
                                     if len(_slot_labels) >= 10:
                                         break
                                 _raw = _slot_labels
-                                # Also set time availability description if we have slots
+                                # Also set time availability description if we have slots (clean WhatsApp)
                                 if _slot_labels and not directive_meta.get("description"):
                                     try:
-                                        _date_for_desc = str(_parsed.date().isoformat()) if '_parsed' in locals() else str(_target or "")
+                                        _date_for_desc = _parsed.strftime("%a, %b %d") if '_parsed' in locals() else str(_target or "")
                                         _tz_for_desc = str(_tz_res.get("effective_timezone") or _tz_name)
                                         _slots_str = " · ".join(_slot_labels[:7])
-                                        # try slot duration
                                         _slot_mins2 = None
                                         try:
                                             from app.models.booking import BusinessSchedule as _BS3
@@ -1098,9 +1097,9 @@ async def process_message_with_graph(
                                         except Exception:
                                             pass
                                         directive_meta["description"] = (
-                                            f"Available times for {_date_for_desc} ({_tz_for_desc}): {_slots_str}."
-                                            + (f" Each appointment is {_slot_mins2} minutes." if _slot_mins2 else "")
-                                            + " Reply with a time like '9:30 AM' or tap below."
+                                            f"🕒 Available times for {_date_for_desc} ({_tz_for_desc}):\n{_slots_str}"
+                                            + (f"\nEach appointment is {_slot_mins2} minutes." if _slot_mins2 else "")
+                                            + "\nTap below or reply like *9:30 AM*."
                                         )
                                     except Exception:
                                         pass

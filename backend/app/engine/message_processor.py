@@ -613,19 +613,38 @@ def _upcoming_date_options(
 def _format_available_dates_for_prompt(
     org_timezone: str, max_booking_days: int, count: int = 7
 ) -> str:
-    """Human-readable availability hint for the date prompt.
+    """WhatsApp-friendly date prompt (short, no technical horizon/tz prefix).
 
-    Returns e.g. "Available dates: Sat, Sep 13 · Sun, Sep 14 · Mon, Sep 15 (Asia/Calcutta, next 7 days, 30d horizon)"
-    so the user knows what to type. Does NOT filter by slot fullness — that's dynamic.
+    Returns a clean, multi-line hint for tapping or typing.
     """
     opts = _upcoming_date_options(org_timezone, max_booking_days, count=count)
     if not opts:
-        return ""
+        return "Tap a date below or type one like *16 September*, *16 Sep* or *18/09/2026*."
+    # Show dates as a simple list, no internal horizon/tz details
+    dates_line = " · ".join(opts)
     return (
-        f"Available dates ({org_timezone}, next {len(opts)} days within {max_booking_days}d): "
-        + " · ".join(opts)
-        + ". You can also type any date like '16 September', '16 Sep' or '18/09/2026'."
+        f"Tap a date below or type one like *16 September*, *16 Sep* or *18/09/2026*.\n"
+        f"Next available: {dates_line}"
     )
+
+
+def _format_business_hours_for_whatsapp(
+    weekly_schedule: list[dict],
+    timezone_name: str,
+    slot_minutes: int | None = None,
+) -> str:
+    """Short, WhatsApp-friendly business hours line (no horizon)."""
+    from app.engine.scheduling_policy import format_weekly_hours_summary
+
+    summary = format_weekly_hours_summary(
+        weekly_schedule, timezone_name, slot_minutes=slot_minutes, booking_window_days=None
+    )
+    if not summary:
+        return ""
+    # summary example: "Monday to Sunday: 9:00 AM – 5:00 PM (times in Asia/Calcutta). each appointment is 120 minutes long."
+    # Clean up: capitalize, keep timezone only once
+    # Remove trailing horizon part if any, keep concise
+    return summary.rstrip(".")
 
 
 def _label_to_request(label: str, verb: str = "share") -> str:
