@@ -572,6 +572,7 @@ async def qr_inbound(
                 if _dir_after and _dir_after.status == "PENDING":
                     _title = str(getattr(_dir_after, "title", "") or "").strip()
                     _desc = str(getattr(_dir_after, "description", "") or "").strip()
+                    _opts = list(getattr(_dir_after, "options", None) or [])
                     # If directive description empty (old rows), generate horizon/hours on the fly for smooth text
                     if not _desc:
                         try:
@@ -610,9 +611,16 @@ async def qr_inbound(
                         except Exception:
                             pass
                     _parts = [p for p in [_title, _desc] if p]
+                    # For time, show available slots as plain text (typed entry, not numbered buttons)
+                    if _dir_after.type in ("SELECT_SLOT", "SELECT_TIME"):
+                        _opts = list(getattr(_dir_after, "options", None) or [])
+                        if _opts:
+                            _labels = [str(o.get('label') or '').strip() for o in _opts[:7] if o.get('label')]
+                            if _labels:
+                                _parts.append("Available slots: " + " · ".join(_labels))
                     _body = "\n\n".join(_parts).strip()
                     wa_msg = {"type": "text", "body": _body[:4096]}
-                    logger.info(f"Rendered simple-text directive type={_dir_after.type} directive={str(_dir_after.id)[:8]} (no options list per simple-text mode)")
+                    logger.info(f"Rendered simple-text directive type={_dir_after.type} directive={str(_dir_after.id)[:8]}")
             except Exception as _e:
                 logger.warning(f"Directive render failed, falling back: {_e}")
         if wa_msg is None:

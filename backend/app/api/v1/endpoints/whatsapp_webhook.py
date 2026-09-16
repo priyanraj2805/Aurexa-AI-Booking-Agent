@@ -346,9 +346,15 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                             except Exception:
                                 pass
                         _parts = [p for p in [_title, _desc] if p]
+                        if _dir_after.type in ("SELECT_SLOT", "SELECT_TIME"):
+                            _opts_c = list(getattr(_dir_after, "options", None) or [])
+                            if _opts_c:
+                                _labels_c = [str(o.get('label') or '').strip() for o in _opts_c[:7] if o.get('label')]
+                                if _labels_c:
+                                    _parts.append("Available slots: " + " · ".join(_labels_c))
                         _body = "\n\n".join(_parts).strip()
                         wa_msg = {"type": "text", "body": _body[:4096]}
-                        logger.info(f"Rendered simple-text directive (cloud) type={_dir_after.type} directive={str(_dir_after.id)[:8]} (no options list per simple-text mode)")
+                        logger.info(f"Rendered simple-text directive (cloud) type={_dir_after.type} directive={str(_dir_after.id)[:8]}")
                 except Exception as _e:
                     logger.warning(f"Directive render failed (cloud), falling back: {_e}")
             if wa_msg is None:
