@@ -127,6 +127,57 @@ async def _handle_graph_otp_resend(
     message_text: str,
     background_tasks: Optional[BackgroundTasks] = None,
 ) -> ActionPayload:
+    # Determine pending channel from org config + verification state — never fallback to disabled channel
+    # WhatsApp-only: phone if pending, else email if pending, else error
+    try:
+        from app.models.config import OrgConfig as _OC
+        # org_config may be passed via chat_session? Try to get from org
+        # Use get_otp_policy_metadata to infer, but simpler: read org_config if available via db
+        # For whatsapp, phone is preferred when both pending; for web, email first (handled in message_processor)
+        # Here we need org_config — try to fetch if not in closure
+        _is_whatsapp = str(getattr(chat_session, "channel", "")).lower() in ("whatsapp", "whatsapp_cloud")
+        # Attempt to get org_config from DB if not provided
+        _org_config = None
+        try:
+            from sqlalchemy.future import select as _sel
+            from app.models.config import OrgConfig
+            _res = await db.execute(_sel(OrgConfig).where(OrgConfig.org_id == org.id))
+            _org_config = _res.scalars().first()
+        except Exception:
+            _org_config = None
+        if _org_config is not None:
+            _req_email = bool(getattr(_org_config, "require_otp", False))
+            _req_phone = bool(getattr(_org_config, "require_phone_otp", False))
+            _phone_pending = _req_phone and not bool(getattr(chat_session, "phone_otp_verified", False))
+            _email_pending = _req_email and not bool(getattr(chat_session, "otp_verified", False))
+            if _phone_pending and _email_pending:
+                _pending = "phone" if _is_whatsapp else "email"
+            elif _phone_pending:
+                _pending = "phone"
+            elif _email_pending:
+                _pending = "email"
+            else:
+                return ActionPayload(
+                    message="OTP verification is not required at this time.",
+                    widget_directive="TEXT_INPUT",
+                )
+            # If pending is email but email disabled (should not happen due to above), guard
+            if _pending == "email" and not _req_email:
+                return ActionPayload(
+                    message="Email OTP is disabled for this organization. Please contact support.",
+                    widget_directive="TEXT_INPUT",
+                )
+            if _pending == "phone" and not _req_phone:
+                return ActionPayload(
+                    message="Phone OTP is disabled for this organization.",
+                    widget_directive="TEXT_INPUT",
+                )
+            return await message_processor._handle_otp_resend(
+                db, org, chat_session, message_text, background_tasks, channel=_pending
+            )
+    except Exception:
+        pass
+    # Fallback: let message_processor decide (defaults to email, but will now respect pending)
     return await message_processor._handle_otp_resend(
         db, org, chat_session, message_text, background_tasks
     )
@@ -921,8 +972,11 @@ async def process_message_with_graph(
     checkpoint_manager = CheckpointManager(write_checkpoint=_write_checkpoint)
     context_window = _normalize_context_window(result.get("context_window"))
     summary = str(result.get("summary", "") or "")
+    # FIX: prevent nested duplication of runtime_checkpoint inside collected_data
+    _clean_collected = dict(chat_session.collected_data or {})
+    _clean_collected.pop(crud_chat.RUNTIME_CHECKPOINT_KEY, None)
     checkpoint_state: Dict[str, Any] = {
-        "collected_data": dict(chat_session.collected_data or {}),
+        "collected_data": _clean_collected,
         "missing_fields": list(chat_session.missing_fields or []),
         "current_intent": chat_session.current_intent,
         "session_status": chat_session.session_status,

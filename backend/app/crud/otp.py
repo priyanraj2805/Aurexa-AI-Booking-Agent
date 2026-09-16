@@ -219,10 +219,13 @@ async def generate_otp(
 
     expires = now + timedelta(seconds=OTP_VALID_FOR_SECONDS)
 
+    # Persist OTPRecord first, before touching chat_sessions.state_data (which can be 14KB duplicated)
+    # so the active OTP is available to verify_otp() immediately even if session flush is large
     if existing_otp:
         existing_otp.code_hash = code_hash
         existing_otp.expires_at = expires
         existing_otp.failed_attempts = 0
+        otp_record_id = str(existing_otp.id) if hasattr(existing_otp, "id") else str(sid)
     else:
         new_otp = OTPRecord(
             session_id=sid,
@@ -231,12 +234,45 @@ async def generate_otp(
             expires_at=expires
         )
         db.add(new_otp)
+        await db.flush()
+        otp_record_id = str(new_otp.id)
 
+    # Safe correlation log (no OTP value)
+    try:
+        import logging as _lg
+        _lg.getLogger(__name__).info(
+            "otp.generated",
+            extra={
+                "event": "otp.generated",
+                "otp_request_id": f"{sid}:{channel}:{now.isoformat()}",
+                "session_id": str(sid),
+                "channel": channel,
+                "otp_record_id": otp_record_id,
+                "created_at": now.isoformat(),
+                "expires_at": expires.isoformat(),
+                "resend": bool(resend),
+                "status": "active",
+            },
+        )
+    except Exception:
+        pass
+
+    await db.flush()  # ensure OTPRecord is flushed before session update
+    # Keep _otp_*_policy shallow, never duplicate runtime_checkpoint inside collected_data
     if resend:
         resend_count += 1
     policy_state["resend_count"] = resend_count
     policy_state["last_sent_at"] = now.isoformat()
     session_state = dict(session.state_data) if isinstance(session.state_data, dict) else {}
+    # Strip duplicated runtime_checkpoint from collected_data/state_data before persisting
+    try:
+        if isinstance(session_state.get("collected_data"), dict) and "runtime_checkpoint" in session_state["collected_data"]:
+            session_state["collected_data"] = {k: v for k, v in session_state["collected_data"].items() if k != "runtime_checkpoint"}
+        if "runtime_checkpoint" in session_state and isinstance(session_state.get("collected_data"), dict):
+            # keep runtime_checkpoint only at top level, not inside collected_data
+            pass
+    except Exception:
+        pass
     session_state[_channel_policy_key(channel)] = policy_state
     session.state_data = session_state
 
