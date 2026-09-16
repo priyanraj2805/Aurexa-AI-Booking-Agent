@@ -164,27 +164,56 @@ async def generate_for_next_step(db, org_id, session_id, customer_id, missing_fi
         try:
             from app.engine.message_processor import _format_available_dates_for_prompt, _upcoming_date_options
 
-            # Prefer org timezone + horizon from DB if we have org_id, else fallback
+            # Prefer org timezone + horizon + business hours from DB if we have org_id, else fallback
             _tz = "UTC"
             _max = 30
+            _slot_mins = None
+            _business_hours_summary = ""
             try:
                 from sqlalchemy.future import select as _sel2
                 from app.models.config import OrgConfig as _OC2
+                from app.models.booking import BusinessSchedule as _BS, ScheduleDay as _SD
+                from app.engine.scheduling_policy import format_weekly_hours_summary as _fmt_hours
+
                 _cfg2_res = await db.execute(_sel2(_OC2).where(_OC2.org_id == org_id))
                 _cfg2 = _cfg2_res.scalars().first()
                 if _cfg2:
                     _tz = str(getattr(_cfg2, "timezone", None) or "UTC")
                     _max = int(getattr(_cfg2, "max_booking_days_ahead", 30) or 30)
+                # try business hours summary
+                try:
+                    _sched_res = await db.execute(_sel2(_BS).where(_BS.org_id == org_id))
+                    _sched = _sched_res.scalars().first()
+                    if _sched:
+                        _slot_mins = getattr(_sched, "slot_duration_minutes", None)
+                        _sd_res = await db.execute(_sel2(_SD).where(_SD.org_id == org_id))
+                        _sched_days = _sd_res.scalars().all()
+                        _weekly = [
+                            {"day_of_week": r.day_of_week, "is_active": r.is_active, "open_time": r.open_time, "close_time": r.close_time}
+                            for r in _sched_days
+                        ]
+                        _business_hours_summary = _fmt_hours(_weekly, _tz, slot_minutes=_slot_mins, booking_window_days=_max)
+                except Exception:
+                    pass
             except Exception:
                 pass
             _gen_labels = _upcoming_date_options(_tz, _max)
             if _gen_labels:
                 raw_opts = _gen_labels
                 meta["options"] = list(raw_opts)
-                # Add helpful description with format guidance + availability
+                # Add helpful description with format guidance + availability + booking hours
                 if not meta.get("description"):
                     try:
-                        meta["description"] = _format_available_dates_for_prompt(_tz, _max, count=min(7, len(_gen_labels)))
+                        _avail = _format_available_dates_for_prompt(_tz, _max, count=min(7, len(_gen_labels)))
+                        parts = []
+                        if _business_hours_summary:
+                            parts.append(_business_hours_summary)
+                        if _avail:
+                            parts.append(_avail)
+                        # fallback if no business hours
+                        if not parts:
+                            parts.append(_avail)
+                        meta["description"] = " ".join([p for p in parts if p])
                     except Exception:
                         pass
         except Exception:
@@ -266,6 +295,29 @@ async def generate_for_next_step(db, org_id, session_id, customer_id, missing_fi
                     # Also set target_date in meta for stable IDs
                     if not meta.get("target_date") and _target:
                         meta["target_date"] = str(_parsed_date.isoformat())
+                    # Add helpful description with available times for this date
+                    if not meta.get("description"):
+                        try:
+                            _date_str = str(_parsed_date.isoformat())
+                            _slot_mins = None
+                            try:
+                                from sqlalchemy.future import select as _sel_slot
+                                from app.models.booking import BusinessSchedule as _BS2
+                                _s2_res = await db.execute(_sel_slot(_BS2).where(_BS2.org_id == org_id))
+                                _s2 = _s2_res.scalars().first()
+                                if _s2:
+                                    _slot_mins = getattr(_s2, "slot_duration_minutes", None)
+                            except Exception:
+                                pass
+                            _tz_label = _tz_name
+                            _slots_str = " · ".join(raw_opts[:7])
+                            meta["description"] = (
+                                f"Available times for {_date_str} ({_tz_label}): {_slots_str}."
+                                + (f" Each appointment is {_slot_mins} minutes." if _slot_mins else "")
+                                + " Reply with a time like '9:30 AM' or tap below."
+                            )
+                        except Exception:
+                            pass
         except Exception as _e:
             import logging
 

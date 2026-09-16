@@ -1080,6 +1080,30 @@ async def process_message_with_graph(
                                     if len(_slot_labels) >= 10:
                                         break
                                 _raw = _slot_labels
+                                # Also set time availability description if we have slots
+                                if _slot_labels and not directive_meta.get("description"):
+                                    try:
+                                        _date_for_desc = str(_parsed.date().isoformat()) if '_parsed' in locals() else str(_target or "")
+                                        _tz_for_desc = str(_tz_res.get("effective_timezone") or _tz_name)
+                                        _slots_str = " · ".join(_slot_labels[:7])
+                                        # try slot duration
+                                        _slot_mins2 = None
+                                        try:
+                                            from app.models.booking import BusinessSchedule as _BS3
+                                            from sqlalchemy.future import select as _sel3
+                                            _s3_res = await db.execute(_sel3(_BS3).where(_BS3.org_id == org.id))
+                                            _s3 = _s3_res.scalars().first()
+                                            if _s3:
+                                                _slot_mins2 = getattr(_s3, "slot_duration_minutes", None)
+                                        except Exception:
+                                            pass
+                                        directive_meta["description"] = (
+                                            f"Available times for {_date_for_desc} ({_tz_for_desc}): {_slots_str}."
+                                            + (f" Each appointment is {_slot_mins2} minutes." if _slot_mins2 else "")
+                                            + " Reply with a time like '9:30 AM' or tap below."
+                                        )
+                                    except Exception:
+                                        pass
                     except Exception as _e:
                         logger.warning(f"Directive option generation failed for {_dtype}: {_e}", exc_info=True)
                         _raw = []
@@ -1131,6 +1155,31 @@ async def process_message_with_graph(
                     if not _customer_id:
                         logger.warning(f"Directive create skipped: no customer_id for session {str(chat_session.session_id)[:8]} channel={getattr(chat_session, 'channel', '')}")
                     else:
+                        # Build rich description: business hours + availability (date) or times (slot)
+                        _desc_for_create = ""
+                        if isinstance(directive_meta, dict) and directive_meta.get("description"):
+                            _desc_for_create = str(directive_meta.get("description") or "")
+                        # For SELECT_DATE without description, try business hours + availability fallback
+                        if not _desc_for_create and _dtype == _DT.SELECT_DATE:
+                            try:
+                                from app.engine.scheduling_policy import format_weekly_hours_summary as _fmt2
+                                from app.models.booking import BusinessSchedule as _BS4, ScheduleDay as _SD4
+                                from sqlalchemy.future import select as _sel4
+                                _tz4 = str(getattr(org_config, "timezone", None) or "UTC")
+                                _max4 = int(getattr(org_config, "max_booking_days_ahead", 30) or 30)
+                                _s4_res = await db.execute(_sel4(_BS4).where(_BS4.org_id == org.id))
+                                _s4 = _s4_res.scalars().first()
+                                _slot_m4 = getattr(_s4, "slot_duration_minutes", None) if _s4 else None
+                                _sd4_res = await db.execute(_sel4(_SD4).where(_SD4.org_id == org.id))
+                                _sd4 = _sd4_res.scalars().all()
+                                _weekly4 = [{"day_of_week": r.day_of_week, "is_active": r.is_active, "open_time": r.open_time, "close_time": r.close_time} for r in _sd4]
+                                _hours4 = _fmt2(_weekly4, _tz4, slot_minutes=_slot_m4, booking_window_days=_max4) if _weekly4 else ""
+                                from app.engine.message_processor import _format_available_dates_for_prompt as _fmt_avail
+                                _avail4 = _fmt_avail(_tz4, _max4, count=7)
+                                parts = [p for p in [_hours4, _avail4] if p]
+                                _desc_for_create = " ".join(parts)
+                            except Exception:
+                                pass
                         _directive_created = await _create_dir(
                             db,
                             org_id=org.id,
@@ -1138,7 +1187,7 @@ async def process_message_with_graph(
                             session_id=chat_session.session_id,
                             type=_dtype,
                             title="Select your preferred date" if _dtype == _DT.SELECT_DATE else "Select your preferred time" if _dtype in (_DT.SELECT_SLOT, "SELECT_TIME") else "Please confirm your booking",
-                            description="",
+                            description=_desc_for_create,
                             options=_opts,
                             required=True,
                             expires_in_seconds=300 if _dtype in (_DT.SELECT_SLOT, "SELECT_TIME") else 600,
