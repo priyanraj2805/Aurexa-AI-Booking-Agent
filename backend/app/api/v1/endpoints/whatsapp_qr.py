@@ -573,6 +573,43 @@ async def qr_inbound(
                     _title = str(getattr(_dir_after, "title", "") or "").strip()
                     _desc = str(getattr(_dir_after, "description", "") or "").strip()
                     _opts = list(getattr(_dir_after, "options", None) or [])
+                    # If directive description empty (old rows), generate horizon/hours on the fly for smooth text
+                    if not _desc:
+                        try:
+                            if _dir_after.type == "SELECT_DATE":
+                                from app.engine.message_processor import _format_available_dates_for_prompt
+                                _tz_q = str(getattr(org_config, "timezone", None) or "UTC")
+                                _max_q = int(getattr(org_config, "max_booking_days_ahead", 30) or 30)
+                                _desc = _format_available_dates_for_prompt(_tz_q, _max_q)
+                            elif _dir_after.type in ("SELECT_SLOT", "SELECT_TIME"):
+                                from app.engine.message_processor import _format_time_prompt_for_whatsapp
+                                from app.models.booking import BusinessSchedule as _BSq, ScheduleDay as _SDq, ScheduleException as _SEq
+                                from sqlalchemy.future import select as _Selq
+                                # try to get selected date from collected_data
+                                _sel_date = (chat_session.collected_data or {}).get("date") or ""
+                                _weekly_q = None
+                                _excs_q = None
+                                try:
+                                    _sdq_res = await db.execute(_Selq(_SDq).where(_SDq.org_id == org.id))
+                                    _sdq = _sdq_res.scalars().all()
+                                    _weekly_q = [{"day_of_week": r.day_of_week, "is_active": r.is_active, "open_time": r.open_time, "close_time": r.close_time} for r in _sdq]
+                                    _seq_res = await db.execute(_Selq(_SEq).where(_SEq.org_id == org.id))
+                                    _seq = _seq_res.scalars().all()
+                                    _excs_q = [{"exception_date": r.exception_date, "exception_type": str(r.exception_type), "custom_open": r.custom_open, "custom_close": r.custom_close} for r in _seq]
+                                except Exception:
+                                    pass
+                                _slot_mins_q = None
+                                try:
+                                    _bsq_res = await db.execute(_Selq(_BSq).where(_BSq.org_id == org.id))
+                                    _bsq = _bsq_res.scalars().first()
+                                    if _bsq:
+                                        _slot_mins_q = getattr(_bsq, "slot_duration_minutes", None)
+                                except Exception:
+                                    pass
+                                _tz_q2 = str(getattr(org_config, "timezone", None) or "UTC")
+                                _desc = _format_time_prompt_for_whatsapp(str(_sel_date or ""), _tz_q2, _slot_mins_q, weekly_schedule=_weekly_q, exceptions=_excs_q)
+                        except Exception:
+                            pass
                     _parts = [p for p in [_title, _desc] if p]
                     if _opts:
                         _lines = [f"{i}. {str(o.get('label') or o.get('id') or '').strip()}" for i, o in enumerate(_opts[:7], 1)]
