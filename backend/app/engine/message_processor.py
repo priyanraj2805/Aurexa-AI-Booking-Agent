@@ -624,9 +624,7 @@ def _format_available_dates_for_prompt(
     start_str = today.strftime("%d %B").lstrip("0")
     end_str = end.strftime("%d %B").lstrip("0")
     horizon = f"We are available from {start_str} to {end_str}, please choose a date within this horizon."
-    # Also add typing hint
-    hint = "You can type a date like *16 September*, *16 Sep* or *18/09/2026*."
-    return f"{horizon} {hint}"
+    return horizon
 
 
 def _format_slot_duration_human(minutes: int | None) -> str:
