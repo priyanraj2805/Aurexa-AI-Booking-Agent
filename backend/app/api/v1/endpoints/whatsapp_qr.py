@@ -581,7 +581,36 @@ async def qr_inbound(
                         from app.core.whatsapp_renderer import render_structured
 
                         _presenter = WhatsAppPresenter()
-                        _structured = await _presenter.present_directive(directive=_dir_after, tone=_tone, org_name=_org_name)
+                        # Resolve names correctly: agent/business vs customer, avoid "Hello from <customer>"
+                        _custom = getattr(org_config, "custom_prompts", None) or {}
+                        _agent = str(_custom.get("agent_name") or "").strip() or None
+                        _biz = str(_custom.get("business_name") or getattr(org, "name", "") or "").strip() or "Aurexa"
+                        _cust = str((chat_session.collected_data or {}).get("name") or "").strip() or None
+                        # is_first_turn: only first exchange (≤2 messages) should allow greeting
+                        _is_first = False
+                        _turn_idx = None
+                        try:
+                            from sqlalchemy import func as _func
+                            from sqlalchemy.future import select as _sel_msg
+                            from app.models.message import ChatMessage as _CM
+                            _cnt_res = await db.execute(_sel_msg(_func.count()).select_from(_CM).where(_CM.session_id == chat_session.session_id))
+                            _cnt = int(_cnt_res.scalar() or 0)
+                            _turn_idx = _cnt
+                            _is_first = _cnt <= 2
+                        except Exception:
+                            _is_first = False
+                        _structured = await _presenter.present_directive(
+                            directive=_dir_after,
+                            tone=_tone,
+                            org_name=_biz,
+                            user_message=getattr(payload, "text", "") or "",
+                            is_first_turn=_is_first,
+                            turn_index=_turn_idx,
+                            collected_data=chat_session.collected_data or {},
+                            agent_name=_agent,
+                            business_name=_biz,
+                            customer_name=_cust,
+                        )
                         wa_msg = render_structured(_structured, transport="baileys")
                         logger.info(
                             "whatsapp.presenter.render",

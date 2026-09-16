@@ -91,11 +91,20 @@ class WhatsAppPresenter:
         directive,
         tone: Optional[str] = None,
         org_name: Optional[str] = None,
+        # Contextual params to avoid repetitive greeting — WhatsApp is ongoing, not per-turn greeting
+        user_message: Optional[str] = None,
+        is_first_turn: Optional[bool] = None,
+        turn_index: Optional[int] = None,
+        collected_data: Optional[Dict[str, Any]] = None,
+        agent_name: Optional[str] = None,
+        business_name: Optional[str] = None,
+        customer_name: Optional[str] = None,
     ) -> StructuredWhatsAppResponse:
         """
         directive: BookingDirective ORM or dict with type/title/description/options/id
         Returns StructuredWhatsAppResponse with intro/outro + authoritative options.
-        LLM fallback is directive.title/description verbatim.
+        LLM fallback is directive.title/description verbatim (no greeting).
+        LLM must NOT invent greeting on every turn — only if is_first_turn or user greeted.
         """
         dtype = getattr(directive, "type", None) or (directive.get("type") if isinstance(directive, dict) else "") or ""
         title = getattr(directive, "title", "") or (directive.get("title") if isinstance(directive, dict) else "") or ""
@@ -106,7 +115,17 @@ class WhatsAppPresenter:
             raw_options = directive.get("options") or []
         options = list(raw_options or [])
 
-        # Fallback without LLM
+        # Resolve names correctly: agent/business vs customer — never confuse customer as business
+        # org_name is legacy alias; prefer explicit agent/business
+        resolved_agent = (agent_name or "").strip() or None
+        resolved_business = (business_name or org_name or "Aurexa").strip() or "Aurexa"
+        resolved_customer = (customer_name or (collected_data or {}).get("name") or "").strip() if isinstance(collected_data, dict) else (customer_name or "").strip()
+        # Never use customer name as business/agent
+        if resolved_customer and resolved_customer.lower() == resolved_business.lower():
+            # If org name coincidentally equals customer (e.g., test org "Priyanshu"), keep business as Aurexa fallback for intro
+            resolved_business = (business_name or "Aurexa").strip() or "Aurexa"
+
+        # Fallback without LLM — deterministic, no greeting repetition
         fallback_intro = f"{title}\n\n{desc}".strip() if desc else title.strip()
         if not fallback_intro:
             fallback_intro = "Please make a selection."
@@ -132,28 +151,48 @@ class WhatsAppPresenter:
                 options=options,
             )
 
-        # Build prompt: LLM generates ONLY intro/outro, never options
+        # Build prompt: LLM generates ONLY intro/outro, never options — contextual, no repetitive greeting
         options_preview = "\n".join(f"- {o.get('label')}" for o in options[:5])
+        # Conversation context for greeting decision
+        is_first = bool(is_first_turn) if is_first_turn is not None else (turn_index == 0 if isinstance(turn_index, int) else False)
+        # Detect if user just greeted (simple, avoid greeting on every turn)
+        user_is_greeting = False
+        if isinstance(user_message, str) and user_message.strip():
+            low = user_message.strip().lower()
+            user_is_greeting = low in {"hi", "hii", "hiii", "hello", "hey", "hola", "namaste"} or low.startswith(("hi ", "hello", "hey ", "hii ", "namaste"))
+        # Booking context snippet
+        sel_date = (collected_data or {}).get("date") if isinstance(collected_data, dict) else None
+        sel_time = (collected_data or {}).get("time") if isinstance(collected_data, dict) else None
         system = (
             "You are Aurexa, the WhatsApp presentation layer for a booking assistant.\n"
             "STRICT RULES:\n"
-            "- You control ONLY wording, tone, greeting, explanation, formatting, emoji usage, intro/outro.\n"
+            "- You control ONLY wording, tone, explanation, formatting, emoji usage, intro/outro.\n"
             "- You must NOT invent or modify: booking state, availability, doctors/members, slots, prices, OTP, booking IDs, directive IDs, option IDs/values.\n"
             "- The authoritative options will be supplied by the backend — you must NOT list alternative options.\n"
-            "- Keep intro to 1-3 short sentences, outro to 0-1 sentence. WhatsApp-friendly.\n"
-            "- Respect the requested tone. Do not add disallowed content.\n"
+            "- WhatsApp is an ongoing conversation. Do NOT prepend 'Hello/Hi/Welcome/Thank you for reaching out' on every turn.\n"
+            "  Greeting ONLY if: (a) is_first_turn=true, or (b) user just greeted (user_is_greeting=true), otherwise NO greeting.\n"
+            "- Booking responses must be contextual to the current directive, not generic:\n"
+            "  * SELECT_DATE → talk about dates (e.g., 'Sure! Here are the available dates. Please choose one.')\n"
+            "  * SELECT_TIME/SELECT_SLOT → acknowledge selected date and talk about times (e.g., 'Great! 17 September is available. Here are the times:')\n"
+            "  * CONFIRM_BOOKING → concise confirmation summary intro (e.g., 'You're almost done! Please confirm:')\n"
+            "- Do NOT add generic closing sentences like 'Do you need any further assistance?' or 'We look forward to confirming' on every message. Only add outro when genuinely helpful (0-1 sentence), else empty.\n"
+            "- Keep intro to 1-2 short sentences, outro to 0-1 sentence. WhatsApp-friendly, tone-aware.\n"
+            "- Use business/agent name correctly: business/agent is the organization, customer is separate — never say 'Hello from <customer_name>'.\n"
             "- Output JSON only: {\"intro\": \"...\", \"outro\": \"...\"}\n"
         )
         user_prompt = (
             f"{_tone_line(tone)}\n"
-            f"Organization: {org_name or 'Aurexa'}\n"
+            f"Business: {resolved_business}\n"
+            f"Agent name: {resolved_agent or 'Aurexa Assistant'}\n"
+            f"Customer name: {resolved_customer or '(unknown)'}\n"
+            f"Conversation: is_first_turn={is_first}, user_is_greeting={user_is_greeting}, turn_index={turn_index}\n"
+            f"User last message: {repr((user_message or '')[:200])}\n"
+            f"Booking state: collected={repr({k: v for k, v in (collected_data or {}).items() if k in ('name','email','phone','date','time')}) if isinstance(collected_data, dict) else '{}'}, selected_date={sel_date}, selected_time={sel_time}\n"
             f"Directive type: {dtype}\n"
             f"Directive title: {title}\n"
             f"Directive description: {desc}\n"
             f"Authoritative option labels (for context ONLY, do not output IDs):\n{options_preview or '(no options)'}\n"
-            f"Task: Write intro and optional outro for this WhatsApp message. "
-            f"Intro should be attractive and conversational in the requested tone. "
-            f"Outro should be a brief helpful follow-up question if appropriate, else empty.\n"
+            f"Task: Write intro and optional outro for this WhatsApp message following the contextual greeting and closing rules above.\n"
             f"Return JSON with keys intro, outro."
         )
         try:
@@ -173,6 +212,32 @@ class WhatsAppPresenter:
             parsed = json.loads(clean)
             intro = _sanitize_intro_outro(str(parsed.get("intro") or ""), 600)
             outro = _sanitize_intro_outro(str(parsed.get("outro") or ""), 300)
+            # Enforce contextual greeting / closing rules (backend is truth)
+            if not is_first and not user_is_greeting:
+                # Strip leading greeting if LLM ignored rule
+                intro = re.sub(
+                    r"^\s*(hello[^\n]{0,60}?[\.!]?\s+|hi[^\n]{0,60}?[\.!]?\s+|hey[^\n]{0,60}?[\.!]?\s+|welcome[^\n]{0,60}?[\.!]?\s+|thank you[^.!\n]{0,50}?[\.!]?\s+)+",
+                    "",
+                    intro,
+                    flags=re.I,
+                ).strip()
+                # Remove "Hello from <business>" / "Hello, this is ..." leakage
+                intro = re.sub(r"^\s*hello[^:]*:\s*", "", intro, flags=re.I).strip()
+            # Strip generic closing sentences on non-terminal steps
+            if outro and dtype not in ("CONFIRM_BOOKING", "BOOKING_CONFIRMED"):
+                low_out = outro.lower()
+                if any(
+                    phrase in low_out
+                    for phrase in [
+                        "further assistance",
+                        "let us know",
+                        "look forward",
+                        "do you need any",
+                        "need any further",
+                        "please let us know",
+                    ]
+                ):
+                    outro = ""
             if not intro:
                 intro = fallback_intro
             logger.info(
