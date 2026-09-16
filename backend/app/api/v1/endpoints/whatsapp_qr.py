@@ -560,19 +560,51 @@ async def qr_inbound(
                 _active_id_after = chat_session.collected_data.get("active_directive_id")
         except Exception:
             pass
+        # ── WhatsApp presenter (LLM intro/outro) + renderer — WhatsApp-only ──
+        # Backend decides text vs directive (active_directive_id); LLM only rewrites intro/outro around authoritative options.
         wa_msg = None
+        _tone = None
+        _org_name = str(getattr(org, "name", "") or "Aurexa")
+        try:
+            _tone = (getattr(org_config, "custom_prompts", None) or {}).get("tone") or "friendly"
+        except Exception:
+            _tone = "friendly"
         if _active_id_after:
             try:
                 from app.engine.booking_directive.service import get_by_id as _get_dir2
-                from app.core.whatsapp_directive_renderer import render as _render_dir
 
                 _dir_after = await _get_dir2(db, _active_id_after)
                 if _dir_after and _dir_after.status == "PENDING":
-                    wa_msg = _render_dir(_dir_after)
-                    logger.info(f"Rendered via WhatsAppDirectiveRenderer type={_dir_after.type} directive={str(_dir_after.id)[:8]}")
+                    # Try presenter (LLM intro/outro) → renderer, fallback to direct renderer
+                    try:
+                        from app.engine.whatsapp_presenter import WhatsAppPresenter
+                        from app.core.whatsapp_renderer import render_structured
+
+                        _presenter = WhatsAppPresenter()
+                        _structured = await _presenter.present_directive(directive=_dir_after, tone=_tone, org_name=_org_name)
+                        wa_msg = render_structured(_structured, transport="baileys")
+                        logger.info(
+                            "whatsapp.presenter.render",
+                            extra={
+                                "event": "whatsapp.presenter.render",
+                                "directive_type": _dir_after.type,
+                                "directive_id": str(_dir_after.id)[:8],
+                                "transport": "baileys",
+                                "tone": _tone,
+                            },
+                        )
+                    except Exception as _pe:
+                        logger.warning("whatsapp.presenter.fallback directive", extra={"event": "whatsapp.presenter.fallback", "reason": str(_pe)[:120]})
+                        from app.core.whatsapp_directive_renderer import render as _render_dir
+
+                        wa_msg = _render_dir(_dir_after)
+                        logger.info(f"Rendered via WhatsAppDirectiveRenderer type={_dir_after.type} directive={str(_dir_after.id)[:8]}")
             except Exception as _e:
                 logger.warning(f"Directive render failed, falling back: {_e}")
         if wa_msg is None:
+            # Non-directive path — keep deterministic booking engine rendering for now.
+            # Knowledge-tone presentation for ASK_QUESTION will be handled via graph's RAG path (already tone-aware);
+            # presenter for text is reserved for Phase 5 when we wire retrieved chunks explicitly.
             wa_msg = whatsapp_client.format_action_for_whatsapp(action)
         # Approved Marketing templates via Cloud API (language `en`), Baileys stays as fallback.
         # Sends Cloud copy for Meta compliance; the Baileys `wa_msg` above is still
