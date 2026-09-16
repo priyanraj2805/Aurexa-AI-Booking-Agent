@@ -613,19 +613,116 @@ def _upcoming_date_options(
 def _format_available_dates_for_prompt(
     org_timezone: str, max_booking_days: int, count: int = 7
 ) -> str:
-    """WhatsApp-friendly date prompt (short, no technical horizon/tz prefix).
+    """Horizon-based date prompt as requested: 'We are available from 15 September to 15 November...'"""
+    try:
+        tz = ZoneInfo(str(org_timezone or "UTC"))
+    except Exception:
+        tz = timezone.utc
+    today = datetime.now(tz).date()
+    end = today + timedelta(days=int(max_booking_days or 30))
+    # Format like '15 September' without year, title-case
+    start_str = today.strftime("%d %B").lstrip("0")
+    end_str = end.strftime("%d %B").lstrip("0")
+    horizon = f"We are available from {start_str} to {end_str}, please choose a date within this horizon."
+    # Also add typing hint
+    hint = "You can type a date like *16 September*, *16 Sep* or *18/09/2026*."
+    return f"{horizon} {hint}"
 
-    Returns a clean, multi-line hint for tapping or typing.
-    """
-    opts = _upcoming_date_options(org_timezone, max_booking_days, count=count)
-    if not opts:
-        return "Tap a date below or type one like *16 September*, *16 Sep* or *18/09/2026*."
-    # Show dates as a simple list, no internal horizon/tz details
-    dates_line = " · ".join(opts)
-    return (
-        f"Tap a date below or type one like *16 September*, *16 Sep* or *18/09/2026*.\n"
-        f"Next available: {dates_line}"
-    )
+
+def _format_slot_duration_human(minutes: int | None) -> str:
+    if not minutes or minutes <= 0:
+        return ""
+    if minutes == 60:
+        return "1 hr"
+    if minutes % 60 == 0:
+        hrs = minutes // 60
+        return f"{hrs} hr" if hrs == 1 else f"{hrs} hrs"
+    if minutes < 60:
+        return f"{minutes} minutes"
+    hrs = minutes // 60
+    mins = minutes % 60
+    return f"{hrs} hr {mins} minutes" if hrs == 1 else f"{hrs} hrs {mins} minutes"
+
+
+def _format_time_prompt_for_whatsapp(
+    target_date_str: str,
+    timezone_name: str,
+    slot_minutes: int | None,
+    weekly_schedule: list[dict] | None = None,
+    exceptions: list[dict] | None = None,
+) -> str:
+    """Time prompt: 'Our available booking hours are from 9:30 to 6:30 and your booking will be of 1 hr, please choose your time for booking.'"""
+    # Resolve hours for this specific date
+    try:
+        from dateutil.parser import parse as _parse
+        target = _parse(str(target_date_str)).date()
+    except Exception:
+        target = None
+    hours_text = ""
+    if target and weekly_schedule is not None:
+        # check exception first
+        is_closed = False
+        custom_open = None
+        custom_close = None
+        if exceptions:
+            for ex in exceptions:
+                ex_date = ex.get("exception_date")
+                if isinstance(ex_date, str):
+                    try:
+                        ex_date = __import__("datetime").date.fromisoformat(ex_date)
+                    except Exception:
+                        continue
+                if ex_date == target:
+                    if str(ex.get("exception_type") or "").upper() == "CLOSED":
+                        is_closed = True
+                    else:
+                        custom_open = ex.get("custom_open")
+                        custom_close = ex.get("custom_close")
+                    break
+        if is_closed:
+            return f"We are closed on {target.strftime('%A, %d %B').lstrip('0')} — please choose another date."
+        # weekly schedule for this weekday
+        if custom_open and custom_close:
+            # custom hours
+            try:
+                from app.engine.scheduling_policy import _coerce_time as _ct, _format_display_time as _ft
+                o = _ct(custom_open); c = _ct(custom_close)
+                if o and c:
+                    hours_text = f"{_ft(o)} to {_ft(c)}"
+            except Exception:
+                pass
+        else:
+            # normal weekday
+            for item in weekly_schedule or []:
+                try:
+                    if int(item.get("day_of_week", -1)) == target.weekday():
+                        if not item.get("is_active"):
+                            return f"We are closed on {target.strftime('%A, %d %B').lstrip('0')} — please choose another date."
+                        from app.engine.scheduling_policy import _coerce_time as _ct, _format_display_time as _ft
+                        o = _ct(item.get("open_time")); c = _ct(item.get("close_time"))
+                        if o and c:
+                            hours_text = f"{_ft(o)} to {_ft(c)}"
+                        break
+                except Exception:
+                    continue
+    # Fallback if no schedule
+    if not hours_text and weekly_schedule:
+        # try generic first active
+        try:
+            from app.engine.scheduling_policy import _coerce_time as _ct, _format_display_time as _ft
+            for item in weekly_schedule:
+                if item.get("is_active"):
+                    o = _ct(item.get("open_time")); c = _ct(item.get("close_time"))
+                    if o and c:
+                        hours_text = f"{_ft(o)} to {_ft(c)}"
+                        break
+        except Exception:
+            pass
+    if not hours_text:
+        hours_text = "9:00 AM to 5:00 PM"
+    dur = _format_slot_duration_human(slot_minutes)
+    dur_part = f" and your booking will be of {dur}" if dur else ""
+    return f"Our available booking hours are from {hours_text}{dur_part}, please choose your time for booking."
 
 
 def _format_business_hours_for_whatsapp(

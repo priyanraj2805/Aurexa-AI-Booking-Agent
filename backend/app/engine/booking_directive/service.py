@@ -205,16 +205,11 @@ async def generate_for_next_step(db, org_id, session_id, customer_id, missing_fi
             if _gen_labels:
                 raw_opts = _gen_labels
                 meta["options"] = list(raw_opts)
-                # Add helpful description with clean WhatsApp formatting
+                # Date prompt: horizon only (as requested: "We are available from X to Y...")
                 if not meta.get("description"):
                     try:
                         _avail = _format_available_dates_for_prompt(_tz, _max, count=min(7, len(_gen_labels)))
-                        if _business_hours_summary and _avail:
-                            meta["description"] = f"🕘 {_business_hours_summary}\n\n{_avail}"
-                        elif _business_hours_summary:
-                            meta["description"] = f"🕘 {_business_hours_summary}\n\n{_avail or ''}".strip()
-                        else:
-                            meta["description"] = _avail
+                        meta["description"] = _avail
                     except Exception:
                         pass
         except Exception:
@@ -296,28 +291,52 @@ async def generate_for_next_step(db, org_id, session_id, customer_id, missing_fi
                     # Also set target_date in meta for stable IDs
                     if not meta.get("target_date") and _target:
                         meta["target_date"] = str(_parsed_date.isoformat())
-                    # Add helpful description with available times for this date
+                    # Add helpful description with hours + duration in requested format
                     if not meta.get("description"):
                         try:
-                            _date_str = str(_parsed_date.isoformat())
-                            _slot_mins = None
+                            from app.engine.message_processor import _format_time_prompt_for_whatsapp
+                            # need weekly schedule + exceptions for proper hours/closure handling
+                            _weekly2 = None
+                            _excs2 = None
+                            try:
+                                from app.models.booking import BusinessSchedule as _BS3a, ScheduleDay as _SD3a, ScheduleException as _SE3a
+                                from sqlalchemy.future import select as _sel3a
+                                _sd3_res = await db.execute(_sel3a(_SD3a).where(_SD3a.org_id == org_id))
+                                _sd3 = _sd3_res.scalars().all()
+                                _weekly2 = [
+                                    {"day_of_week": r.day_of_week, "is_active": r.is_active, "open_time": r.open_time, "close_time": r.close_time}
+                                    for r in _sd3
+                                ]
+                                _se3_res = await db.execute(_sel3a(_SE3a).where(_SE3a.org_id == org_id))
+                                _se3 = _se3_res.scalars().all()
+                                _excs2 = [
+                                    {"exception_date": r.exception_date, "exception_type": str(r.exception_type), "custom_open": r.custom_open, "custom_close": r.custom_close}
+                                    for r in _se3
+                                ]
+                            except Exception:
+                                pass
+                            _slot_mins2 = None
                             try:
                                 from sqlalchemy.future import select as _sel_slot
                                 from app.models.booking import BusinessSchedule as _BS2
                                 _s2_res = await db.execute(_sel_slot(_BS2).where(_BS2.org_id == org_id))
                                 _s2 = _s2_res.scalars().first()
                                 if _s2:
-                                    _slot_mins = getattr(_s2, "slot_duration_minutes", None)
+                                    _slot_mins2 = getattr(_s2, "slot_duration_minutes", None)
                             except Exception:
                                 pass
-                            _tz_label = _tz_name
-                            _slots_str = " · ".join(raw_opts[:7])
-                            _pretty_date = _parsed_date.strftime("%a, %b %d") if '_parsed_date' in locals() else _date_str
-                            meta["description"] = (
-                                f"🕒 Available times for {_pretty_date} ({_tz_label}):\n{_slots_str}"
-                                + (f"\nEach appointment is {_slot_mins} minutes." if _slot_mins else "")
-                                + "\nTap below or reply like *9:30 AM*."
+                            meta["description"] = _format_time_prompt_for_whatsapp(
+                                str(_parsed_date.isoformat()), _tz_name, _slot_mins2, weekly_schedule=_weekly2, exceptions=_excs2
                             )
+                        except Exception:
+                            # fallback old
+                            try:
+                                _tz_label = _tz_name
+                                _slots_str = " · ".join(raw_opts[:7])
+                                _pretty_date = _parsed_date.strftime("%a, %b %d")
+                                meta["description"] = f"Our available booking hours are from {_slots_str}, please choose your time for booking."
+                            except Exception:
+                                pass
                         except Exception:
                             pass
         except Exception as _e:

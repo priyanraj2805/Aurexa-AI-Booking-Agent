@@ -1080,26 +1080,45 @@ async def process_message_with_graph(
                                     if len(_slot_labels) >= 10:
                                         break
                                 _raw = _slot_labels
-                                # Also set time availability description if we have slots (clean WhatsApp)
+                                # Also set time prompt in requested format: hours + duration, with closure/exception
                                 if _slot_labels and not directive_meta.get("description"):
                                     try:
-                                        _date_for_desc = _parsed.strftime("%a, %b %d") if '_parsed' in locals() else str(_target or "")
-                                        _tz_for_desc = str(_tz_res.get("effective_timezone") or _tz_name)
-                                        _slots_str = " · ".join(_slot_labels[:7])
-                                        _slot_mins2 = None
+                                        from app.engine.message_processor import _format_time_prompt_for_whatsapp
+                                        _weekly3 = None
+                                        _excs3 = None
                                         try:
-                                            from app.models.booking import BusinessSchedule as _BS3
-                                            from sqlalchemy.future import select as _sel3
-                                            _s3_res = await db.execute(_sel3(_BS3).where(_BS3.org_id == org.id))
-                                            _s3 = _s3_res.scalars().first()
-                                            if _s3:
-                                                _slot_mins2 = getattr(_s3, "slot_duration_minutes", None)
+                                            from app.models.booking import ScheduleDay as _SD3b, ScheduleException as _SE3b
+                                            from sqlalchemy.future import select as _sel3b
+                                            _sd3b_res = await db.execute(_sel3b(_SD3b).where(_SD3b.org_id == org.id))
+                                            _sd3b = _sd3b_res.scalars().all()
+                                            _weekly3 = [
+                                                {"day_of_week": r.day_of_week, "is_active": r.is_active, "open_time": r.open_time, "close_time": r.close_time}
+                                                for r in _sd3b
+                                            ]
+                                            _se3b_res = await db.execute(_sel3b(_SE3b).where(_SE3b.org_id == org.id))
+                                            _se3b = _se3b_res.scalars().all()
+                                            _excs3 = [
+                                                {"exception_date": r.exception_date, "exception_type": str(r.exception_type), "custom_open": r.custom_open, "custom_close": r.custom_close}
+                                                for r in _se3b
+                                            ]
                                         except Exception:
                                             pass
-                                        directive_meta["description"] = (
-                                            f"🕒 Available times for {_date_for_desc} ({_tz_for_desc}):\n{_slots_str}"
-                                            + (f"\nEach appointment is {_slot_mins2} minutes." if _slot_mins2 else "")
-                                            + "\nTap below or reply like *9:30 AM*."
+                                        _slot_mins3 = None
+                                        try:
+                                            from app.models.booking import BusinessSchedule as _BS3c
+                                            from sqlalchemy.future import select as _sel3c
+                                            _s3c_res = await db.execute(_sel3c(_BS3c).where(_BS3c.org_id == org.id))
+                                            _s3c = _s3c_res.scalars().first()
+                                            if _s3c:
+                                                _slot_mins3 = getattr(_s3c, "slot_duration_minutes", None)
+                                        except Exception:
+                                            pass
+                                        directive_meta["description"] = _format_time_prompt_for_whatsapp(
+                                            str(_parsed.date().isoformat()) if '_parsed' in locals() else str(_target or ""),
+                                            str(_tz_res.get("effective_timezone") or _tz_name),
+                                            _slot_mins3,
+                                            weekly_schedule=_weekly3,
+                                            exceptions=_excs3,
                                         )
                                     except Exception:
                                         pass
@@ -1158,25 +1177,13 @@ async def process_message_with_graph(
                         _desc_for_create = ""
                         if isinstance(directive_meta, dict) and directive_meta.get("description"):
                             _desc_for_create = str(directive_meta.get("description") or "")
-                        # For SELECT_DATE without description, try business hours + availability fallback
+                        # For SELECT_DATE without description, horizon only (as requested)
                         if not _desc_for_create and _dtype == _DT.SELECT_DATE:
                             try:
-                                from app.engine.scheduling_policy import format_weekly_hours_summary as _fmt2
-                                from app.models.booking import BusinessSchedule as _BS4, ScheduleDay as _SD4
-                                from sqlalchemy.future import select as _sel4
+                                from app.engine.message_processor import _format_available_dates_for_prompt as _fmt_avail
                                 _tz4 = str(getattr(org_config, "timezone", None) or "UTC")
                                 _max4 = int(getattr(org_config, "max_booking_days_ahead", 30) or 30)
-                                _s4_res = await db.execute(_sel4(_BS4).where(_BS4.org_id == org.id))
-                                _s4 = _s4_res.scalars().first()
-                                _slot_m4 = getattr(_s4, "slot_duration_minutes", None) if _s4 else None
-                                _sd4_res = await db.execute(_sel4(_SD4).where(_SD4.org_id == org.id))
-                                _sd4 = _sd4_res.scalars().all()
-                                _weekly4 = [{"day_of_week": r.day_of_week, "is_active": r.is_active, "open_time": r.open_time, "close_time": r.close_time} for r in _sd4]
-                                _hours4 = _fmt2(_weekly4, _tz4, slot_minutes=_slot_m4, booking_window_days=_max4) if _weekly4 else ""
-                                from app.engine.message_processor import _format_available_dates_for_prompt as _fmt_avail
-                                _avail4 = _fmt_avail(_tz4, _max4, count=7)
-                                parts = [p for p in [_hours4, _avail4] if p]
-                                _desc_for_create = " ".join(parts)
+                                _desc_for_create = _fmt_avail(_tz4, _max4, count=7)
                             except Exception:
                                 pass
                         _directive_created = await _create_dir(
