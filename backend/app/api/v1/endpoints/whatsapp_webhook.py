@@ -346,12 +346,9 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                             except Exception:
                                 pass
                         _parts = [p for p in [_title, _desc] if p]
-                        if _opts:
-                            _lines = [f"{i}. {str(o.get('label') or o.get('id') or '').strip()}" for i, o in enumerate(_opts[:7], 1)]
-                            _parts.append("\n".join(_lines))
                         _body = "\n\n".join(_parts).strip()
                         wa_msg = {"type": "text", "body": _body[:4096]}
-                        logger.info(f"Rendered simple-text directive (cloud) type={_dir_after.type} directive={str(_dir_after.id)[:8]} opts={len(_opts)}")
+                        logger.info(f"Rendered simple-text directive (cloud) type={_dir_after.type} directive={str(_dir_after.id)[:8]} (no options list per simple-text mode)")
                 except Exception as _e:
                     logger.warning(f"Directive render failed (cloud), falling back: {_e}")
             if wa_msg is None:

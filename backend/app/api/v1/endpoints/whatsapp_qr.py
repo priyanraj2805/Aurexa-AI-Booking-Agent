@@ -572,7 +572,6 @@ async def qr_inbound(
                 if _dir_after and _dir_after.status == "PENDING":
                     _title = str(getattr(_dir_after, "title", "") or "").strip()
                     _desc = str(getattr(_dir_after, "description", "") or "").strip()
-                    _opts = list(getattr(_dir_after, "options", None) or [])
                     # If directive description empty (old rows), generate horizon/hours on the fly for smooth text
                     if not _desc:
                         try:
@@ -611,12 +610,9 @@ async def qr_inbound(
                         except Exception:
                             pass
                     _parts = [p for p in [_title, _desc] if p]
-                    if _opts:
-                        _lines = [f"{i}. {str(o.get('label') or o.get('id') or '').strip()}" for i, o in enumerate(_opts[:7], 1)]
-                        _parts.append("\n".join(_lines))
                     _body = "\n\n".join(_parts).strip()
                     wa_msg = {"type": "text", "body": _body[:4096]}
-                    logger.info(f"Rendered simple-text directive type={_dir_after.type} directive={str(_dir_after.id)[:8]} opts={len(_opts)}")
+                    logger.info(f"Rendered simple-text directive type={_dir_after.type} directive={str(_dir_after.id)[:8]} (no options list per simple-text mode)")
             except Exception as _e:
                 logger.warning(f"Directive render failed, falling back: {_e}")
         if wa_msg is None:
