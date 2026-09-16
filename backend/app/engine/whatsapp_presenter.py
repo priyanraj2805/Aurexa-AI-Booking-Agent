@@ -213,11 +213,21 @@ class WhatsAppPresenter:
             intro = _sanitize_intro_outro(str(parsed.get("intro") or ""), 600)
             outro = _sanitize_intro_outro(str(parsed.get("outro") or ""), 300)
             # Ensure horizon/booking-hours from directive description is in same message (smooth)
-            # If intro doesn't already contain horizon (We are available...), append desc
-            if desc and desc.strip() and desc.strip().lower() not in intro.lower():
-                # Only append if horizon not already present to keep single smooth message
-                if "we are available" in desc.lower() or "available from" in desc.lower() or "booking hours" in desc.lower():
-                    if desc.strip() not in intro:
+            # Append desc only if intro doesn't already contain that kind of info (avoid duplication like double horizon)
+            if desc and desc.strip():
+                low_desc = desc.strip().lower()
+                low_intro = intro.lower() if intro else ""
+                is_horizon = "we are available" in low_desc
+                is_hours = "booking hours" in low_desc
+                has_horizon = "we are available" in low_intro
+                has_hours = "booking hours" in low_intro
+                if is_horizon and not has_horizon:
+                    intro = f"{intro}\n\n{desc.strip()}" if intro else desc.strip()
+                elif is_hours and not has_hours:
+                    intro = f"{intro}\n\n{desc.strip()}" if intro else desc.strip()
+                elif not is_horizon and not is_hours and low_desc not in low_intro:
+                    # Fallback for other descs
+                    if desc.strip() not in (intro or ""):
                         intro = f"{intro}\n\n{desc.strip()}" if intro else desc.strip()
             # Enforce contextual greeting / closing rules (backend is truth)
             if not is_first and not user_is_greeting:
@@ -242,6 +252,9 @@ class WhatsAppPresenter:
                         "do you need any",
                         "need any further",
                         "please let us know",
+                        "we are here to assist",
+                        "here to assist if you have any questions",
+                        "assist if you have any questions",
                     ]
                 ):
                     outro = ""
