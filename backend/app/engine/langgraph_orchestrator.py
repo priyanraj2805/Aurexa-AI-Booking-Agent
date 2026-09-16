@@ -84,9 +84,38 @@ def _is_resend_request(message_text: str) -> bool:
 
 
 def _is_awaiting_otp(chat_session: ChatSessionState) -> bool:
-    if getattr(chat_session, "otp_verified", False):
+    # Check both email and phone OTP pending — WhatsApp uses phone channel
+    if getattr(chat_session, "otp_verified", False) and getattr(chat_session, "phone_otp_verified", False):
         return False
+    # If either email or phone OTP is pending, consider awaiting
+    # For phone-only orgs (Priyanshu), phone_otp_verified is the gate
+    try:
+        from app.crud.otp import _get_policy_state as _get_ps
+        # If any OTP policy state has been set, we are awaiting
+        for ch in ("email", "phone"):
+            ps = _get_ps(chat_session, ch) if hasattr(chat_session, "state_data") else {}
+            if isinstance(ps, dict) and ps.get("last_sent_at"):
+                return True
+    except Exception:
+        pass
     effect_state = _active_effect_state(chat_session)
+    for key in ("otp_sent_keys", "phone_otp_sent_keys", "otp_keys", "phone_otp_keys"):
+        sent_keys = effect_state.get(key)
+        if isinstance(sent_keys, list) and len(sent_keys) > 0:
+            return True
+    # Fallback: if phone or email verification is pending and OTP was recently sent (state_data has policy)
+    try:
+        sd = getattr(chat_session, "state_data", None) or getattr(chat_session, "collected_data", None) or {}
+        if isinstance(sd, dict):
+            for k in ("_otp_policy", "_otp_phone_policy", "otp_sent_keys", "phone_otp_sent_keys"):
+                v = sd.get(k)
+                if isinstance(v, dict) and v.get("last_sent_at"):
+                    return True
+                if isinstance(v, list) and len(v) > 0:
+                    return True
+    except Exception:
+        pass
+    # Legacy fallback
     sent_keys = effect_state.get("otp_sent_keys")
     return isinstance(sent_keys, list) and len(sent_keys) > 0
 
