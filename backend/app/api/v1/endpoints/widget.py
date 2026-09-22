@@ -21,7 +21,7 @@ from app.models.session import ChatSession
 from app.models.message import ChatMessage
 from app.models.user import User
 from datetime import datetime
-from app.models.booking import BusinessSchedule
+from app.models.booking import BusinessSchedule, ScheduleDay
 from app.engine.slot_engine import (
     compute_slot_inventory,
     apply_scheduling_policy_to_inventory,
@@ -163,6 +163,15 @@ class WidgetConfigResponse(BaseModel):
     available_meeting_types: list[str]
     require_otp: bool = True
     require_phone_otp: bool = False
+    # Phase horizon: single source (BusinessSchedule first). The picker
+    # clamps to it; backend validation enforces it again at selection.
+    max_booking_days_ahead: int = 60
+    # Weekdays with no hours (0=Mon..6=Sun) for picker hints.
+    closed_weekdays: list = []
+    # Phase 3 catalog: active units with providers for pre-chat selection.
+    # Absent/empty = org without catalog; widget behavior unchanged.
+    has_catalog: bool = False
+    catalog: Optional[dict] = None
 
 
 @router.get("/config", response_model=WidgetConfigResponse)
@@ -207,7 +216,46 @@ async def get_widget_config(
     )
     config = config_result.scalars().first()
 
-    return WidgetConfigResponse(**_build_config_response(org, config))
+    response = _build_config_response(org, config)
+
+    # Phase horizon + closed days for the date picker (best-effort; the
+    # picker falls back to min=today when absent, backend still enforces).
+    try:
+        from app.engine.scheduling_policy import (
+            resolve_booking_horizon_days as _resolve_horizon,
+        )
+
+        _horizon_days, _, _ = await _resolve_horizon(db, org.id, config)
+        response["max_booking_days_ahead"] = _horizon_days
+        _day_rows = (
+            await db.execute(
+                select(ScheduleDay).where(ScheduleDay.org_id == org.id)
+            )
+        ).scalars().all()
+        response["closed_weekdays"] = sorted(
+            {
+                int(r.day_of_week)
+                for r in _day_rows
+                if not r.is_active and r.day_of_week is not None
+            }
+        )
+    except Exception as horizon_err:
+        logger.warning("widget.config.horizon.failed: %s", horizon_err)
+
+    # Phase 3 catalog snapshot (best-effort; never breaks config for orgs
+    # without catalog or on lookup errors).
+    try:
+        from app.services.catalog_service import get_catalog_snapshot
+
+        snapshot = await get_catalog_snapshot(db, org.id)
+        response["catalog"] = snapshot
+        response["has_catalog"] = bool(snapshot.get("has_catalog"))
+    except Exception as catalog_err:
+        logger.warning("widget.config.catalog.failed: %s", catalog_err)
+        response["catalog"] = {"units": [], "has_catalog": False}
+        response["has_catalog"] = False
+
+    return WidgetConfigResponse(**response)
 
 
 class WidgetMessageItem(BaseModel):
@@ -506,6 +554,76 @@ async def get_widget_availability(
         availability_status=availability_status,
         policy_reason_code=policy_reason_code,
         slots=slots,
+    )
+
+
+class WidgetFeeResponse(BaseModel):
+    has_fee: bool = False
+    amount_paise: Optional[int] = None
+    currency: Optional[str] = None
+    display: Optional[str] = None
+    unit_id: Optional[str] = None
+    unit_name: Optional[str] = None
+    provider_id: Optional[str] = None
+    provider_name: Optional[str] = None
+
+
+@router.get("/fees", response_model=WidgetFeeResponse)
+@limiter.limit("60/minute")
+async def get_widget_fee(
+    request: Request,
+    unit_id: Optional[str] = Query(default=None),
+    provider_id: Optional[str] = Query(default=None),
+    api_key: Optional[str] = Query(
+        default=None, description="Organization API key (legacy)"
+    ),
+    widget_token: Optional[str] = Query(
+        default=None, description="Widget token (recommended)"
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Public effective-fee preview for a unit/provider selection.
+
+    Returns the fee the booking would carry (unit+provider > provider-only >
+    unit-only). No fee configured → has_fee=False. Never fails the widget.
+    """
+    if not api_key and not widget_token:
+        raise HTTPException(
+            status_code=400,
+            detail="Either api_key or widget_token query parameter is required",
+        )
+    if api_key:
+        org = await _get_org_from_api_key(api_key, db)
+    else:
+        org = await _get_org_from_widget_token(widget_token, db)
+    if not org or not org.is_active:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    from app.services.catalog_service import (
+        resolve_effective_fee,
+        validate_catalog_selection,
+    )
+
+    try:
+        unit, provider = await validate_catalog_selection(
+            db, org.id, unit_id, provider_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    amount, currency = await resolve_effective_fee(
+        db, org.id, unit_id, provider_id
+    )
+    if not amount:
+        return WidgetFeeResponse(has_fee=False)
+    return WidgetFeeResponse(
+        has_fee=True,
+        amount_paise=amount,
+        currency=currency,
+        display=f"{currency or 'INR'} {(amount / 100):,.2f}",
+        unit_id=str(unit.id) if unit else None,
+        unit_name=unit.name if unit else None,
+        provider_id=str(provider.id) if provider else None,
+        provider_name=provider.full_name if provider else None,
     )
 
 

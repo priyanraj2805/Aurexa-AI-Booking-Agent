@@ -74,10 +74,13 @@ class DataValidator:
             re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw)
             or re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", raw)
         )
+        # Normalise "3.30 pm" -> "3:30 pm", "3pm" -> "3 pm" for token detection (mirrors time_flex)
+        _norm_raw = raw.replace(".", ":")
+        _norm_raw = re.sub(r"(\d)(am|pm)\b", r"\1 \2", _norm_raw)
         has_explicit_time_token = bool(
-            raw in {"noon", "midnight"}
-            or re.search(r"\b(am|pm)\b", raw)
-            or re.search(r"\b\d{1,2}:\d{2}\b", raw)
+            _norm_raw in {"noon", "midnight"}
+            or re.search(r"(am|pm)\b", _norm_raw)
+            or re.search(r"\b\d{1,2}:\d{2}\b", _norm_raw)
         )
 
         # Reject date-only / ambiguous strings that dateutil would coerce to 00:00:00.
@@ -93,7 +96,9 @@ class DataValidator:
             return "00:00:00", None
 
         try:
-            parsed_time = parse(time_str)
+            # Normalise for dateutil: "3.30pm" -> "3:30 pm", "3pm" -> "3 pm"
+            _to_parse = re.sub(r"(\d)(am|pm)\b", r"\1 \2", str(time_str).strip().replace(".", ":"))
+            parsed_time = parse(_to_parse)
             t = parsed_time.time()
             if t.hour > 23 or t.minute > 59:
                 return (

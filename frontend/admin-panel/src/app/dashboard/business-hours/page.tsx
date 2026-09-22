@@ -18,6 +18,20 @@ import { toast } from "sonner";
 
 const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
+// Leap-aware horizon ceiling: 366 only when a Feb 29 falls inside the next
+// 366 days, otherwise 365 (mirrors backend max_horizon_days).
+function maxHorizonDays(now: Date = new Date()): number {
+  const isLeap = (y: number) => y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0);
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const end = new Date(start.getTime() + 366 * 864e5);
+  for (let y = start.getFullYear(); y <= end.getFullYear(); y++) {
+    if (!isLeap(y)) continue;
+    const feb29 = new Date(y, 1, 29);
+    if (feb29 >= start && feb29 <= end) return 366;
+  }
+  return 365;
+}
+
 // Full IANA timezone list at runtime (all zones supported by the browser),
 // with a curated fallback for engines without Intl.supportedValuesOf.
 const FALLBACK_TIMEZONES = [
@@ -287,8 +301,16 @@ function WeeklyScheduleTab() {
                 type="number"
                 value={schedule.booking_window_days}
                 min={1}
-                max={365}
-                onChange={(e) => updateMeta("booking_window_days", Number(e.target.value))}
+                max={maxHorizonDays()}
+                title={`1–${maxHorizonDays()} days (366 only when the window can include Feb 29 of a leap year)`}
+                onChange={(e) => {
+                  // A year caps the horizon — leap-aware (366 only when Feb 29
+                  // is reachable). Native min/max don't block typing past bounds.
+                  const cap = maxHorizonDays();
+                  const raw = Number(e.target.value);
+                  const clamped = Number.isFinite(raw) ? Math.min(cap, Math.max(1, Math.round(raw))) : 1;
+                  updateMeta("booking_window_days", clamped);
+                }}
                 className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
               />
               <span className="text-xs text-muted-foreground whitespace-nowrap">days ahead</span>
@@ -312,7 +334,7 @@ function WeeklyScheduleTab() {
         <div className="divide-y divide-border">
           {schedule.days.map((day, idx) => (
             <div key={day.day_of_week} className={`px-4 sm:px-5 py-4 flex flex-col gap-3 transition-colors ${day.is_active ? "" : "opacity-50"}`}>
-              <div className="flex flex-wrap items-center gap-3 sm:gap-4">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-3 sm:gap-x-4">
                 {/* Toggle */}
                 <button
                   aria-label={day.is_active ? `Deactivate ${DAY_NAMES[day.day_of_week]}` : `Activate ${DAY_NAMES[day.day_of_week]}`}
@@ -324,17 +346,17 @@ function WeeklyScheduleTab() {
                   <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${day.is_active ? "translate-x-4" : "translate-x-0"}`} />
                 </button>
                 {/* Day name */}
-                <span className="w-20 sm:w-24 text-sm font-medium">{DAY_NAMES[day.day_of_week]}</span>
-                {/* Times */}
+                <span className="w-20 shrink-0 truncate text-sm font-medium sm:w-24">{DAY_NAMES[day.day_of_week]}</span>
+                {/* Times — own grid columns on mobile so open/close sit side-by-side full-width */}
                 {day.is_active && (
                   <>
-                    <div className="flex items-center gap-2 flex-1 min-w-[140px]">
+                    <div className="grid min-w-[168px] flex-1 grid-cols-[1fr_auto_1fr] items-center gap-2">
                       <TimeSelect
                         value={day.open_time ?? ""}
                         onChange={(v) => updateDay(idx, "open_time", v)}
                         label="Open"
                       />
-                      <span className="text-muted-foreground text-sm">–</span>
+                      <span className="text-center text-sm text-muted-foreground">–</span>
                       <TimeSelect
                         value={day.close_time ?? ""}
                         onChange={(v) => updateDay(idx, "close_time", v)}
@@ -342,21 +364,25 @@ function WeeklyScheduleTab() {
                       />
                     </div>
                     {/* Break */}
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-xs text-muted-foreground">Break:</span>
-                      <TimeSelect
-                        value={day.break_start ?? ""}
-                        onChange={(v) => updateDay(idx, "break_start", v || null)}
-                        label="Start"
-                        placeholder="—"
-                      />
-                      <span className="text-muted-foreground text-xs">–</span>
-                      <TimeSelect
-                        value={day.break_end ?? ""}
-                        onChange={(v) => updateDay(idx, "break_end", v || null)}
-                        label="End"
-                        placeholder="—"
-                      />
+                    <div className="flex min-w-[210px] flex-1 flex-wrap items-center gap-2">
+                      <span className="shrink-0 text-xs text-muted-foreground">Break:</span>
+                      <div className="min-w-[96px] flex-1">
+                        <TimeSelect
+                          value={day.break_start ?? ""}
+                          onChange={(v) => updateDay(idx, "break_start", v || null)}
+                          label="Start"
+                          placeholder="—"
+                        />
+                      </div>
+                      <span className="shrink-0 text-xs text-muted-foreground">–</span>
+                      <div className="min-w-[96px] flex-1">
+                        <TimeSelect
+                          value={day.break_end ?? ""}
+                          onChange={(v) => updateDay(idx, "break_end", v || null)}
+                          label="End"
+                          placeholder="—"
+                        />
+                      </div>
                     </div>
                   </>
                 )}
@@ -374,7 +400,7 @@ function WeeklyScheduleTab() {
         <button
           onClick={handleSave}
           disabled={saving}
-          className="flex items-center gap-2 bg-primary text-primary-foreground px-5 py-2.5 rounded-lg text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition-colors"
+          className="flex w-full sm:w-auto items-center justify-center gap-2 bg-primary text-primary-foreground px-5 py-2.5 rounded-lg text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition-colors"
         >
           {saving ? <LoaderPulseSquare className="size-4" /> : <Save className="size-4" />}
           {saved ? "Saved!" : "Save Schedule"}
@@ -504,7 +530,7 @@ function ExceptionsTab() {
         <button
           onClick={handleAdd}
           disabled={adding}
-          className="mt-4 flex items-center gap-2 bg-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition-colors"
+          className="mt-4 flex w-full sm:w-auto items-center justify-center gap-2 bg-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition-colors"
         >
           {adding ? <LoaderPulseSquare className="size-4" /> : <Plus className="size-4" />}
           Add Exception
@@ -564,7 +590,9 @@ function ExceptionsTab() {
         </div>
       ) : (
         <div className="bg-card border border-border rounded-xl overflow-hidden">
-          <table className="w-full border-collapse">
+          {/* Scroll inside the card on small screens instead of squishing columns */}
+          <div className="overflow-x-auto scrollbar-thin">
+          <table className="w-full min-w-[560px] border-collapse">
             <thead>
               <tr>
                 {["Date", "Type", "Hours / Reason", ""].map((h) => (
@@ -604,6 +632,7 @@ function ExceptionsTab() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>
@@ -657,7 +686,7 @@ function PreviewTab() {
               aria-label="Preview Days"
               value={days}
               onChange={(e) => setDays(Number(e.target.value))}
-              className="bg-secondary border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+              className="w-full sm:w-auto bg-secondary border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
             >
               {[7, 14, 28].map((d) => (
                 <option key={d} value={d}>{d} days</option>
@@ -666,7 +695,7 @@ function PreviewTab() {
           </div>
           <button
             onClick={handlePreview}
-            className="flex items-center gap-2 bg-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors"
+            className="flex items-center justify-center gap-2 bg-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors w-full sm:w-auto"
           >
             <Eye className="size-4" /> Preview
           </button>
@@ -844,7 +873,7 @@ function CustomDatePicker({
       {isOpen && isReady && typeof document !== "undefined" && createPortal(
         <div 
           ref={popupRef}
-          className="absolute z-[9999] w-[280px] bg-card border border-border rounded-xl shadow-lg p-3 font-sans animate-in fade-in zoom-in-95 duration-100 origin-top"
+          className="absolute z-[9999] w-[280px] max-w-[calc(100vw-2rem)] bg-card border border-border rounded-xl shadow-lg p-3 font-sans animate-in fade-in zoom-in-95 duration-100 origin-top"
           style={{ top: coords.top, left: coords.left }}
         >
           <div className="flex items-center justify-between mb-2">
@@ -960,23 +989,25 @@ function TimeSelect({
     : "";
 
   return (
-    <div className="relative w-28" aria-label={label}>
+    // w-full + min-w-0: the parent row/grid decides the width so the picks
+    // share space on mobile instead of overflowing with a fixed 7rem each.
+    <div className="relative w-full min-w-0" aria-label={label}>
       <button
         ref={buttonRef}
         type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between bg-secondary border border-border focus:ring-1 focus:ring-primary h-[34px] px-3 rounded-md text-sm transition-colors hover:bg-secondary/80"
+        className="w-full flex items-center justify-between gap-1 whitespace-nowrap bg-secondary border border-border focus:ring-1 focus:ring-primary h-[34px] px-2 sm:px-3 rounded-md text-[13px] sm:text-sm transition-colors hover:bg-secondary/80"
       >
         <span className={displayValue ? "text-foreground font-medium" : "text-muted-foreground"}>
           {displayValue || placeholder}
         </span>
-        <Clock className="w-3.5 h-3.5 text-muted-foreground opacity-70" />
+        <Clock className="w-3.5 h-3.5 shrink-0 text-muted-foreground opacity-70" />
       </button>
 
       {isOpen && isReady && typeof document !== "undefined" && createPortal(
         <div 
           ref={popupRef}
-          className="absolute z-[9999] w-64 bg-card border border-border rounded-xl shadow-lg p-4 font-sans animate-in fade-in zoom-in-95 duration-100 origin-top"
+          className="absolute z-[9999] w-64 max-w-[calc(100vw-2rem)] bg-card border border-border rounded-xl shadow-lg p-4 font-sans animate-in fade-in zoom-in-95 duration-100 origin-top"
           style={{ top: coords.top, left: coords.left }}
         >
           <div className="flex bg-secondary p-1 rounded-lg mb-4">
@@ -1121,7 +1152,7 @@ export default function AvailabilityPage() {
             key={t.id}
             ref={(el) => { tabsRef.current[index] = el; }}
             onClick={() => setTab(t.id)}
-            className={`relative z-10 flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-300 ${
+            className={`relative z-10 flex shrink-0 items-center gap-2 whitespace-nowrap px-3 sm:px-4 py-2 rounded-lg text-[13px] sm:text-sm font-medium transition-colors duration-300 ${
               tab === t.id
                 ? "text-foreground"
                 : "text-muted-foreground hover:text-foreground"

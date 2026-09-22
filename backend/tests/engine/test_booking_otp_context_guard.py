@@ -162,6 +162,7 @@ async def test_handle_booking_flow_requires_fresh_otp_for_new_booking_context(mo
 
     assert directive == "REQUIRE_OTP_MODAL"
     assert "verification code" in message.lower()
-    assert field_meta == {"resends_left": 3}
+    assert field_meta.get("resends_left") == 3
+    assert field_meta.get("channel") == "email"
     assert chat_session.otp_verified is False
     assert execute_booking.await_count == 0

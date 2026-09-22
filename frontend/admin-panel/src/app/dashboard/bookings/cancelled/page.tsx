@@ -50,10 +50,15 @@ export default function CancelledBookingsPage() {
 
   const { data, loading, error } = useCancelledBookings(page, 10, { search, fromDate, toDate });
 
+  const isHighlighted = (b: { id: string; booking_id?: string | null }) =>
+    highlightedId === b.id || (b.booking_id != null && highlightedId === b.booking_id);
+
   useEffect(() => {
     if (!highlightedId) return;
     const t = setTimeout(() => {
-      const el = document.querySelector(`[data-booking-id="${highlightedId}"]`);
+      const el =
+        document.querySelector(`[data-booking-id="${highlightedId}"]`) ??
+        document.querySelector(`[data-cancelled-booking-id="${highlightedId}"]`);
       if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
     }, 300);
     return () => clearTimeout(t);
@@ -81,7 +86,7 @@ export default function CancelledBookingsPage() {
 
       <div className="bg-card border border-border rounded-xl p-4 sm:p-6">
         <div className="flex flex-wrap items-center gap-3 mb-4">
-          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Search name or email…" className="w-full sm:w-72" />
+          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Search name, email or phone…" className="w-full sm:w-72" />
           <DateFilter
             label="Cancelled on"
             fromDate={fromDate}
@@ -118,8 +123,9 @@ export default function CancelledBookingsPage() {
                   <div
                     key={b.id}
                     data-booking-id={b.id}
+                    data-cancelled-booking-id={b.booking_id ?? undefined}
                     className={`flex items-start gap-3 p-4 border rounded-lg bg-background/50 transition-all ${
-                      highlightedId === b.id ? "border-primary bg-primary/10 ring-2 ring-primary/30 animate-pulse" : "border-border"
+                      isHighlighted(b) ? "border-primary bg-primary/10 ring-2 ring-primary/30 animate-pulse" : "border-border"
                     }`}
                   >
                     <div className="flex items-center justify-center size-8 rounded-full bg-red-500/10 text-red-500 text-xs font-semibold shrink-0">
@@ -147,19 +153,21 @@ export default function CancelledBookingsPage() {
               {/* Desktop table view */}
               <table className="hidden md:table w-full border-collapse">
                 <thead>
-                  <tr>
-                    <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Client</th>
-                    <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Email</th>
-                    <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Booked For</th>
-                    <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Cancelled At</th>
-                  </tr>
+                      <tr>
+                        <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Client</th>
+                        <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Email</th>
+                        <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Phone</th>
+                        <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Booked For</th>
+                        <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Cancelled At</th>
+                      </tr>
                 </thead>
                 <tbody>
                   {data.items.map((b) => (
                     <tr
                       key={b.id}
                       data-booking-id={b.id}
-                      className={`hover:bg-secondary/50 transition-colors ${highlightedId === b.id ? "bg-primary/10 ring-2 ring-inset ring-primary/30 animate-pulse" : ""}`}
+                      data-cancelled-booking-id={b.booking_id ?? undefined}
+                      className={`hover:bg-secondary/50 transition-colors ${isHighlighted(b) ? "bg-primary/10 ring-2 ring-inset ring-primary/30 animate-pulse" : ""}`}
                     >
                       <td className="px-4 py-4 text-[13px] border-b border-border">
                         <div className="flex items-center gap-3">
@@ -168,13 +176,11 @@ export default function CancelledBookingsPage() {
                           </div>
                           <div>
                             <div className="font-medium">{b.customer_name}</div>
-                            {b.customer_phone && (
-                              <div className="text-[11px] text-muted-foreground">{b.customer_phone}</div>
-                            )}
                           </div>
                         </div>
                       </td>
-                      <td className="px-4 py-4 text-[13px] border-b border-border">{b.customer_email}</td>
+                      <td className="px-4 py-4 text-[13px] border-b border-border">{b.customer_email || "—"}</td>
+                      <td className="px-4 py-4 text-[13px] border-b border-border">{b.customer_phone ?? "—"}</td>
                       <td className="px-4 py-4 text-[13px] border-b border-border">
                         {b.booking_date ?? "—"}
                         {b.booking_time ? ` at ${b.booking_time}` : ""}

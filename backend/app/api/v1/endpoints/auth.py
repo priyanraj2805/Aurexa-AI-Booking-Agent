@@ -211,7 +211,7 @@ async def register(
             user_agent=request.headers.get("user-agent"),
         )
 
-        token = create_access_token(data={"sub": user.email, "org_id": str(user.org_id)})
+        token = create_access_token(data={"sub": user.email, "org_id": str(user.org_id), "kind": "TENANT"})
 
         body = TokenResponse(
             access_token=token,
@@ -278,7 +278,7 @@ async def login(
         result = await db.execute(select(Organization).where(Organization.id == user.org_id))
         org = result.scalars().first()
 
-        token = create_access_token(data={"sub": user.email, "org_id": str(user.org_id)})
+        token = create_access_token(data={"sub": user.email, "org_id": str(user.org_id), "kind": "TENANT"})
         log_audit_event(
             background_tasks,
             org_id=user.org_id,
@@ -396,9 +396,12 @@ async def get_me(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return the currently authenticated user."""
-    result = await db.execute(select(Organization).where(Organization.id == user.org_id))
-    org = result.scalars().first()
+    """Return the currently authenticated user + RBAC roles/permissions."""
+    # Local import: core.rbac depends on this module (get_current_user).
+    from app.core.rbac import get_current_principal
+
+    principal = await get_current_principal(db, user)
+    org = principal.org
 
     return UserResponse(
         id=user.id,
@@ -409,6 +412,8 @@ async def get_me(
         avatar_url=getattr(user, "avatar_url", None),
         is_active=user.is_active,
         created_at=user.created_at,
+        roles=principal.role_codes,
+        permissions=principal.permissions,
     )
 
 
@@ -435,6 +440,144 @@ async def logout(
     response = JSONResponse(content={"detail": "Logged out"})
     response.delete_cookie(key="ds_token", path="/")
     return response
+
+
+# ── URL-handoff login codes (OAuth code-style, single-use, 60s) ────────────
+
+CODE_TTL_SECONDS = 60
+
+
+@router.post("/login/code")
+@limiter.limit("10/minute")
+async def login_code(
+    request: Request,
+    data: UserLogin,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Validate credentials and issue a single-use code for URL handoff.
+
+    Returns {code, kind} WITHOUT setting a cookie. The client navigates to
+    /auth/callback?code=… which exchanges it for the session cookie.
+    Same credential checks as /login.
+    """
+    import hashlib as _hashlib
+    import secrets as _secrets
+    from datetime import datetime, timedelta, timezone as _tz
+
+    from app.models.login_code import LoginCode
+
+    email = data.email.lower().strip()
+    user = await get_user_by_email(db, email)
+    if not user or not verify_password(data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Your account is disabled.")
+
+    result = await db.execute(select(Organization).where(Organization.id == user.org_id))
+    org = result.scalars().first()
+
+    raw_code = _secrets.token_hex(24)
+    db.add(
+        LoginCode(
+            code_hash=_hashlib.sha256(raw_code.encode()).hexdigest(),
+            user_id=user.id,
+            org_id=user.org_id,
+            kind="TENANT",
+            expires_at=datetime.now(_tz.utc) + timedelta(seconds=CODE_TTL_SECONDS),
+        )
+    )
+    # Opportunistic purge of stale codes.
+    try:
+        old = (
+            await db.execute(
+                select(LoginCode).where(
+                    LoginCode.expires_at < datetime.now(_tz.utc)
+                )
+            )
+        ).scalars().all()
+        for row in old:
+            await db.delete(row)
+    except Exception:
+        pass
+    await db.commit()
+    return {"code": raw_code, "kind": "TENANT", "expires_in": CODE_TTL_SECONDS}
+
+
+@router.post("/code/exchange", response_model=TokenResponse)
+@limiter.limit("10/minute")
+async def exchange_code(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Swap a single-use login code for the session cookie + user."""
+    import hashlib as _hashlib2
+    from datetime import datetime as _dt2
+    from datetime import timezone as _tz2
+
+    from app.models.login_code import LoginCode as _LoginCode2
+
+    try:
+        payload = await request.json()
+        raw_code = (payload.get("code") or "").strip()
+    except Exception:
+        raw_code = ""
+    if not raw_code:
+        raise HTTPException(status_code=401, detail="Invalid or expired code.")
+
+    code_hash = _hashlib2.sha256(raw_code.encode()).hexdigest()
+    row = (
+        await db.execute(
+            select(_LoginCode2).where(_LoginCode2.code_hash == code_hash)
+        )
+    ).scalars().first()
+    now = _dt2.now(_tz2.utc)
+    if row is None or row.used_at is not None or row.expires_at < now:
+        raise HTTPException(status_code=401, detail="Invalid or expired code.")
+    if (row.kind or "TENANT") != "TENANT":
+        raise HTTPException(status_code=401, detail="Invalid or expired code.")
+
+    result = await db.execute(select(User).where(User.id == row.user_id))
+    user = result.scalars().first()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="Invalid or expired code.")
+
+    result = await db.execute(select(Organization).where(Organization.id == user.org_id))
+    org = result.scalars().first()
+
+    row.used_at = now
+    await db.commit()
+
+    token = create_access_token(data={"sub": user.email, "org_id": str(user.org_id), "kind": "TENANT"})
+    log_audit_event(
+        background_tasks,
+        org_id=user.org_id,
+        actor_id=user.id,
+        actor_email=user.email,
+        action=AuditAction.AUTH_LOGIN,
+        resource_type="user",
+        resource_id=str(user.id),
+        old_values=None,
+        new_values={"event": "login_success_via_code"},
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    body = TokenResponse(
+        access_token=token,
+        user=UserResponse(
+            id=user.id,
+            email=user.email,
+            full_name=user.full_name,
+            org_id=user.org_id,
+            org_name=org.name if org else None,
+            avatar_url=getattr(user, "avatar_url", None),
+            is_active=user.is_active,
+            created_at=user.created_at,
+        ),
+    )
+    response = JSONResponse(content=body.model_dump(mode="json"))
+    return _set_auth_cookie(response, token)
 
 
 # ── Phase 11b: impersonation hand-off (admin console) ──────────────────

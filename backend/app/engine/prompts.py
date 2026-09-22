@@ -204,6 +204,15 @@ Output:"""
                 "hours, policies, and FAQs. If the answer isn't here, say so honestly.\n\n"
                 + "\n\n".join(chunk_lines)
             )
+        else:
+            rag_block = (
+                "### COMPANY KNOWLEDGE CONTEXT: (none retrieved for this question)\n"
+                "No company materials match the user's question. If they asked about "
+                "the business, services, pricing, policies or documents, reply honestly "
+                "that you don't have this information — for example: \"Sorry, I don't "
+                "have information about this.\" Do NOT guess and do NOT answer from "
+                "general knowledge. You may offer to help with booking instead."
+            )
 
         prompt = f"""You are the Unified Intelligence Core for a generalized AI Booking Assistant.
 {persona_block}

@@ -114,6 +114,20 @@ class Booking(Base):
     rescheduled_from_id = Column(UUID(as_uuid=True), ForeignKey("bookings.id", ondelete="SET NULL"), nullable=True)
     cancellation_reason = Column(String(500), nullable=True)
 
+    # ── Service catalog linkage (Phase: units/providers; engine wires later)
+    unit_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("service_units.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    provider_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("providers.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     __table_args__ = (
         Index("ix_booking_org_created", "org_id", "created_at"),
         Index("ix_booking_attendance", "org_id", "attendance_status"),

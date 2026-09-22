@@ -45,6 +45,54 @@ def _wait_for_rate_limit(message: str) -> int:
     return (int(match.group(1)) + 1) if match else 60
 
 
+def _serialize_crawl_pages(data: Any) -> list:
+    """Normalize V1 crawl page payloads to plain dicts.
+
+    Accepts pydantic document objects or raw dicts and returns
+    ``[{url, markdown, html, metadata{title}}]`` — the shape both ingest
+    paths (webhook + status poll) already consume.
+    """
+    if not data:
+        return []
+    items = list(data) if isinstance(data, (list, tuple)) else [data]
+    out = []
+    for item in items:
+        if isinstance(item, dict):
+            meta = item.get("metadata") or {}
+            if not isinstance(meta, dict):
+                meta = {}
+            out.append(
+                {
+                    "url": item.get("url") or item.get("sourceURL") or "",
+                    "markdown": item.get("markdown") or "",
+                    "html": item.get("html") or "",
+                    "metadata": {
+                        "title": meta.get("title") or meta.get("ogTitle") or "",
+                    },
+                }
+            )
+            continue
+        meta = getattr(item, "metadata", None) or {}
+        if not isinstance(meta, dict):
+            try:
+                meta = dict(meta)
+            except Exception:
+                meta = {}
+        out.append(
+            {
+                "url": getattr(item, "url", None)
+                or getattr(item, "sourceURL", None)
+                or "",
+                "markdown": getattr(item, "markdown", None) or "",
+                "html": getattr(item, "html", None) or "",
+                "metadata": {
+                    "title": meta.get("title") or meta.get("ogTitle") or "",
+                },
+            }
+        )
+    return out
+
+
 class FirecrawlService:
     def __init__(self, api_key: str):
         if not api_key:
@@ -110,6 +158,9 @@ class FirecrawlService:
                 "completed": getattr(status, "completed", None),
                 "success": getattr(status, "success", None),
                 "next": getattr(status, "next", None),
+                # Page payloads: the poll ingest path stores these. Dropping
+                # them here previously made completed crawls save 0 pages.
+                "data": _serialize_crawl_pages(getattr(status, "data", None)),
             }
             _cache_put(crawl_id, result)
             return result

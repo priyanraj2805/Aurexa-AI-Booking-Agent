@@ -1,6 +1,6 @@
 from pydantic import BaseModel, EmailStr, UUID4, ConfigDict, Field
 from datetime import datetime
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 
 # ── Request Schemas ───────────────────────────────
@@ -48,6 +48,9 @@ class UserResponse(BaseModel):
     avatar_url: Optional[str] = None
     is_active: bool
     created_at: datetime
+    # RBAC: role codes + effective permissions (authoritative per request).
+    roles: List[str] = []
+    permissions: List[str] = []
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -3,9 +3,9 @@ credentials-file: /etc/cloudflared/credentials.json
 
 ingress:
   - hostname: dotstark.tech
-    service: http://admin-panel:3002
+    service: http://gateway:80
   - hostname: www.dotstark.tech
-    service: http://admin-panel:3002
+    service: http://gateway:80
   - hostname: api.dotstark.tech
     service: http://backend:8005
   - hostname: super.dotstark.tech

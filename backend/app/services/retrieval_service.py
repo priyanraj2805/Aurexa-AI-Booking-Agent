@@ -229,6 +229,10 @@ async def store_document_chunks(
     for i, chunk in enumerate(chunks):
         metadata = chunk.get("metadata", {}) or {}
         content_escaped = chunk["content"]
+        # Prefer the per-chunk page URL (website crawls) over the call-level
+        # default — otherwise every crawled page is stored with NULL
+        # source_url and pages can never be counted or deduplicated.
+        effective_url = chunk.get("source_url") or source_url
         await db.execute(
             text(
                 """
@@ -250,7 +254,7 @@ async def store_document_chunks(
                 "content": chunk["content"],
                 "page_number": chunk.get("page_number"),
                 "source_type": source_type,
-                "source_url": source_url,
+                "source_url": effective_url,
                 "metadata": json.dumps(metadata),
             },
         )
@@ -279,7 +283,12 @@ async def delete_document_chunks(db: AsyncSession, org_id: str, doc_id: str) -> 
 
 
 async def delete_website_chunks(db: AsyncSession, org_id: str) -> int:
-    """Delete all website-crawl chunks for an org. Returns row count."""
+    """Delete all website-crawl chunks for an org. Returns row count.
+
+    This is the ONLY code path that removes website chunks (called solely
+    from DELETE /website). Nothing auto-deletes crawl data: no background
+    job, TTL, or status transition touches document_chunks.
+    """
     result = await db.execute(
         text(
             "DELETE FROM document_chunks WHERE org_id = :org_id AND source_type = 'website'"
@@ -287,6 +296,75 @@ async def delete_website_chunks(db: AsyncSession, org_id: str) -> int:
         {"org_id": org_id},
     )
     return result.rowcount or 0
+
+
+def website_crawl_doc_id(crawl_id: str) -> str:
+    """Stable UUID doc_id for one crawl (idempotent re-ingests share it).
+
+    ``doc_id`` is UUID-typed, so derive UUID5 from the crawl id instead of
+    string prefixes.
+    """
+    import uuid as _uuid
+
+    return str(_uuid.uuid5(_uuid.NAMESPACE_URL, f"website-crawl:{crawl_id}"))
+
+
+def website_page_key(url: Optional[str] = None, title: Optional[str] = None) -> str:
+    """Stable identity for one crawled page (dedupe + counts).
+
+    Prefers the normalized page URL; falls back to the page title for
+    legacy rows stored before per-chunk URLs were persisted.
+    """
+    u = str(url or "").strip().lower().rstrip("/")
+    if u:
+        return f"url:{u}"
+    t = str(title or "").strip().lower()
+    if t:
+        return f"title:{t}"
+    return ""
+
+
+async def website_pages_stored(
+    db: AsyncSession, org_id: str, crawl_id: Optional[str] = None
+) -> set:
+    """Return the set of already-stored page keys for an org (optionally one crawl)."""
+    stmt = (
+        "SELECT source_url, metadata->>'title' AS title FROM document_chunks "
+        "WHERE org_id = :org_id AND source_type = 'website'"
+    )
+    params: dict = {"org_id": str(org_id)}
+    if crawl_id:
+        stmt += " AND metadata->>'crawl_id' = :crawl_id"
+        params["crawl_id"] = str(crawl_id)
+    result = await db.execute(text(stmt), params)
+    keys = set()
+    for row in result.mappings().all():
+        key = website_page_key(row["source_url"], row["title"])
+        if key:
+            keys.add(key)
+    return keys
+
+
+async def website_crawl_stats(
+    db: AsyncSession, org_id: str, crawl_id: Optional[str] = None
+) -> dict:
+    """DB-truth counts for crawled website data: distinct pages + chunks.
+
+    Used for honest admin-UI counts and for ``total_pages_crawled`` so the
+    UI never shows 0/failed-looks-deleted while data is safely stored.
+    """
+    stored = await website_pages_stored(db, org_id, crawl_id)
+    stmt = (
+        "SELECT COUNT(*) AS n FROM document_chunks "
+        "WHERE org_id = :org_id AND source_type = 'website'"
+    )
+    params: dict = {"org_id": str(org_id)}
+    if crawl_id:
+        stmt += " AND metadata->>'crawl_id' = :crawl_id"
+        params["crawl_id"] = str(crawl_id)
+    result = await db.execute(text(stmt), params)
+    row = result.mappings().first()
+    return {"stored_pages": len(stored), "stored_chunks": int(row["n"] or 0)}
 
 
 # ─── Knowledge-context storage (org_configs.knowledge_context) ─────────────

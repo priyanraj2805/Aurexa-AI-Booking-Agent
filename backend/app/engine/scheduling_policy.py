@@ -17,6 +17,92 @@ from app.models.booking import (
     ScheduleDay,
     ScheduleException,
 )
+import logging as _logging
+
+_logger = _logging.getLogger(__name__)
+
+#: Absolute bounds for any booking horizon. The ceiling is leap-aware: a
+#: year has 365 days, 366 in a leap year — so 366 is allowed only when the
+#: upcoming booking window can actually contain a Feb 29 (see below).
+MIN_HORIZON_DAYS = 1
+ABS_MAX_HORIZON_DAYS = 366
+
+
+def _is_leap_year(year: int) -> bool:
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+
+def max_horizon_days(today: Optional[date] = None) -> int:
+    """Leap-aware horizon ceiling for a window starting `today`.
+
+    Returns 366 only when a Feb 29 falls inside the next 366 days (i.e. a
+    leap year's February is reachable); otherwise 365. E.g. during 2026
+    (non-leap, next leap 2028 out of reach until Dec 2027) the cap is 365.
+    """
+    today = today or date.today()
+    horizon_end = today + timedelta(days=ABS_MAX_HORIZON_DAYS)
+    year = today.year
+    while year <= horizon_end.year:
+        if _is_leap_year(year):
+            feb29 = date(year, 2, 29)
+            if today <= feb29 <= horizon_end:
+                return ABS_MAX_HORIZON_DAYS
+        year += 1
+    return 365
+
+
+def clamp_horizon_days(raw: Any, today: Optional[date] = None) -> int:
+    """Clamp any horizon input into [1, leap-aware max]; unparseable -> 60."""
+    try:
+        value = int(raw)  # type: ignore[arg-type]
+    except (ValueError, TypeError):
+        return 60
+    return max(MIN_HORIZON_DAYS, min(max_horizon_days(today), value))
+
+
+async def resolve_booking_horizon_days(
+    db: Any, org_id: Any, org_config: Any = None
+) -> tuple[int, str, bool]:
+    """Single source of truth for the booking horizon (in days).
+
+    Precedence (availability wins — prompts must never promise dates with
+    no slots): BusinessSchedule.booking_window_days, then
+    OrgConfig.max_booking_days_ahead, then 60. Everything is clamped to
+    [1, 366]. Returns (days, source, diverged) where diverged=True means
+    the two stored values disagreed (dashboard sync should prevent this).
+    """
+    sched_window: Any = None
+    cfg_window: Any = getattr(org_config, "max_booking_days_ahead", None)
+    try:
+        _sched = (
+            await db.execute(
+                select(BusinessSchedule).where(BusinessSchedule.org_id == org_id)
+            )
+        ).scalars().first()
+        if _sched is not None:
+            sched_window = getattr(_sched, "booking_window_days", None)
+    except Exception:
+        _logger.warning("horizon schedule lookup failed", exc_info=True)
+    valid_sched = (
+        isinstance(sched_window, int) and not isinstance(sched_window, bool) and sched_window > 0
+    )
+    valid_cfg = (
+        isinstance(cfg_window, int) and not isinstance(cfg_window, bool) and cfg_window > 0
+    )
+    diverged = bool(valid_sched and valid_cfg and sched_window != cfg_window)
+    if diverged:
+        _logger.warning(
+            "booking horizon divergence: schedule=%s config=%s; using schedule",
+            sched_window,
+            cfg_window,
+        )
+    if valid_sched:
+        return clamp_horizon_days(sched_window), "schedule", diverged
+    if valid_cfg:
+        _logger.warning("booking horizon falling back to org_config value")
+        return clamp_horizon_days(cfg_window), "org_config", diverged
+    _logger.warning("booking horizon missing everywhere; using default 60")
+    return 60, "default", diverged
 
 
 def _normalize_timezone(tz_name: Optional[str], fallback: str = "UTC") -> str:
@@ -605,3 +691,194 @@ async def lookup_schedule_business_hours_answer(
         reference_utc=reference_utc,
         target_date=target_date,
     )
+
+
+# ── Available-dates inquiries ("which dates can I book?") ─────────────────
+# Sibling of the hours-question path above: detects questions about *which
+# dates* have availability (not business hours), then answers from the live
+# slot inventory — never from static labels. Without this, such questions
+# fall through to field collection and the user is interrogated instead
+# of answered (e.g. asked for their phone number twice).
+
+AVAILABLE_DATES_QUERY_PATTERNS = (
+    "available date",
+    "available dates",
+    "availability of dates",
+    "date availability",
+    "which date",
+    "which dates",
+    "what dates",
+    "what date",
+    "when can i book",
+    "when do you have",
+    "slots available",
+    "slot available",
+    "any slots",
+    "any slot",
+    "open dates",
+    "free dates",
+    "days available",
+)
+
+# Concrete date references: if the message names an actual date, it is a
+# booking statement/value — not an availability inquiry. Handled by the
+# normal date path (typed entry + validation).
+_DATE_VALUE_PATTERNS = (
+    r"\b\d{4}-\d{2}-\d{2}\b",  # ISO
+    r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",  # dd/mm/yyyy
+    r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\b",
+    r"\b(jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b",
+    r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    r"\b(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\b",
+    r"\btoday\b",
+    r"\btomorrow\b",
+)
+
+_INQUIRY_LEAD_PATTERNS = (
+    "tell me",
+    "show me",
+    "let me know",
+    "give me",
+    "please",
+)
+
+
+def _contains_concrete_date_value(text_lower: str) -> bool:
+    import re as _re
+
+    return any(_re.search(pat, text_lower) for pat in _DATE_VALUE_PATTERNS)
+
+
+def is_available_dates_query(user_message: str) -> bool:
+    """True when the user asks *which dates* are bookable.
+
+    Requires an availability pattern plus question phrasing, and excludes
+    messages naming a concrete date (those are booking values, handled by
+    typed-date entry + validation — never swallowed here).
+    """
+    text = str(user_message or "").strip().lower()
+    if not text:
+        return False
+    if _contains_concrete_date_value(text):
+        return False
+    if not any(pat in text for pat in AVAILABLE_DATES_QUERY_PATTERNS):
+        return False
+    if "?" in text:
+        return True
+    if any(text.startswith(prefix + " ") for prefix in _QUESTION_PREFIXES):
+        return True
+    return any(lead in text for lead in _INQUIRY_LEAD_PATTERNS)
+
+
+async def lookup_available_dates_answer(
+    *,
+    db: Any,
+    org_id: str,
+    user_message: str,
+    effective_timezone: str,
+    org_timezone: Optional[str] = None,
+    max_dates: int = 7,
+    scan_cap_days: int = 21,
+) -> Optional[dict[str, Any]]:
+    """Answer 'which dates can I book?' from the live slot inventory.
+
+    Returns None when the message is not an availability inquiry. Otherwise
+    scans upcoming days (horizon from the single-source resolver) and keeps
+    only days with at least one genuinely free slot — closed days, CLOSED
+    exceptions, past-cutoff and fully-booked days are all excluded. External
+    calendar busy-periods are intentionally not consulted here (bounded,
+    DB-local scan); the time-step path still enforces them per date.
+    """
+    if not is_available_dates_query(user_message):
+        return None
+    if db is None or not hasattr(db, "execute"):
+        return None
+
+    from app.engine.slot_engine import compute_slot_inventory
+
+    try:
+        org_uuid = uuid.UUID(str(org_id))
+    except Exception:
+        return None
+
+    biz_tz = _normalize_timezone(org_timezone or effective_timezone)
+    try:
+        horizon_days, _, _ = await resolve_booking_horizon_days(db, org_uuid, None)
+    except Exception:
+        horizon_days = 60
+
+    try:
+        zone = ZoneInfo(biz_tz)
+    except Exception:
+        zone = ZoneInfo("UTC")
+    now_utc = datetime.now(timezone.utc)
+    today = now_utc.astimezone(zone).date()
+
+    from app.engine.slot_engine import apply_scheduling_policy_to_inventory
+
+    try:
+        sched_row = (
+            await db.execute(
+                select(BusinessSchedule).where(BusinessSchedule.org_id == org_uuid)
+            )
+        ).scalars().first()
+    except Exception:
+        return None
+    if not sched_row:
+        return {
+            "response_text": "I don't have booking availability configured yet.",
+            "status": "policy_missing",
+            "source": "availability",
+            "available_dates": [],
+            "effective_timezone": biz_tz,
+        }
+    allow_same_day = bool(getattr(sched_row, "allow_same_day_booking", False))
+    cutoff_minutes = getattr(sched_row, "slot_cutoff_minutes", 5)
+
+    found: list[date] = []
+    scan_days = max(1, min(int(horizon_days or 60), int(scan_cap_days)))
+    for offset in range(scan_days):
+        day = today + timedelta(days=offset)
+        try:
+            inventory, _status = await compute_slot_inventory(
+                db, org_uuid, day, org_config=None
+            )
+            inventory, _status, _reason = apply_scheduling_policy_to_inventory(
+                inventory,
+                day,
+                base_status=_status,
+                effective_timezone=biz_tz,
+                allow_same_day_booking=allow_same_day,
+                slot_cutoff_minutes=cutoff_minutes,
+                now_utc=now_utc,
+            )
+        except Exception:
+            continue
+        if any(item.get("available") for item in (inventory or [])):
+            found.append(day)
+        if len(found) >= max_dates:
+            break
+
+    if not found:
+        return {
+            "response_text": (
+                f"No open dates in the next {scan_days} days — "
+                "please try a later date or contact us directly."
+            ),
+            "status": "none_found",
+            "source": "availability",
+            "available_dates": [],
+            "effective_timezone": biz_tz,
+        }
+    labels = [d.strftime("%a, %b %d") for d in found]
+    return {
+        "response_text": (
+            "Here are our next available dates: "
+            + " · ".join(labels)
+            + f". (All dates in {biz_tz}.)"
+        ),
+        "status": "ok",
+        "source": "availability",
+        "available_dates": [d.isoformat() for d in found],
+        "effective_timezone": biz_tz,
+    }

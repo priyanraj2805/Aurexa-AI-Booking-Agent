@@ -84,15 +84,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [router]);
 
   const login = async (email: string, password: string) => {
-    const data = await apiFetch<TokenResponse>("/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ email, password }),
-      skipAuth: true,
-    });
-
-    // HttpOnly cookie is set by the backend response.
-    setUser(data.user);
-    router.push("/dashboard");
+    // URL-handoff code flow: credentials → single-use code (visible in URL)
+    // → callback exchanges it for the HttpOnly cookie. Old direct login
+    // still works server-side; this client prefers the code flow.
+    try {
+      const data = await apiFetch<{ code: string }>("/auth/login/code", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+        skipAuth: true,
+      });
+      // Full navigation so the code visibly lands in the URL bar.
+      window.location.href = `/auth/callback?code=${encodeURIComponent(data.code)}`;
+    } catch (err) {
+      throw err;
+    }
   };
 
   const sendOtp = async (email: string) => {

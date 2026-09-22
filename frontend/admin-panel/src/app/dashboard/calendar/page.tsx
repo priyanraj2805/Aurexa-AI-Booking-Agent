@@ -76,8 +76,8 @@ function DayEventsDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
       <div className="absolute inset-0 bg-background/80 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-full max-w-lg bg-card border border-border rounded-3xl shadow-2xl p-6 sm:p-8 animate-in zoom-in-95 duration-300">
-        <div className="flex items-center justify-between mb-8">
+      <div className="relative w-full max-w-lg bg-card border border-border rounded-3xl shadow-2xl p-5 sm:p-8 animate-in zoom-in-95 duration-300">
+        <div className="flex items-center justify-between mb-6 sm:mb-8">
           <div>
             <h2 className="text-xl sm:text-2xl font-bold tracking-tight">{dateStr}</h2>
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-widest mt-1">
@@ -121,10 +121,10 @@ function DayEventsDialog({
           )}
         </div>
         
-        <div className="mt-8 pt-6 border-t border-border/50 flex justify-center">
-            <button 
+        <div className="mt-6 sm:mt-8 pt-5 sm:pt-6 border-t border-border/50 flex justify-center">
+            <button
               onClick={onClose}
-              className="px-10 py-3 rounded-xl bg-secondary hover:bg-muted text-sm font-bold tracking-tight transition-all"
+              className="w-full sm:w-auto px-10 py-3 rounded-xl bg-secondary hover:bg-muted text-sm font-bold tracking-tight transition-all"
             >
               Done
             </button>
@@ -257,21 +257,21 @@ export default function CalendarPage() {
         <button
           ref={(el) => { tabsRef.current[0] = el; }}
           onClick={() => setActiveTab("grid")}
-          className={`relative z-10 flex items-center gap-2 px-6 py-2 rounded-lg text-sm font-semibold transition-colors duration-300 ${
+          className={`relative z-10 flex shrink-0 items-center gap-2 whitespace-nowrap px-4 sm:px-6 py-2 rounded-lg text-[13px] sm:text-sm font-semibold transition-colors duration-300 ${
             activeTab === "grid" ? "text-foreground" : "text-muted-foreground hover:text-foreground"
           }`}
         >
-          <LayoutGrid className="size-4" />
+          <LayoutGrid className="size-4 shrink-0" />
           Monthly Grid
         </button>
         <button
           ref={(el) => { tabsRef.current[1] = el; }}
           onClick={() => setActiveTab("agenda")}
-          className={`relative z-10 flex items-center gap-2 px-6 py-2 rounded-lg text-sm font-semibold transition-colors duration-300 ${
+          className={`relative z-10 flex shrink-0 items-center gap-2 whitespace-nowrap px-4 sm:px-6 py-2 rounded-lg text-[13px] sm:text-sm font-semibold transition-colors duration-300 ${
             activeTab === "agenda" ? "text-foreground" : "text-muted-foreground hover:text-foreground"
           }`}
         >
-          <Clock className="size-4" />
+          <Clock className="size-4 shrink-0" />
           Upcoming Agenda
         </button>
       </div>
@@ -282,27 +282,27 @@ export default function CalendarPage() {
           <div className="space-y-6">
             {/* Grid-specific navigation & controls (now inside the tab view) */}
             <div className="flex flex-wrap items-center justify-between gap-3 sm:gap-4 py-2 border-b border-border/50">
-              <div className="flex items-center gap-1 sm:gap-2 p-1 bg-muted/40 rounded-xl border border-border/50">
+              <div className="flex items-center gap-1 sm:gap-2 p-1 bg-muted/40 rounded-xl border border-border/50 min-w-0">
                 <button
                   onClick={() => setCurrentDate(new Date())}
-                  className="h-8 px-4 rounded-lg hover:bg-card hover:shadow-sm text-[10px] font-bold tracking-widest uppercase transition-all"
+                  className="h-8 px-3 sm:px-4 rounded-lg hover:bg-card hover:shadow-sm text-[10px] font-bold tracking-widest uppercase transition-all shrink-0"
                 >
                   Today
                 </button>
-                <div className="w-px h-3 bg-border/50" />
-                <div className="flex items-center gap-0.5">
+                <div className="w-px h-3 bg-border/50 shrink-0" />
+                <div className="flex items-center gap-0.5 min-w-0">
                   <button
                     onClick={() => setCurrentDate(new Date(year, month - 1, 1))}
                     title="Previous month"
-                    className="p-1.5 rounded-lg hover:bg-card text-muted-foreground hover:text-foreground transition-all"
+                    className="p-1.5 rounded-lg hover:bg-card text-muted-foreground hover:text-foreground transition-all shrink-0"
                   >
                     <ChevronLeft className="size-4" />
                   </button>
-                  <div className="px-2 text-sm font-semibold min-w-[120px] text-center">{monthName}</div>
+                  <div className="px-1 sm:px-2 text-[13px] sm:text-sm font-semibold min-w-[92px] sm:min-w-[120px] text-center truncate">{monthName}</div>
                   <button
                     onClick={() => setCurrentDate(new Date(year, month + 1, 1))}
                     title="Next month"
-                    className="p-1.5 rounded-lg hover:bg-card text-muted-foreground hover:text-foreground transition-all"
+                    className="p-1.5 rounded-lg hover:bg-card text-muted-foreground hover:text-foreground transition-all shrink-0"
                   >
                     <ChevronRight className="size-4" />
                   </button>
@@ -364,13 +364,28 @@ export default function CalendarPage() {
                           {day}
                         </div>
 
-                        <div className="mt-2 sm:mt-3 space-y-1">
+                        {/* Mobile: compact dot indicators (chips would be illegible in ~48px cells) */}
+                        <div className="mt-1.5 flex items-center justify-center gap-1 sm:hidden">
                           {dayEvents.slice(0, 3).map((ev) => (
-                            <div 
-                              key={ev.id} 
-                              className={`text-[8px] sm:text-[9px] font-semibold px-1.5 sm:px-2 py-1 rounded-md truncate border transition-all ${
-                                isPast 
-                                  ? "bg-muted/40 text-muted-foreground/60 border-muted-foreground/20 border-dashed" 
+                            <span
+                              key={ev.id}
+                              className={`size-1.5 rounded-full ${isPast ? "bg-muted-foreground/40" : "bg-primary"}`}
+                            />
+                          ))}
+                          {dayEvents.length > 3 && (
+                            <span className="text-[8px] font-bold text-muted-foreground">
+                              +{dayEvents.length - 3}
+                            </span>
+                          )}
+                        </div>
+                        {/* Desktop: event chips */}
+                        <div className="mt-3 hidden space-y-1 sm:block">
+                          {dayEvents.slice(0, 3).map((ev) => (
+                            <div
+                              key={ev.id}
+                              className={`text-[9px] font-semibold px-2 py-1 rounded-md truncate border transition-all ${
+                                isPast
+                                  ? "bg-muted/40 text-muted-foreground/60 border-muted-foreground/20 border-dashed"
                                   : "bg-primary/10 text-primary border-primary/10 group-hover:border-primary/30"
                               }`}
                             >
@@ -378,7 +393,7 @@ export default function CalendarPage() {
                             </div>
                           ))}
                           {dayEvents.length > 3 && (
-                            <div className="text-[8px] sm:text-[9px] font-bold text-muted-foreground/50 px-1.5 sm:px-2 tracking-tighter">
+                            <div className="text-[9px] font-bold text-muted-foreground/50 px-2 tracking-tighter">
                               +{dayEvents.length - 3} OTHERS
                             </div>
                           )}

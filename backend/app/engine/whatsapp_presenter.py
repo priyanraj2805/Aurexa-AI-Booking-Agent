@@ -83,6 +83,107 @@ class WhatsAppPresenter:
         except Exception:
             return None
 
+    # ── Objection (mid-booking concerns) ──────────────────────────
+
+    async def present_objection(
+        self, brief: Dict[str, Any]
+    ) -> StructuredWhatsAppResponse:
+        """Acknowledge a booking objection in the admin-chosen tone.
+
+        The LLM controls WORDING only. Every fact must come from `brief`
+        (business name, field label/description, required list, pending
+        step). Deterministic fallback below uses the same live slots, so
+        the reply is correct even with no LLM.
+        """
+        category = str(brief.get("category") or "")
+        biz = str(brief.get("business_name") or "").strip()
+        tone = str(brief.get("tone") or _FALLBACK_TONE)
+        label = str(brief.get("field_label") or brief.get("field") or "details").strip()
+        desc = str(brief.get("field_description") or "").strip()
+        required = list(brief.get("required_labels") or [])
+        step_title = str(brief.get("step_title") or "").strip()
+        step_prompt = str(brief.get("step_prompt") or "").strip()
+
+        why_sentence = f"We ask for your {label}."
+        if desc:
+            why_sentence = f"We ask for your {label} — {desc.rstrip('.')}."
+        elif required:
+            need_list = ", ".join(required[:6])
+            why_sentence = (
+                f"To confirm your booking we need {need_list} — "
+                f"your {label} is one of them."
+            )
+
+        if category == "no_booking":
+            fallback = (
+                "No problem at all — just say hi whenever you'd like to book"
+                f"{f' at {biz}' if biz else ''} and I'll pick up right where we left off."
+            )
+        elif category == "privacy":
+            fallback = (
+                f"Totally understand — your {label} stays with"
+                f"{f' {biz}'} and is only used to confirm and manage your booking. "
+                f"{step_title + ' ' if step_title else ''}Whenever you're ready, {step_prompt or 'just reply to continue.'}"
+            )
+        elif category == "refuse" and not brief.get("field_required", True):
+            fallback = (
+                f"No problem skipping that — {why_sentence} "
+                f"{step_title + ' ' if step_title else ''}Whenever you're ready, {step_prompt or 'just reply to continue.'}"
+            )
+        else:
+            # why_needed, refuse-required, or anything else: acknowledge,
+            # explain from live slots, re-anchor to the pending step.
+            at_biz = f" at {biz}" if biz else ""
+            clean_desc = desc.rstrip(".") if desc else ""
+            fallback = (
+                f"Good question — we ask for your {label}{at_biz}"
+                f"{f' — {clean_desc}' if clean_desc else ''}. "
+                f"{step_title + ' ' if step_title else ''}Whenever you're ready, {step_prompt or 'just reply to continue.'}"
+            )
+
+        system = (
+            "You are Aurexa, WhatsApp booking assistant handling a customer "
+            "concern mid-booking.\n"
+            "Rules:\n"
+            "- Acknowledge the concern warmly, then answer it. Never ignore it.\n"
+            "- Use ONLY these facts (business, field, requirement, pending step). "
+            "Do NOT invent names, prices, hours, policies, or contact info.\n"
+            "- Keep the pending step alive: end by guiding back to it.\n"
+            "- Respect the requested tone for wording/emoji/length, but not facts.\n"
+            "- WhatsApp-friendly, 2-4 short sentences.\n"
+        )
+        user_prompt = (
+            f"{_tone_line(tone)}\n"
+            f"Business: {biz or 'the business'}\n"
+            f"Concern type: {category}\n"
+            f"Facts: {why_sentence}\n"
+            f"Pending step: {step_title or 'continue booking'}\n"
+            f"Step prompt: {step_prompt or 'ask for the pending detail'}\n"
+            "Task: acknowledge the concern and guide back to the pending step."
+        )
+        try:
+            llm = self._get_llm()
+            if not llm or not settings.LLM_API_KEY:
+                raise RuntimeError("no_llm")
+            raw = await llm._call_llm(user_prompt, system_prompt=system, json_mode=False)
+            body = (raw or "").strip()
+            if not body:
+                raise RuntimeError("empty")
+            body = _sanitize_intro_outro(body, max_chars=900)
+            if not body:
+                raise RuntimeError("empty_after_sanitize")
+            logger.info(
+                "whatsapp.presenter.objection",
+                extra={"event": "whatsapp.presenter.objection", "category": category},
+            )
+            return StructuredWhatsAppResponse(type="text", body=body)
+        except Exception as e:
+            logger.warning(
+                "whatsapp.presenter.objection.fallback",
+                extra={"event": "whatsapp.presenter.objection.fallback", "reason": str(e)[:120]},
+            )
+            return StructuredWhatsAppResponse(type="text", body=fallback[:1200])
+
     # ── Directive ───────────────────────────────────────────────
 
     async def present_directive(

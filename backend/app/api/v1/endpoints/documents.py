@@ -85,6 +85,21 @@ class CrawlStatusResponse(BaseModel):
     crawl_id: str
     status: str
     pages_crawled: Optional[int] = None
+    # DB-truth counts (distinct stored pages / chunks for this crawl).
+    stored_pages: Optional[int] = None
+    stored_chunks: Optional[int] = None
+
+
+class WebsiteSummaryResponse(BaseModel):
+    website_url: Optional[str] = None
+    crawl_id: Optional[str] = None
+    crawl_status: Optional[str] = None
+    crawl_started_at: Optional[str] = None
+    crawl_completed_at: Optional[str] = None
+    total_pages_crawled: Optional[int] = None
+    # DB truth — what is actually stored and answerable right now.
+    stored_pages: int = 0
+    stored_chunks: int = 0
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────
@@ -313,8 +328,31 @@ async def delete_document(
     user: User = Depends(get_current_user),
     _: None = Depends(deny_impersonation),
 ):
-    """Delete a document and all its chunks for this org."""
+    """Delete a document and all its chunks for this org.
+
+    Website-crawl batches are protected here: crawled data is removed
+    ONLY via DELETE /website (explicit admin action), never as a side
+    effect of document deletion.
+    """
     org_id = user.org_id
+
+    if str(doc_id).startswith("website:"):
+        raise HTTPException(
+            status_code=400,
+            detail="Crawled website data can only be deleted via DELETE /website",
+        )
+    _web_check = await db.execute(
+        text(
+            "SELECT 1 FROM document_chunks WHERE org_id = :org_id "
+            "AND doc_id = :doc_id AND source_type = 'website' LIMIT 1"
+        ),
+        {"org_id": str(org_id), "doc_id": str(doc_id)},
+    )
+    if _web_check.first() is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Crawled website data can only be deleted via DELETE /website",
+        )
 
     deleted = await delete_document_chunks(db, str(org_id), doc_id)
     if deleted == 0:
@@ -413,6 +451,45 @@ async def save_business_profile_endpoint(
 
 
 # ─── Website Crawl Endpoints ───────────────────────────────────────────────
+
+
+@router.get("/website", response_model=WebsiteSummaryResponse)
+async def get_website_summary(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """DB-truth summary of the crawled website for this org.
+
+    Crawled pages persist until the admin explicitly calls DELETE /website —
+    no status transition, poll, webhook, or background job removes them.
+    """
+    from app.services.retrieval_service import website_crawl_stats
+
+    row = (
+        await db.execute(
+            text(
+                "SELECT website_url, crawl_id, crawl_status, "
+                "CAST(crawl_started_at AS TEXT) AS started, "
+                "CAST(crawl_completed_at AS TEXT) AS completed, "
+                "total_pages_crawled FROM org_configs WHERE org_id = :org_id"
+            ),
+            {"org_id": str(user.org_id)},
+        )
+    ).mappings().first() or {}
+    try:
+        stats = await website_crawl_stats(db, str(user.org_id))
+    except Exception:
+        stats = {"stored_pages": 0, "stored_chunks": 0}
+    return WebsiteSummaryResponse(
+        website_url=row.get("website_url"),
+        crawl_id=row.get("crawl_id"),
+        crawl_status=row.get("crawl_status"),
+        crawl_started_at=row.get("started"),
+        crawl_completed_at=row.get("completed"),
+        total_pages_crawled=row.get("total_pages_crawled"),
+        stored_pages=stats["stored_pages"],
+        stored_chunks=stats["stored_chunks"],
+    )
 
 
 @router.post("/website/crawl", response_model=CrawlResponse)
@@ -518,13 +595,24 @@ async def get_crawl_status(
 
         # Persist terminal failure (e.g. expired Firecrawl job) so the UI
         # stops polling and a page refresh does not resurrect it.
+        # Stored chunks are NEVER touched here — a late failure only flips
+        # the status; the counts below keep reflecting what is in the DB.
         if status_str in ("failed", "cancelled"):
             await _set_crawl_state(db, str(user.org_id), status=status_str)
             await db.commit()
 
-        # If the crawl completed and we have data, ingest it
+        # If the crawl completed and we have data, ingest it (idempotent:
+        # pages already stored for this crawl are skipped, so repeated
+        # polls never duplicate chunks).
         if status_str == "completed" and pages_data and db:
             from app.services.document_processor import chunk_text
+            from app.services.retrieval_service import (
+                store_document_chunks,
+                website_crawl_doc_id,
+                website_crawl_stats,
+                website_page_key,
+                website_pages_stored,
+            )
 
             # Re-attach admin-collected context to every ingested chunk.
             website_ctx = await get_stored_source_context(db, str(user.org_id), "website")
@@ -552,35 +640,57 @@ async def get_crawl_status(
                         },
                     })
 
-            if all_chunks:
-                from app.services.retrieval_service import store_document_chunks
-                doc_id = await store_document_chunks(
+            already = await website_pages_stored(db, str(user.org_id), str(crawl_id))
+            fresh = []
+            for c in all_chunks:
+                key = website_page_key(
+                    c.get("source_url"), (c.get("metadata") or {}).get("title")
+                )
+                if key and key not in already:
+                    already.add(key)
+                    fresh.append(c)
+            if fresh:
+                await store_document_chunks(
                     db,
                     org_id=str(user.org_id),
-                    chunks=all_chunks,
+                    chunks=fresh,
                     source_type="website",
+                    doc_id=website_crawl_doc_id(str(crawl_id)),
                 )
-                await _set_crawl_state(
-                    db, str(user.org_id), status="completed",
-                )
-                # Update total_pages_crawled
-                await db.execute(
-                    text(
-                        "UPDATE org_configs SET total_pages_crawled = :t "
-                        "WHERE org_id = :org_id"
-                    ),
-                    {"t": len(pages_data), "org_id": str(user.org_id)},
-                )
-                await db.commit()
-                logger.info(
-                    f"Ingested {len(all_chunks)} chunks from {len(pages_data)} pages "
-                    f"for crawl {crawl_id}"
-                )
+            await _set_crawl_state(
+                db, str(user.org_id), status="completed",
+            )
+            # Honest count: distinct pages actually stored, not payload size.
+            stats = await website_crawl_stats(db, str(user.org_id), str(crawl_id))
+            await db.execute(
+                text(
+                    "UPDATE org_configs SET total_pages_crawled = :t "
+                    "WHERE org_id = :org_id"
+                ),
+                {"t": stats["stored_pages"], "org_id": str(user.org_id)},
+            )
+            await db.commit()
+            logger.info(
+                f"Ingested {len(fresh)}/{len(all_chunks)} new chunks "
+                f"(stored_pages={stats['stored_pages']}) for crawl {crawl_id}"
+            )
 
+        # DB-truth counts so the UI never shows 0/failed-looks-deleted
+        # while pages are safely stored.
+        stored_pages, stored_chunks = 0, 0
+        try:
+            from app.services.retrieval_service import website_crawl_stats as _stats
+
+            _s = await _stats(db, str(user.org_id), str(crawl_id))
+            stored_pages, stored_chunks = _s["stored_pages"], _s["stored_chunks"]
+        except Exception:
+            pass
         return CrawlStatusResponse(
             crawl_id=crawl_id,
             status=status_str,
             pages_crawled=total,
+            stored_pages=stored_pages,
+            stored_chunks=stored_chunks,
         )
     except Exception as exc:
         logger.error(f"Crawl status fetch failed: {exc}", exc_info=True)

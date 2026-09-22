@@ -125,6 +125,32 @@ async def expire_stale(db: AsyncSession) -> int:
     return len(rows)
 
 
+async def expire_pending_by_type(db: AsyncSession, org_id, types) -> int:
+    """Expire PENDING directives of given types (admin changed the rules).
+
+    Used when business hours / horizon change: stored date/time prompts and
+    options go stale instantly instead of lingering until natural expiry.
+    Returns the expired count. Never raises (best-effort).
+    """
+    try:
+        rows = (
+            await db.execute(
+                select(BookingDirective).where(
+                    BookingDirective.org_id == org_id,
+                    BookingDirective.type.in_(list(types)),
+                    BookingDirective.status == DirectiveStatus.PENDING,
+                )
+            )
+        ).scalars().all()
+        for r in rows:
+            r.status = DirectiveStatus.EXPIRED
+        if rows:
+            await db.flush()
+        return len(rows)
+    except Exception:
+        return 0
+
+
 async def generate_for_next_step(db, org_id, session_id, customer_id, missing_fields, field_definitions, target_date=None):
     """Generate next BookingDirective from StateEvaluator + slot_engine.
     Caller decides when to call (after each turn). Returns directive or None if no missing.
@@ -179,7 +205,9 @@ async def generate_for_next_step(db, org_id, session_id, customer_id, missing_fi
                 _cfg2 = _cfg2_res.scalars().first()
                 if _cfg2:
                     _tz = str(getattr(_cfg2, "timezone", None) or "UTC")
-                    _max = int(getattr(_cfg2, "max_booking_days_ahead", 30) or 30)
+                    from app.engine.scheduling_policy import resolve_booking_horizon_days as _resolve_horizon
+
+                    _max = (await _resolve_horizon(db, org_id, _cfg2))[0]
                 # try business hours summary (clean WhatsApp style, no horizon)
                 try:
                     from app.engine.message_processor import _format_business_hours_for_whatsapp as _fmt_bh

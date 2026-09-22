@@ -620,10 +620,18 @@ def _format_available_dates_for_prompt(
         tz = timezone.utc
     today = datetime.now(tz).date()
     end = today + timedelta(days=int(max_booking_days or 30))
-    # Format like '15 September' without year, title-case
+    # Format like '15 September' without year, title-case — but include the
+    # year whenever the window crosses into another year (or spans one),
+    # otherwise "21 September to 26 September" reads as 5 days for a 370-day
+    # window and Nov→Jan windows are ambiguous.
     start_str = today.strftime("%d %B").lstrip("0")
     end_str = end.strftime("%d %B").lstrip("0")
+    if end.year != today.year:
+        start_str = f"{start_str} {today.year}"
+        end_str = f"{end_str} {end.year}"
     horizon = f"We are available from {start_str} to {end_str}, please choose a date within this horizon."
+    if (org_timezone or "").strip():
+        horizon += f" (All dates in {org_timezone.strip()}.)"
     return horizon
 
 
@@ -720,7 +728,8 @@ def _format_time_prompt_for_whatsapp(
         hours_text = "9:00 AM to 5:00 PM"
     dur = _format_slot_duration_human(slot_minutes)
     dur_part = f" and your booking will be of {dur}" if dur else ""
-    return f"Our available booking hours are from {hours_text}{dur_part}, please choose your time for booking."
+    tz_note = f" (All times in {timezone_name})." if (timezone_name or "").strip() else ""
+    return f"Our available booking hours are from {hours_text}{dur_part}, please choose your time for booking.{tz_note}"
 
 
 def _format_business_hours_for_whatsapp(
@@ -848,11 +857,17 @@ def _build_context_aware_response(
 
                 parsed = date_parse(date_val)
                 date_str = parsed.strftime("%B %d, %Y")
+                selected_iso = parsed.date().isoformat()
             except Exception:
                 date_str = date_val
+                selected_iso = ""
+            # Echo the stored selection first (dynamic, from collected data —
+            # never static text), so the customer sees exactly what the
+            # booking holds before picking a time.
+            echo = f"You have selected {selected_iso} for booking. " if selected_iso else ""
             if user_name:
-                return f"Thank you, {user_name.split()[0]}. Now, please choose your preferred time slot for {date_str} from the options below.{timezone_note}"
-            return f"Thank you for providing the date. Now, please choose your preferred time slot for {date_str} from the options below.{timezone_note}"
+                return f"Thank you, {user_name.split()[0]}. {echo}Now, please choose your preferred time slot for {date_str} from the options below.{timezone_note}"
+            return f"Thank you for providing the date. {echo}Now, please choose your preferred time slot for {date_str} from the options below.{timezone_note}"
         return f"Please choose your preferred time from the available slots below.{timezone_note}"
 
     if directive == "REQUIRE_DATE_PICKER":
@@ -1005,9 +1020,14 @@ async def process_message(
             + _hours_block.replace("## BUSINESS HOURS", "BUSINESS HOURS")
         ).strip()
     org_timezone = str(org_config.timezone) if org_config.timezone else "UTC"
-    require_otp = getattr(org_config, "require_otp", True)
-    require_phone_otp = getattr(org_config, "require_phone_otp", False)
-    max_booking_days = getattr(org_config, "max_booking_days_ahead", 90)
+    # NULL flag = schema default (email ON, phone OFF).
+    _req_e = getattr(org_config, "require_otp", True)
+    _req_p = getattr(org_config, "require_phone_otp", False)
+    require_otp = True if _req_e is None else bool(_req_e)
+    require_phone_otp = False if _req_p is None else bool(_req_p)
+    from app.engine.scheduling_policy import resolve_booking_horizon_days as _resolve_horizon_days
+
+    max_booking_days = (await _resolve_horizon_days(db, org.id if org else None, org_config))[0]
 
     field_definitions = parse_field_definitions(
         org_config.field_definitions or org_config.required_fields
@@ -1087,6 +1107,46 @@ async def process_message(
         _action = ActionPayload(message=_combined_msg, widget_directive=_dir_for_hours, field_meta=_meta_for_hours)
         await _save_transcript(db, chat_session.session_id, message_text, _combined_msg, _dir_for_hours)
         return _action
+    # Available-dates inquiry mid-booking ("which dates can I book?"): answer
+    # from the live slot inventory, then re-ask the current field so the flow
+    # continues. Without this the question falls through to field collection
+    # and the user is interrogated instead of answered.
+    from app.engine.scheduling_policy import (
+        lookup_available_dates_answer as _lookup_dates_answer,
+    )
+    _dates_answer = None
+    try:
+        _dates_answer = await _lookup_dates_answer(
+            db=db,
+            org_id=str(org.id) if org else "",
+            user_message=message_text,
+            effective_timezone=str(
+                chat_session.collected_data.get("user_timezone") or org_timezone
+            ),
+            org_timezone=org_timezone,
+        )
+    except Exception:
+        _dates_answer = None
+    if _dates_answer and isinstance(_dates_answer, dict) and _dates_answer.get("response_text"):
+        dates_text = str(_dates_answer.get("response_text") or "").strip()
+        _next_for_dates = StateEvaluator.determine_next_action(
+            chat_session.missing_fields or [], chat_session.current_intent, field_definitions
+        )
+        _dir_for_dates = str(_next_for_dates.get("directive") or "TEXT_INPUT")
+        _meta_for_dates = _next_for_dates.get("field_meta")
+        _combined_dates_msg = f"{dates_text}\n\n" + _build_context_aware_response(
+            directive=_dir_for_dates,
+            field_meta=_meta_for_dates,
+            collected_data=chat_session.collected_data,
+            valid_data={},
+            errors={},
+            llm_generated_msg=dates_text,
+            agent_name=persona.get("agent_name", "Booking Assistant"),
+        )
+        await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+        _dates_action = ActionPayload(message=_combined_dates_msg, widget_directive=_dir_for_dates, field_meta=_meta_for_dates)
+        await _save_transcript(db, chat_session.session_id, message_text, _combined_dates_msg, _dir_for_dates)
+        return _dates_action
     if is_oos:
         scope_label = persona.get("industry_context") or "our services"
         clarifying_msg = (
@@ -1151,10 +1211,16 @@ async def process_message(
                 llm_temporary_fallback = True
 
     user_msg_lower = message_text.lower().strip()
+    try:
+        from app.engine.time_flex import is_confirm_message as _is_confirm_msg
+
+        _msg_is_confirm = _is_confirm_msg(message_text)
+    except Exception:
+        _msg_is_confirm = any(kw in user_msg_lower for kw in CONFIRM_KEYWORDS)
     force_confirm_intent = (
         prior_intent == "CONFIRM_BOOKING"
         and not chat_session.missing_fields
-        and any(kw in user_msg_lower for kw in CONFIRM_KEYWORDS)
+        and _msg_is_confirm
     )
     if force_confirm_intent:
         intent = "CONFIRM_BOOKING"
@@ -1182,14 +1248,16 @@ async def process_message(
         return action
 
     # ── CONFIRM override (deterministic Python-side) ──────────
-    if not chat_session.missing_fields and any(
-        kw in user_msg_lower for kw in CONFIRM_KEYWORDS
-    ):
+    if not chat_session.missing_fields and _msg_is_confirm:
         intent = "CONFIRM_BOOKING"
         chat_session.current_intent = intent
 
     # ── Edit-details override (deterministic Python-side) ─────
-    if not chat_session.missing_fields and _is_edit_details_request(user_msg_lower):
+    # Bare "change"/"edit"/"modify" at confirmation must enter edit flow.
+    # _is_edit_details_request only covered "change details" etc, so bare
+    # "change" fell through to REQUEST_CONFIRMATION and looped forever.
+    _is_bare_edit = user_msg_lower.strip() in {"change", "edit", "modify", "update", "change details", "edit details"}
+    if not chat_session.missing_fields and (_is_edit_details_request(user_msg_lower) or _is_bare_edit):
         intent = "EDIT_DATA"
         chat_session.current_intent = intent
 
@@ -1367,6 +1435,18 @@ async def process_message(
                 except Exception:
                     continue
             if is_valid:
+                # Reload the session row FIRST: crud_verify_otp() records the
+                # verified-context key straight into the DB row, and this
+                # turn's in-memory snapshot predates it. Without the reload,
+                # _handle_booking_flow's context check sees a verified flag
+                # with a missing key, revokes the verification, sends a new
+                # code — and the user loops on OTP forever.
+                try:
+                    _fresh_session = await crud_chat.get_chat_session(db, chat_session.session_id)
+                    if _fresh_session is not None:
+                        chat_session = _fresh_session
+                except Exception:
+                    pass
                 if _verified_channel == "phone":
                     chat_session.phone_otp_verified = True
                     logger.info(f"Phone OTP verified for session {chat_session.session_id}")
@@ -1551,19 +1631,24 @@ async def process_message(
 
     if errors:
         # Only show validation errors when the user actually tried to provide
-        # data for the primary missing field but it was invalid (bad format,
-        # out of range, etc.). If the user didn't provide any value at all
-        # (just asked a question, complained, etc.), let the LLM's conversational
-        # response through — don't error out on natural conversation.
-        primary_missing = (
-            chat_session.missing_fields[0] if chat_session.missing_fields else None
-        )
-        user_tried_to_provide = primary_missing and primary_missing in raw_entities
+        # data for a field but it was invalid (bad format, out of range, etc.).
+        # If the user didn't provide any value at all (just asked a question,
+        # complained, etc.), let the LLM's conversational response through.
+        # Check ALL fields the user tried to provide, not just the primary
+        # missing field — this handles cases where a previously-valid field
+        # (e.g. email) is re-entered incorrectly.
+        user_tried_fields = set(raw_entities.keys()) if isinstance(raw_entities, dict) else set()
+        error_fields = set(errors.keys())
+        invalid_user_fields = user_tried_fields & error_fields
 
-        if user_tried_to_provide and primary_missing in errors:
-            error_msg = errors[primary_missing]
-            msg = f"I couldn't quite understand that:\n{error_msg}\nPlease try again."
-            directive = next_step.get("directive", "TEXT_INPUT")
+        if invalid_user_fields:
+            # Show the first invalid field's error (deterministic order)
+            for field in raw_entities:
+                if field in errors:
+                    error_msg = errors[field]
+                    msg = f"I couldn't quite understand that:\n{error_msg}\nPlease try again."
+                    directive = next_step.get("directive", "TEXT_INPUT")
+                    break
         else:
             # User didn't try to provide data — conversational turn.
             # Deterministic next-field guard (F1): in collection intents the
@@ -2512,9 +2597,22 @@ async def _handle_post_booking(
                 )
                 return action
             if affirm:
-                return await _cancel_confirmed_booking(
-                    db, org, chat_session, background_tasks
+                # OTP-gated: a plain "yes" must NOT delete the booking.
+                # Route into the OTP-protected cancel flow (lookup → code → delete).
+                from app.engine import cancel_flow as _cancel_flow_mod
+
+                chat_session.pending_cancel = False
+                await crud_chat.update_chat_session(
+                    db, chat_session.session_id, chat_session
                 )
+                action = await _cancel_flow_mod.start_cancel_flow(
+                    db, chat_session, message_text
+                )
+                await _save_transcript(
+                    db, chat_session.session_id, message_text, action.message,
+                    action.widget_directive or "TEXT_INPUT",
+                )
+                return action
             if is_question or self_check.get("classification") in {
                 "INFO_QUESTION",
                 "AMBIGUOUS",
@@ -2553,8 +2651,8 @@ async def _handle_post_booking(
             msg = (
                 "Sure — here's the cancellation procedure:\n"
                 "1) Say **'cancel my booking'**\n"
-                "2) I'll ask for confirmation (**yes/no**)\n"
-                "3) Reply **yes** to cancel, or **no** to keep your booking.\n\n"
+                "2) Enter the email/phone used for the appointment\n"
+                "3) Enter the **verification code** I send you — the booking is cancelled only after the code verifies.\n\n"
                 "No changes have been made to your current booking."
             )
             action = ActionPayload(
@@ -2566,17 +2664,16 @@ async def _handle_post_booking(
             return action
 
         if explicit_cancel or soft_cancel or inferred_cancel_action:
-            # Set pending flag and ask for confirmation
-            chat_session.pending_cancel = True
-            await crud_chat.update_chat_session(
-                db, chat_session.session_id, chat_session
-            )
-            msg = "Are you sure you want to cancel your booking? This will release your reserved time slot. Reply **yes** to confirm or **no** to keep it."
-            action = ActionPayload(
-                message=msg, widget_directive="TEXT_INPUT", is_terminal=False
+            # OTP-gated cancel: never delete on yes/no. Start the
+            # OTP-protected cancel flow (lookup → verification code → delete).
+            from app.engine import cancel_flow as _cancel_flow_mod2
+
+            action = await _cancel_flow_mod2.start_cancel_flow(
+                db, chat_session, message_text
             )
             await _save_transcript(
-                db, chat_session.session_id, message_text, msg, "TEXT_INPUT"
+                db, chat_session.session_id, message_text, action.message,
+                action.widget_directive or "TEXT_INPUT",
             )
             return action
 
@@ -2754,8 +2851,47 @@ async def _cancel_confirmed_booking(
     chat_session: ChatSessionState,
     background_tasks: Optional[BackgroundTasks] = None,
 ) -> ActionPayload:
-    """Cancel a confirmed booking: release the slot and update session status."""
+    """Cancel a confirmed booking: release the slot and update session status.
+
+    HARD GATE per admin flags: when admin enables email and/or phone OTP,
+    real booking deletion requires a verified cancel OTP
+    (cancel_flow stage=otp + otp_verified=True). When admin disables both,
+    no code is needed. A plain yes/confirm must never delete while OTP is on
+    — callers route to start_cancel_flow first.
+    """
     from app.crud.booking import cancel_booking_by_session
+
+    _need_any_otp = True  # fail-closed default: OTP on unless proven off
+    try:
+        from sqlalchemy.future import select as _sel_cfg
+        from app.models.config import OrgConfig as _OrgCfg
+
+        _cfg_res = await db.execute(
+            _sel_cfg(_OrgCfg).where(_OrgCfg.org_id == org.id)
+        )
+        _cfg_row = _cfg_res.scalars().first()
+        if _cfg_row is not None:
+            _r_e = getattr(_cfg_row, "require_otp", True)
+            _r_p = getattr(_cfg_row, "require_phone_otp", False)
+            _need_any_otp = (True if _r_e is None else bool(_r_e)) or (
+                False if _r_p is None else bool(_r_p)
+            )
+    except Exception:
+        _need_any_otp = True
+    _flow = (chat_session.collected_data or {}).get("_cancel_flow") or {}
+    if _need_any_otp and not (
+        _flow.get("stage") == "otp" and _flow.get("otp_verified") is True
+    ):
+        from app.engine import cancel_flow as _cancel_flow_gate
+
+        action = await _cancel_flow_gate.start_cancel_flow(
+            db, chat_session, "cancel my booking"
+        )
+        await _save_transcript(
+            db, chat_session.session_id, "cancel my booking", action.message,
+            action.widget_directive or "TEXT_INPUT",
+        )
+        return action
 
     booking_result = await db.execute(
         select(Booking).where(
@@ -3393,6 +3529,40 @@ async def _execute_booking(
         except Exception:
             _pay_status = "not_required"
 
+        # Service catalog linkage (Phase 3): IDs arrive via collected_data.
+        # Invalid/stale refs are dropped with a warning — a confirmed booking
+        # must never fail on catalog data, and never persist foreign refs.
+        _sel_unit_id = None
+        _sel_provider_id = None
+        try:
+            from app.services.catalog_service import validate_catalog_selection as _vcs
+
+            _cd = chat_session.collected_data if isinstance(chat_session.collected_data, dict) else {}
+            _vu, _vp = await _vcs(
+                db, org.id, _cd.get("unit_id"), _cd.get("provider_id")
+            )
+            _sel_unit_id = str(_vu.id) if _vu is not None else None
+            _sel_provider_id = str(_vp.id) if _vp is not None else None
+        except ValueError as _cat_err:
+            logger.warning("catalog selection dropped at booking: %s", _cat_err)
+        except Exception as _cat_err2:
+            logger.warning("catalog selection check failed at booking: %s", _cat_err2)
+
+        # Catalog fee fills the amount only when no Razorpay-paid amount exists.
+        if _pay_amount is None:
+            try:
+                from app.services.catalog_service import resolve_effective_fee as _ref
+
+                _cd2 = chat_session.collected_data if isinstance(chat_session.collected_data, dict) else {}
+                _fee_paise, _fee_cur = await _ref(
+                    db, org.id, _cd2.get("unit_id"), _cd2.get("provider_id")
+                )
+                if _fee_paise:
+                    _pay_amount = _fee_paise
+                    _pay_currency = _fee_cur
+            except Exception as _fee_err:
+                logger.warning("catalog fee resolution failed at booking: %s", _fee_err)
+
         booking = await attempt_booking(
             db=db,
             session_id=chat_session.session_id,
@@ -3401,6 +3571,8 @@ async def _execute_booking(
             customer_name=chat_session.collected_data.get("name"),
             customer_email=customer_email,
             customer_phone=chat_session.collected_data.get("phone"),
+            unit_id=_sel_unit_id,
+            provider_id=_sel_provider_id,
             user_timezone=effective_user_tz,
             user_slot_start_at=user_slot_start_at,
             user_slot_end_at=user_slot_end_at,

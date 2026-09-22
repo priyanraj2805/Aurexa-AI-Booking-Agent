@@ -221,8 +221,28 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                 from app.engine.booking_directive import handler as _dir_handler
 
                 _dir = await _get_dir(db, _active_id)
-                if _dir and _dir.status == "PENDING" and _dir.customer_id == from_phone:
+                # Availability/hours inquiries bypass directive interception
+                # entirely: the engine answers from the live slot inventory
+                # (or weekly hours), then re-asks the pending step. Without
+                # this, a question is validated as step input and the user is
+                # interrogated instead of answered. Explicit taps (option_id)
+                # always take precedence.
+                _inquiry_bypass = False
+                if not str(event.get("option_id") or "").strip():
+                    try:
+                        from app.engine.scheduling_policy import (
+                            is_available_dates_query as _is_dates_q,
+                            is_schedule_business_hours_query as _is_hours_q,
+                        )
+                        if _is_dates_q(text) or _is_hours_q(text):
+                            _inquiry_bypass = True
+                            logger.info("Directive interception bypassed for inquiry (cloud)")
+                    except Exception:
+                        pass
+                if _dir and _dir.status == "PENDING" and _dir.customer_id == from_phone and not _inquiry_bypass:
                     from datetime import datetime, timezone as _tz
+                    # Shared strict step guards (same module as the QR path).
+                    from app.engine import whatsapp_guards as _guards
 
                     if _dir.expires_at and _dir.expires_at < datetime.now(_tz.utc):
                         _dir.status = "EXPIRED"
@@ -230,33 +250,290 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                         logger.info(f"Directive {str(_dir.id)[:8]} expired on tap (cloud)")
                     else:
                         _matched = None
+                        # Bound for every path: synthetic typed-date ISO or None.
+                        _typed_iso = None
+                        # True when handed to the engine untouched (cancel /
+                        # cross-field change) — step guards below skip.
+                        _step_handled = False
                         _incoming_oid = str(event.get("option_id") or "").strip()
                         if _incoming_oid:
                             for _opt in (_dir.options or []):
                                 if str(_opt.get("id") or "").strip() == _incoming_oid:
                                     _matched = _opt
                                     break
+                        # Objection handling FIRST (same contract as QR path):
+                        # acknowledge in the admin-chosen tone, never slap a
+                        # format correction on a genuine concern.
                         if not _matched:
-                            _norm_text = text.strip().lower()
+                            _dtype_o = str(getattr(_dir, "type", "") or "")
+                            _step_field_o = {"SELECT_DATE": "date", "SELECT_SLOT": "time", "SELECT_TIME": "time"}.get(_dtype_o)
+                            _cd_o = dict(chat_session.collected_data or {})
+                            _objection = _guards.detect_objection(text, _cd_o, _step_field_o)
+                            if _objection:
+                                _brief = _guards.build_objection_brief(
+                                    category=str(_objection.get("category") or ""),
+                                    field=_objection.get("field"),
+                                    business_name=str(
+                                        ((getattr(org_config, "custom_prompts", None) or {}).get("business_name"))
+                                        or getattr(org, "name", "")
+                                        or ""
+                                    ),
+                                    tone=(getattr(org_config, "custom_prompts", None) or {}).get("tone"),
+                                    field_label=_guards.field_slot(
+                                        getattr(org_config, "field_definitions", None),
+                                        _objection.get("field"),
+                                    )[0],
+                                    field_description=_guards.field_slot(
+                                        getattr(org_config, "field_definitions", None),
+                                        _objection.get("field"),
+                                    )[1],
+                                    field_required=_guards.field_slot(
+                                        getattr(org_config, "field_definitions", None),
+                                        _objection.get("field"),
+                                    )[2],
+                                    required_labels=_guards.required_labels(
+                                        getattr(org_config, "field_definitions", None)
+                                    ),
+                                    step_title=str(getattr(_dir, "title", "") or ""),
+                                    step_prompt=str(getattr(_dir, "description", "") or ""),
+                                )
+                                try:
+                                    from app.engine.whatsapp_presenter import WhatsAppPresenter as _WPPresenter
+
+                                    _obj_resp = await _WPPresenter().present_objection(_brief)
+                                    _obj_body = str(_obj_resp.body or "").strip() or "Noted — how else can I help with your booking?"
+                                except Exception as _obj_e:
+                                    logger.warning(f"Objection presentation failed (cloud), engine fallback: {_obj_e}")
+                                    _obj_body = ""
+                                if _obj_body:
+                                    try:
+                                        await crud_chat.save_message(db, str(chat_session.session_id), "user", text)
+                                        await crud_chat.save_message(db, str(chat_session.session_id), "agent", _obj_body)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        await whatsapp_cloud.send_booking_reply(
+                                            from_phone, {"type": "text", "body": _obj_body[:4096]}
+                                        )
+                                    except Exception:
+                                        pass
+                                    logger.info(f"Directive {str(_dir.id)[:8]} objection acknowledged (cloud) ({_brief.get('category')}): {text[:40]!r}")
+                                    return True
+                        if _incoming_oid:
                             for _opt in (_dir.options or []):
-                                _label = str(_opt.get("label") or "").strip().lower()
-                                _value = str(_opt.get("value") or "").strip().lower()
-                                _oid = str(_opt.get("id") or "").strip().lower()
-                                if _norm_text in (_label, _value, _oid) or _norm_text == _label.replace(" ", ""):
+                                if str(_opt.get("id") or "").strip() == _incoming_oid:
                                     _matched = _opt
                                     break
+                        if not _matched:
+                            # Strict step guards: exact option text always;
+                            # positional index ONLY for time slots. Bare numbers
+                            # are NEVER a date (prompts show no numbers).
+                            _dtype_m = str(getattr(_dir, "type", "") or "")
+                            _opts_m = list(_dir.options or [])
+                            _matched = _guards.match_option_by_text(_opts_m, text)
+                            if (
+                                not _matched
+                                and _dtype_m in ("SELECT_SLOT", "SELECT_TIME")
+                            ):
+                                _matched = _guards.match_slot_index(_opts_m, text)
+                            # Flexible time match: "3 pm" / "3pm" / "3:00 pm".
+                            if not _matched and str(getattr(_dir, "type", "")) in ("SELECT_SLOT", "SELECT_TIME"):
                                 try:
-                                    _idx = int(_norm_text) - 1
-                                    if 0 <= _idx < len(_dir.options or []) and _dir.options[_idx] == _opt:
-                                        _matched = _opt
-                                        break
+                                    from app.engine.time_flex import match_time_to_slot_label as _match_slot
+
+                                    _labels = [str(o.get("label") or "") for o in (_dir.options or [])]
+                                    _hit = _match_slot(text, _labels)
+                                    if _hit:
+                                        for _opt in (_dir.options or []):
+                                            if str(_opt.get("label") or "") == _hit:
+                                                _matched = _opt
+                                                break
                                 except Exception:
                                     pass
+                            # Flexible confirm match (typo-tolerant).
+                            if not _matched and str(getattr(_dir, "type", "")) == "CONFIRM_BOOKING":
+                                try:
+                                    from app.engine.time_flex import is_confirm_message as _is_confirm
+
+                                    if _is_confirm(text):
+                                        for _opt in (_dir.options or []):
+                                            _oid_l = str(_opt.get("id") or "").lower()
+                                            if "confirm" in _oid_l or str(_opt.get("value") or "").lower() == "confirm":
+                                                _matched = _opt
+                                                break
+                                except Exception:
+                                    pass
+                            # Strict typed-date acceptance (SELECT_DATE only): a valid
+                            # in-horizon date completes the step even when not
+                            # listed. Anything else → exact-format correction.
+                            _typed_iso = None
+                            if not _matched and str(getattr(_dir, "type", "")) == "SELECT_DATE":
+                                _tz_g = str(getattr(org_config, "timezone", None) or "UTC")
+                                try:
+                                    from app.engine.scheduling_policy import resolve_booking_horizon_days as _resolve_horizon
+                                    _max_g = (await _resolve_horizon(db, org.id, org_config))[0]
+                                except Exception:
+                                    _max_g = 30
+                                _iso_g, _corr_g, _reason_g = _guards.validate_typed_date(
+                                    text,
+                                    tz=_tz_g,
+                                    max_days=_max_g,
+                                    examples=_guards.example_date_hints(
+                                        [str(o.get("value") or "") for o in (_dir.options or [])],
+                                        tz=_tz_g,
+                                        max_days=_max_g,
+                                    ),
+                                )
+                                if _iso_g:
+                                    _typed_iso = _iso_g
+                                    _matched = {
+                                        "id": f"date_typed_{_iso_g.replace('-', '')}",
+                                        "label": _iso_g,
+                                        "value": _iso_g,
+                                    }
+                                else:
+                                    _horizon_g = str(getattr(_dir, "description", "") or "").strip()
+                                    _wrong_body = _guards.date_correction(text, _corr_g or "", _horizon_g)
+                                    try:
+                                        await crud_chat.save_message(db, str(chat_session.session_id), "user", text)
+                                        await crud_chat.save_message(db, str(chat_session.session_id), "agent", _wrong_body)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        await whatsapp_cloud.send_booking_reply(
+                                            from_phone, {"type": "text", "body": _wrong_body[:4096]}
+                                        )
+                                    except Exception:
+                                        pass
+                                    logger.info(f"Directive {str(_dir.id)[:8]} wrong-date corrected ({_reason_g}) (cloud): {text[:40]!r}")
+                                    return True
+                            # Change-intent on CONFIRM_BOOKING.
+                            if not _matched and str(getattr(_dir, "type", "")) == "CONFIRM_BOOKING":
+                                try:
+                                    if _guards.match_confirm_intent(text) == "change":
+                                        for _opt in (_dir.options or []):
+                                            _oid_l = str(_opt.get("id") or "").lower()
+                                            if "change" in _oid_l or str(_opt.get("value") or "").lower() == "change":
+                                                _matched = _opt
+                                                break
+                                except Exception:
+                                    pass
+                            # Cancel bypass + cross-field change routing (same as
+                            # QR path): expire the stale step, apply pops, fall
+                            # through with ORIGINAL text to the engine.
+                            if not _matched:
+                                _dtype_h = str(getattr(_dir, "type", "") or "")
+                                _step_field = {"SELECT_DATE": "date", "SELECT_SLOT": "time", "SELECT_TIME": "time"}.get(_dtype_h)
+                                _cd_h = dict(chat_session.collected_data or {})
+                                if _guards.is_cancel_bypass(text):
+                                    _dir.status = "EXPIRED"
+                                    _cd_h.pop("active_directive_id", None)
+                                    chat_session.collected_data = _cd_h
+                                    try:
+                                        await db.commit()
+                                    except Exception:
+                                        pass
+                                    logger.info(f"Directive {str(_dir.id)[:8]} cancel bypass to engine (cloud): {text[:40]!r}")
+                                    _step_handled = True
+                                else:
+                                    _change_field = _guards.detect_field_change_request(
+                                        text, _cd_h, _step_field
+                                    )
+                                    if _change_field:
+                                        _dir.status = "EXPIRED"
+                                        _cd_h = _guards.apply_collected_field_change(_cd_h, _change_field)
+                                        _cd_h.pop("active_directive_id", None)
+                                        chat_session.collected_data = _cd_h
+                                        try:
+                                            await db.commit()
+                                        except Exception:
+                                            pass
+                                        logger.info(f"Directive {str(_dir.id)[:8]} field-change ({_change_field}) to engine (cloud): {text[:40]!r}")
+                                        _step_handled = True
+                            # Wrong-slot guard: deterministic format correction —
+                            # no numbers (prompts show none), never the LLM.
+                            if not _matched and not _step_handled and str(getattr(_dir, "type", "")) in ("SELECT_SLOT", "SELECT_TIME", "SELECT_DATE"):
+                                _dtype_c = str(getattr(_dir, "type", "") or "")
+                                if _dtype_c == "SELECT_DATE":
+                                    _horizon2 = str(getattr(_dir, "description", "") or "").strip()
+                                    _tz2 = str(getattr(org_config, "timezone", None) or "UTC")
+                                    try:
+                                        from app.engine.scheduling_policy import resolve_booking_horizon_days as _resolve_horizon
+                                        _max2 = (await _resolve_horizon(db, org.id, org_config))[0]
+                                    except Exception:
+                                        _max2 = 30
+                                    _ex2 = _guards.example_date_hints(
+                                        [str(o.get("value") or "") for o in (_dir.options or [])],
+                                        tz=_tz2,
+                                        max_days=_max2,
+                                    )
+                                    _hint2 = " or ".join(f"*{h}*" for h in _ex2) if _ex2 else "the day, month and year in full"
+                                    _wrong_body = _guards.date_correction(
+                                        text,
+                                        f"Please type the meeting date like {_hint2}.",
+                                        _horizon2,
+                                    )
+                                else:
+                                    _avail_c = [str(o.get("label") or "").strip() for o in (_dir.options or []) if str(o.get("label") or "").strip()]
+                                    _hours = ""
+                                    if _avail_c:
+                                        _hours = "Available times: " + " · ".join(_avail_c[:7]) + "."
+                                    _wrong_body = _guards.time_correction(
+                                        text, _hours, examples=_guards.example_time_hints(_avail_c)
+                                    )
+                                try:
+                                    await crud_chat.save_message(db, str(chat_session.session_id), "user", text)
+                                    await crud_chat.save_message(db, str(chat_session.session_id), "agent", _wrong_body)
+                                except Exception:
+                                    pass
+                                try:
+                                    await whatsapp_cloud.send_booking_reply(
+                                        from_phone, {"type": "text", "body": _wrong_body[:4096]}
+                                    )
+                                except Exception:
+                                    pass
+                                logger.info(f"Directive {str(_dir.id)[:8]} wrong-slot corrected (cloud): {text[:40]!r}")
+                                return True
                         if _matched:
-                            _res = await _dir_handler.handle_directive_response(
-                                db, directive_id=_dir.id, customer_id=from_phone,
-                                option_id=_matched.get("id"), booking_id=None,
-                            )
+                            if _typed_iso:
+                                # Synthetic typed date: complete directly.
+                                try:
+                                    from app.engine.booking_directive.service import complete as _complete_dir
+
+                                    _syn = {
+                                        "id": f"date_typed_{_typed_iso.replace('-', '')}",
+                                        "label": _typed_iso,
+                                        "value": _typed_iso,
+                                    }
+                                    await _complete_dir(db, _dir.id, _syn["id"], booking_id=None)
+                                    try:
+                                        _row2 = await _get_dir(db, _dir.id)
+                                        if _row2 is not None:
+                                            _row2.selected_option = _syn
+                                            await db.flush()
+                                    except Exception:
+                                        pass
+                                    _cd2 = dict(chat_session.collected_data or {})
+                                    _cd2["date"] = _typed_iso
+                                    _cd2.pop("active_directive_id", None)
+                                    chat_session.collected_data = _cd2
+                                    from app.engine.evaluator import StateEvaluator as _SE2
+                                    from app.schemas.agent import parse_field_definitions as _pfd2, order_field_definitions as _ofd2
+
+                                    _fds2 = _ofd2(_pfd2(chat_session.collected_data.get("field_definitions_snapshot") or org_config.field_definitions or org_config.required_fields))
+                                    _req2 = [f.name for f in _fds2 if f.required]
+                                    chat_session.missing_fields = _SE2.calculate_missing_fields(_req2, _cd2)
+                                    await db.commit()
+                                    logger.info(f"Directive {str(_dir.id)[:8]} completed via typed date (cloud): {_typed_iso}")
+                                except Exception as _e2:
+                                    logger.warning(f"Directive typed-date completion failed (cloud): {_e2}")
+                                text = _typed_iso
+                                _res = {"ok": True}
+                            else:
+                                _res = await _dir_handler.handle_directive_response(
+                                    db, directive_id=_dir.id, customer_id=from_phone,
+                                    option_id=_matched.get("id"), booking_id=None,
+                                )
                             if _res.get("ok"):
                                 try:
                                     _field = (_dir.meta or {}).get("field_name") or (_dir.type.lower().replace("select_", "") if _dir.type.startswith("SELECT_") else None)
@@ -277,7 +554,11 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                         logger.info(f"Directive {str(_dir.id)[:8]} completed via tap (cloud): {str(_matched.get('label'))[:20]}")
                                 except Exception as _e:
                                     logger.warning(f"Directive tap state update failed (cloud): {_e}")
-                                text = str(_matched.get("value") or _matched.get("label") or text)
+                                # CHANGE keeps ORIGINAL text so a new value inside
+                                # ("change my phone to 98...") reaches extraction.
+                                _is_change_opt = "change" in str((_matched or {}).get("id") or "").lower() or str((_matched or {}).get("value") or "").lower() == "change"
+                                if not _is_change_opt:
+                                    text = str(_matched.get("value") or _matched.get("label") or text)
         except Exception as _e:
             logger.warning(f"Directive tap handling failed (cloud), falling back to LLM: {_e}")
 
@@ -315,7 +596,8 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                 if _dir_after.type == "SELECT_DATE":
                                     from app.engine.message_processor import _format_available_dates_for_prompt
                                     _tz_c2 = str(getattr(org_config, "timezone", None) or "UTC")
-                                    _max_c2 = int(getattr(org_config, "max_booking_days_ahead", 30) or 30)
+                                    from app.engine.scheduling_policy import resolve_booking_horizon_days as _resolve_horizon
+                                    _max_c2 = (await _resolve_horizon(db, org.id, org_config))[0]
                                     _desc = _format_available_dates_for_prompt(_tz_c2, _max_c2)
                                 elif _dir_after.type in ("SELECT_SLOT", "SELECT_TIME"):
                                     from app.engine.message_processor import _format_time_prompt_for_whatsapp
@@ -352,6 +634,12 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                 _labels_c = [str(o.get('label') or '').strip() for o in _opts_c[:7] if o.get('label')]
                                 if _labels_c:
                                     _parts.append("Available slots: " + " · ".join(_labels_c))
+                                    _parts.append("You can type any format — e.g. 3pm, 3 pm or 3:00 PM.")
+                        if _dir_after.type == "CONFIRM_BOOKING":
+                            _summary = str(getattr(action, "message", "") or "").strip()
+                            if _summary and _summary not in _parts:
+                                _parts.append(_summary)
+                            _parts.append("Reply CONFIRM to confirm or CHANGE to modify.")
                         _body = "\n\n".join(_parts).strip()
                         wa_msg = {"type": "text", "body": _body[:4096]}
                         logger.info(f"Rendered simple-text directive (cloud) type={_dir_after.type} directive={str(_dir_after.id)[:8]}")
@@ -359,6 +647,51 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                     logger.warning(f"Directive render failed (cloud), falling back: {_e}")
             if wa_msg is None:
                 wa_msg = whatsapp_client.format_action_for_whatsapp(action)
+                # Final anti-hallucination gate (same as QR path): block
+                # invented contact/money entities. Fail-open on error.
+                try:
+                    from app.engine import knowledge_guards as _kb_guards
+
+                    _body0 = str((wa_msg or {}).get("body") or "")
+                    if _body0 and str((wa_msg or {}).get("type") or "") == "text":
+                        _cd0 = dict(chat_session.collected_data or {})
+                        _facts0: list = [str(getattr(org, "name", "") or "")]
+                        try:
+                            from app.engine.knowledge_profile import format_business_profile as _fbp
+
+                            _facts0.append(_fbp(getattr(org_config, "knowledge_context", None)) or "")
+                        except Exception:
+                            pass
+                        try:
+                            from sqlalchemy.future import select as _SelFee
+                            from app.models.service_unit import ProviderFee as _FeeModel
+
+                            _fees = (
+                                await db.execute(
+                                    _SelFee(_FeeModel).where(
+                                        _FeeModel.org_id == org.id,
+                                        _FeeModel.is_active.is_(True),
+                                    )
+                                )
+                            ).scalars().all()
+                            for _f in _fees:
+                                if _f.amount_paise:
+                                    _facts0.append(f"{(_f.currency or 'INR')} {(_f.amount_paise / 100):,.2f}")
+                        except Exception:
+                            pass
+                        _sess0 = [str(_cd0.get(k) or "") for k in ("name", "email", "phone")]
+                        _safe0, _blocked0, _ents0 = _kb_guards.guard_final_text(
+                            _body0, org_facts=_facts0, session_details=_sess0
+                        )
+                        if _blocked0:
+                            logger.warning("whatsapp KB entity gate blocked reply (cloud) with unlisted %s", _ents0)
+                            try:
+                                await crud_chat.save_message(db, str(chat_session.session_id), "agent", _safe0)
+                            except Exception:
+                                pass
+                            wa_msg = {"type": "text", "body": _safe0[:4096]}
+                except Exception as _gate_e:
+                    logger.warning(f"whatsapp KB entity gate failed open (cloud): {_gate_e}")
             # Approved Marketing templates (language `en`) for the contact
             # steps; the text `wa_msg` below is still sent as the reply.
             # Guard: one send per (template, missing-field set) — a stuck

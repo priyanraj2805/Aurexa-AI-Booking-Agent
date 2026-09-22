@@ -53,6 +53,17 @@ _CONFIRMATION_STARTER_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+# Website-vs-document source disambiguation for RAG grounding.
+# "book" is deliberately NOT a document token here ("book an appointment").
+_WEBSITE_SOURCE_RE = re.compile(
+    r"\b(website|site|webpage|web page|homepage|url)\b",
+    flags=re.IGNORECASE,
+)
+_DOC_SOURCE_RE = re.compile(
+    r"\b(pdf|file|document|docs?|docx|novel|upload|uploaded|attachment|attached)\b",
+    flags=re.IGNORECASE,
+)
+
 _KNOWLEDGE_QUERY_TOKEN_RE = re.compile(
     r"\b(what|which|when|where|who|whom|whose|why|how|can|could|would|should|will|"
     r"do|does|did|tell me|explain|offer|offers|services|service|hours|pricing|price|"
@@ -322,6 +333,49 @@ async def call_model(
                 "otp_code": str(state.get("otp_code") or ""),
                 "schedule_answer": schedule_answer,
             }
+
+    # Available-dates inquiry ("which dates can I book?"): answer from the
+    # live slot inventory, then continue the flow untouched. Without this,
+    # such questions fall through to field collection and the user is
+    # interrogated (e.g. asked for their phone number) instead of answered.
+    if latest_user_message:
+        from app.engine.scheduling_policy import (
+            lookup_available_dates_answer as _lookup_dates,
+        )
+
+        dates_answer = await _lookup_dates(
+            db=db,
+            org_id=str(state.get("org_id") or ""),
+            user_message=latest_user_message,
+            effective_timezone=effective_timezone,
+            org_timezone=str(org_config.get("timezone") or "UTC"),
+        )
+        if dates_answer:
+            dates_payload = {
+                "response_text": dates_answer["response_text"],
+                "source": "availability",
+                "availability_answer": dates_answer,
+            }
+            return {
+                "messages": [AIMessage(content=json.dumps(dates_payload))],
+                "summary": active_summary,
+                "context_window": [_serialize_message(message) for message in active_messages],
+                "context_window_size": len(active_messages),
+                "context_compacted": context_compacted,
+                "collected_fields": dict(state.get("collected_fields", {})),
+                "optional_skips": list(state.get("optional_skips", [])),
+                "pending_conflict": dict(state.get("pending_conflict", {})),
+                "follow_up_fields": list(state.get("follow_up_fields", [])),
+                "captured_deltas": dict(state.get("captured_deltas", {})),
+                "merge_diagnostics": dict(state.get("merge_diagnostics", {})),
+                "validation_errors": {},
+                "validated_field_metadata": {},
+                "current_intent": "ASK_QUESTION",
+                "otp_required": bool(state.get("otp_required", False)),
+                "otp_event_key": str(state.get("otp_event_key") or ""),
+                "otp_code": str(state.get("otp_code") or ""),
+                "schedule_answer": dates_answer,
+            }
     
     # 1. Build dynamic context
     context_builder = AgentContextBuilder(db, org_config)
@@ -421,7 +475,15 @@ async def call_model(
                     _title_toks = _sig_tokens(_fname.rsplit(".", 1)[0])
                     if len(_title_toks & _sig_tokens(retrieval_query)) >= 2:
                         _source_ref = True
-            if _source_ref:
+            # Website-vs-document disambiguation: a query naming the WEBSITE
+            # ("according to your website", "summarize your site") must be
+            # answered from the crawled website chunks — never from an
+            # uploaded document's opening pages. Only document references
+            # take the overview path below.
+            _website_only_ref = bool(
+                _WEBSITE_SOURCE_RE.search(retrieval_query or "")
+            ) and not bool(_DOC_SOURCE_RE.search(retrieval_query or ""))
+            if _source_ref and not _website_only_ref:
                 from app.services.retrieval_service import (
                     get_document_overview,
                     list_knowledge_sources,
@@ -460,11 +522,17 @@ async def call_model(
                 # METADATA that lives on the opening pages (title/copyright),
                 # not in body keywords — so inject the overview pages plus
                 # the sources list, and demand honest grounding.
+                # Website-only questions skip the document overview (it would
+                # inject an unrelated uploaded doc); the sources list still
+                # tells the agent the website exists.
                 from app.services.retrieval_service import (
                     get_document_overview,
                     list_knowledge_sources,
                 )
-                overview = await get_document_overview(db, str(state.get("org_id", "")))
+                if _website_only_ref:
+                    overview = []
+                else:
+                    overview = await get_document_overview(db, str(state.get("org_id", "")))
                 sources = await list_knowledge_sources(db, str(state.get("org_id", "")))
                 if overview:
                     rag_chunks = overview
@@ -483,6 +551,25 @@ async def call_model(
                             else ""
                         )
                     )
+
+            # Relevance gate (anti-hallucination): drop keyword hits sharing
+            # no topical overlap with the question unless the LLM rerank
+            # scored them relevant. Overview chunks bypass (user explicitly
+            # named the document). A gated-out knowledge question falls into
+            # the NO-KNOWLEDGE honesty block below instead of answering from
+            # general knowledge with false confidence.
+            if rag_chunks and not overview_mode and rag_tier != "skip":
+                try:
+                    from app.engine.knowledge_guards import (
+                        gate_chunks_by_relevance as _gate_kb,
+                    )
+
+                    _gated, _dropped_all = _gate_kb(rag_chunks, retrieval_query)
+                    if _dropped_all:
+                        logger.info("RAG relevance gate dropped all chunks")
+                    rag_chunks = _gated
+                except Exception:
+                    logger.warning("RAG relevance gating failed", exc_info=True)
 
             if rag_chunks:
                 from app.engine.knowledge_profile import format_source_context_line
@@ -530,6 +617,27 @@ async def call_model(
                     f"## COMPANY KNOWLEDGE\n{header}\n"
                     f"{knowledge}"
                 )
+
+            # Hard honesty rule: the user asked a knowledge question but NO
+            # company materials matched (no chunks, no overview, no sources).
+            # Without this the model answers from general knowledge and
+            # hallucinates. Booking/smalltalk turns are unaffected.
+            _kb_injected = bool(locals().get("rag_chunks")) or (
+                "AVAILABLE KNOWLEDGE SOURCES" in context_block
+            )
+            if not _kb_injected and _is_potential_knowledge_question(
+                latest_user_message or ""
+            ):
+                context_block = (
+                    f"{context_block}\n\n"
+                    "## NO KNOWLEDGE FOUND\n"
+                    "The user asked a question, but NONE of the company's materials "
+                    "contain the answer. You MUST reply honestly that you don't have "
+                    "this information — for example: \"Sorry, I don't have information "
+                    "about this.\" Do NOT guess, do NOT answer from general knowledge, "
+                    "and do NOT invent names, facts or details. "
+                    "You MAY briefly offer to help with booking an appointment instead."
+                )
         except Exception:
             logger.warning("RAG retrieval failed", exc_info=True)
     
@@ -557,9 +665,10 @@ async def call_model(
         else:
             logger.warning("main_llm_call_failed", exc_info=True)
 
-        # Fallback mode: try the backup LLM before giving up to the canned
-        # message. Both providers failing is the only path that yields the
-        # canned reply.
+        # Fallback mode: try the backup LLM before giving up. If both providers
+        # fail, try regex fallback extraction (so booking can still progress
+        # without an LLM — the "temporary issue" path). Only if that also
+        # yields nothing do we raise for the ConversationManager legacy fallback.
         if fallback_llm is not None:
             try:
                 response = await asyncio.wait_for(
@@ -576,35 +685,142 @@ async def call_model(
                 )
             except Exception:
                 logger.warning("main_llm_fallback_failed", exc_info=True)
-                fallback_message = (
-                    f"Could I get your {'next detail' if missing else 'confirmation'}? "
-                    "Please reply and I'll continue."
-                )
-                return {
-                    "messages": [AIMessage(content=fallback_message)],
-                    "summary": active_summary,
-                    "context_window": [_serialize_message(message) for message in active_messages],
-                    "context_window_size": len(active_messages),
-                    "context_compacted": context_compacted,
-                    "collected_fields": dict(state.get("collected_fields", {})),
-                    "follow_up_fields": list(state.get("follow_up_fields", [])),
-                    "current_intent": str(state.get("current_intent") or "START_BOOKING"),
-                }
+                # Try regex fallback before raising
+                try:
+                    from app.engine.message_processor import _extract_entities_without_llm as _fallback_extract
+                    from app.engine.message_processor import _build_llm_recovery_message as _fallback_msg
+                    from app.engine.evaluator import StateEvaluator as _SE
+                    from app.schemas.agent import parse_field_definitions as _parse_fds
+
+                    _fds = _parse_fds(field_definitions)
+                    _fallback_extracted = _fallback_extract(latest_user_message, missing, _fds, effective_timezone, 90)
+                    if _fallback_extracted:
+                        # Validate & merge like the normal path
+                        from app.engine.state_merge import apply_state_merge as _apply_merge
+
+                        _required = [f.name for f in _fds if f.required]
+                        _optional = [f.name for f in _fds if not f.required]
+                        _merge = _apply_merge(
+                            current_fields=collected,
+                            extracted_fields=_fallback_extracted,
+                            required_fields=_required,
+                            optional_fields=_optional,
+                            optional_skips=set(state.get("optional_skips", [])),
+                            invalid_fields={},
+                            skipped_fields=[],
+                            conflicts={},
+                            unknown_fields={},
+                            reopen_fields=[],
+                        )
+                        _new_missing = list(_merge["follow_up_fields"])
+                        # Recompute directive for recovery message
+                        _next = _SE.determine_next_action(_new_missing, str(state.get("current_intent") or "START_BOOKING"), _fds)
+                        _directive = _next.get("directive", "TEXT_INPUT")
+                        _field_meta = _next.get("field_meta")
+                        _recovery = _fallback_msg(_directive, _field_meta)
+                        return {
+                            "messages": [AIMessage(content=_recovery)],
+                            "summary": active_summary,
+                            "context_window": [_serialize_message(m) for m in active_messages],
+                            "context_window_size": len(active_messages),
+                            "context_compacted": context_compacted,
+                            "collected_fields": _merge["collected_fields"],
+                            "optional_skips": sorted(_merge["optional_skips"]),
+                            "pending_conflict": _merge["pending_conflict"],
+                            "follow_up_fields": _new_missing,
+                            "captured_deltas": _merge["captured_deltas"],
+                            "merge_diagnostics": _merge["diagnostics"],
+                            "validation_errors": {},
+                            "validated_field_metadata": {},
+                            "current_intent": str(state.get("current_intent") or "START_BOOKING"),
+                        }
+                    # No valid extraction — still return a recovery message for the current missing field
+                    try:
+                        from app.engine.evaluator import StateEvaluator as _SE_fallback
+                        _next_f = _SE_fallback.determine_next_action(missing, str(state.get("current_intent") or "START_BOOKING"), _fds)
+                        _recovery_f = _fallback_msg(_next_f.get("directive", "TEXT_INPUT"), _next_f.get("field_meta"))
+                        return {
+                            "messages": [AIMessage(content=_recovery_f)],
+                            "summary": active_summary,
+                            "context_window": [_serialize_message(m) for m in active_messages],
+                            "context_window_size": len(active_messages),
+                            "context_compacted": context_compacted,
+                            "collected_fields": dict(state.get("collected_fields", {})),
+                            "follow_up_fields": list(missing),
+                            "current_intent": str(state.get("current_intent") or "START_BOOKING"),
+                        }
+                    except Exception:
+                        pass
+                except Exception as _fe:
+                    logger.warning(f"fallback regex extraction failed: {_fe}", exc_info=True)
+                raise TimeoutError(f"LLM outage (primary {type(llm_error).__name__} + fallback failed)") from llm_error
         else:
-            fallback_message = (
-                f"Could I get your {'next detail' if missing else 'confirmation'}? "
-                "Please reply and I'll continue."
-            )
-            return {
-                "messages": [AIMessage(content=fallback_message)],
-                "summary": active_summary,
-                "context_window": [_serialize_message(message) for message in active_messages],
-                "context_window_size": len(active_messages),
-                "context_compacted": context_compacted,
-                "collected_fields": dict(state.get("collected_fields", {})),
-                "follow_up_fields": list(state.get("follow_up_fields", [])),
-                "current_intent": str(state.get("current_intent") or "START_BOOKING"),
-            }
+            # No backup LLM — try regex fallback immediately
+            try:
+                from app.engine.message_processor import _extract_entities_without_llm as _fallback_extract2
+                from app.engine.message_processor import _build_llm_recovery_message as _fallback_msg2
+                from app.engine.evaluator import StateEvaluator as _SE2
+                from app.schemas.agent import parse_field_definitions as _parse_fds2
+
+                _fds2 = _parse_fds2(field_definitions)
+                _fallback_extracted2 = _fallback_extract2(latest_user_message, missing, _fds2, effective_timezone, 90)
+                if _fallback_extracted2:
+                    from app.engine.state_merge import apply_state_merge as _apply_merge2
+
+                    _required2 = [f.name for f in _fds2 if f.required]
+                    _optional2 = [f.name for f in _fds2 if not f.required]
+                    _merge2 = _apply_merge2(
+                        current_fields=collected,
+                        extracted_fields=_fallback_extracted2,
+                        required_fields=_required2,
+                        optional_fields=_optional2,
+                        optional_skips=set(state.get("optional_skips", [])),
+                        invalid_fields={},
+                        skipped_fields=[],
+                        conflicts={},
+                        unknown_fields={},
+                        reopen_fields=[],
+                    )
+                    _new_missing2 = list(_merge2["follow_up_fields"])
+                    _next2 = _SE2.determine_next_action(_new_missing2, str(state.get("current_intent") or "START_BOOKING"), _fds2)
+                    _directive2 = _next2.get("directive", "TEXT_INPUT")
+                    _field_meta2 = _next2.get("field_meta")
+                    _recovery2 = _fallback_msg2(_directive2, _field_meta2)
+                    return {
+                        "messages": [AIMessage(content=_recovery2)],
+                        "summary": active_summary,
+                        "context_window": [_serialize_message(m) for m in active_messages],
+                        "context_window_size": len(active_messages),
+                        "context_compacted": context_compacted,
+                        "collected_fields": _merge2["collected_fields"],
+                        "optional_skips": sorted(_merge2["optional_skips"]),
+                        "pending_conflict": _merge2["pending_conflict"],
+                        "follow_up_fields": _new_missing2,
+                        "captured_deltas": _merge2["captured_deltas"],
+                        "merge_diagnostics": _merge2["diagnostics"],
+                        "validation_errors": {},
+                        "validated_field_metadata": {},
+                        "current_intent": str(state.get("current_intent") or "START_BOOKING"),
+                    }
+                # No valid extraction — return recovery for current missing
+                try:
+                    _next_f2 = _SE2.determine_next_action(missing, str(state.get("current_intent") or "START_BOOKING"), _fds2)
+                    _recovery_f2 = _fallback_msg2(_next_f2.get("directive", "TEXT_INPUT"), _next_f2.get("field_meta"))
+                    return {
+                        "messages": [AIMessage(content=_recovery_f2)],
+                        "summary": active_summary,
+                        "context_window": [_serialize_message(m) for m in active_messages],
+                        "context_window_size": len(active_messages),
+                        "context_compacted": context_compacted,
+                        "collected_fields": dict(state.get("collected_fields", {})),
+                        "follow_up_fields": list(missing),
+                        "current_intent": str(state.get("current_intent") or "START_BOOKING"),
+                    }
+                except Exception:
+                    pass
+            except Exception as _fe2:
+                logger.warning(f"fallback regex extraction failed2: {_fe2}", exc_info=True)
+            raise TimeoutError(f"LLM outage: {type(llm_error).__name__}: {llm_error}") from llm_error
     
     # Emit AI token telemetry (gated no-op while TELEMETRY_ENABLED is false)
     usage_metadata = getattr(response, "usage_metadata", None)
@@ -733,13 +949,18 @@ async def call_model(
 
         current_intent = str(state.get("current_intent") or "START_BOOKING")
         otp_verified = bool(state.get("otp_verified", False))
+        phone_otp_verified = bool(state.get("phone_otp_verified", False))
         require_otp_raw = org_config.get("require_otp", True)
         require_otp = True if require_otp_raw is None else bool(require_otp_raw)
+        require_phone_raw = org_config.get("require_phone_otp", False)
+        require_phone_otp = False if require_phone_raw is None else bool(require_phone_raw)
         otp_required = (
-            require_otp
-            and current_intent == "CONFIRM_BOOKING"
-            and not otp_verified
+            current_intent == "CONFIRM_BOOKING"
             and not gated_follow_up_fields
+            and (
+                (require_otp and not otp_verified)
+                or (require_phone_otp and not phone_otp_verified)
+            )
         )
         otp_event_key = (
             _build_otp_event_key(str(state.get("session_id") or ""), merge_result["collected_fields"])

@@ -1584,7 +1584,9 @@ class TestMeetingLinkGeneration:
             select(OrgConfig).where(OrgConfig.org_id == org.id)
         )
         cfg = cfg_result.scalars().first()
-        cfg.require_otp = False
+        # Email OTP ON so the strict per-flag cancel flow (lookup → code →
+        # delete) engages; phone stays OFF for a single-code flow.
+        cfg.require_otp = True
         cfg.meeting_mode = "ONLINE_ONLY"
         cfg.active_meeting_provider = ActiveMeetingProvider.GOOGLE_MEET
         cfg.google_meet_connected = True
@@ -1652,20 +1654,68 @@ class TestMeetingLinkGeneration:
             "app.core.mail.send_cancellation_email", _capture_send_cancellation_email
         )
 
+        # OTP-gated cancel: "cancel my booking" must start the lookup →
+        # verification-code flow, NOT delete on its own (strict per-flag OTP).
         resp = await client.post(
             "/api/v1/chat/message/dispatch",
             json={"message": "cancel my booking", "session_id": str(session.id)},
             headers={"X-Org-API-Key": org.api_key},
         )
         assert resp.status_code == 200
-        assert "are you sure" in resp.json()["action"]["message"].lower()
+        assert "email or phone" in resp.json()["action"]["message"].lower()
+
+        # Booking must still exist before the code is verified.
+        still_there = (
+            (await db_session.execute(select(Booking).where(Booking.id == booking.id)))
+            .scalars()
+            .first()
+        )
+        assert still_there is not None
+
+        # Capture the OTP code the cancel flow generates (instead of emailing it).
+        import app.crud.otp as _otp_mod
+
+        _real_generate = _otp_mod.generate_otp
+        _captured = {}
+
+        async def _capture_generate(db, sid, *args, **kwargs):
+            code = await _real_generate(db, sid, *args, **kwargs)
+            _captured["code"] = code
+            return code
+
+        monkeypatch.setattr("app.crud.otp.generate_otp", _capture_generate)
 
         resp2 = await client.post(
             "/api/v1/chat/message/dispatch",
-            json={"message": "yes", "session_id": str(session.id)},
+            json={"message": "cancel-payload@test.com", "session_id": str(session.id)},
             headers={"X-Org-API-Key": org.api_key},
         )
         assert resp2.status_code == 200
+        assert resp2.json()["action"]["widget_directive"] == "REQUIRE_OTP_MODAL"
+        assert _captured.get("code")
+
+        # Web channel verifies via the OTP API (chat-typed codes verify
+        # directly only on WhatsApp) — exactly like the widget code box.
+        resp_verify = await client.post(
+            "/api/v1/auth/otp/verify",
+            json={
+                "session_id": str(session.id),
+                "code": _captured["code"],
+                "channel": "email",
+            },
+            headers={"X-Org-API-Key": org.api_key},
+        )
+        assert resp_verify.status_code == 200
+
+        resp3 = await client.post(
+            "/api/v1/chat/message/dispatch",
+            json={"message": "confirmed", "session_id": str(session.id)},
+            headers={"X-Org-API-Key": org.api_key},
+        )
+        assert resp3.status_code == 200
+        assert (
+            resp3.json()["action"]["widget_directive"] == "CANCELLED_CONFIRMATION_CARD"
+        )
 
         payload = captured_payload.get("booking_details", {})
         assert payload.get("meeting_type_snapshot") == "ONLINE"

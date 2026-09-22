@@ -58,12 +58,12 @@ export function AgendaView({
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
-      <div className="flex items-center justify-between px-2">
-        <div className="flex items-center gap-3">
-          <div className="size-10 rounded-xl bg-primary/10 text-primary flex items-center justify-center">
+      <div className="flex items-center justify-between gap-2 px-2">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="size-10 shrink-0 rounded-xl bg-primary/10 text-primary flex items-center justify-center">
             <Clock className="size-5" />
           </div>
-          <div>
+          <div className="min-w-0">
             <h2 className="text-xl font-bold tracking-tight">Upcoming Agenda</h2>
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-widest">
               Live schedule feed
@@ -74,10 +74,10 @@ export function AgendaView({
           onClick={onRefresh}
           disabled={loading}
           title="Refresh agenda"
-          className="flex items-center gap-2 px-4 py-2 rounded-xl bg-secondary hover:bg-accent text-sm font-semibold transition-all disabled:opacity-50"
+          className="flex shrink-0 items-center gap-2 px-3 sm:px-4 py-2 rounded-xl bg-secondary hover:bg-accent text-sm font-semibold transition-all disabled:opacity-50"
         >
           <RefreshCcw className={`size-4 ${loading ? "animate-spin" : ""}`} />
-          Refresh
+          <span className="hidden min-[400px]:inline">Refresh</span>
         </button>
       </div>
 

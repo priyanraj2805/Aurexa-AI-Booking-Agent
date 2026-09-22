@@ -198,3 +198,15 @@
   background: rgba(148, 163, 184, 0.5);
 }
 
+/* ─── Sidebar drag-resize ───
+   While stretching the sidebar from the rail, kill the width transition so
+   the edge tracks the cursor 1:1, and show the resize cursor everywhere. */
+[data-slot="sidebar-wrapper"][data-resizing="true"] [data-slot="sidebar-gap"],
+[data-slot="sidebar-wrapper"][data-resizing="true"] [data-slot="sidebar-container"] {
+  transition: none !important;
+}
+[data-slot="sidebar-wrapper"][data-resizing="true"],
+[data-slot="sidebar-wrapper"][data-resizing="true"] * {
+  cursor: ew-resize !important;
+}
+

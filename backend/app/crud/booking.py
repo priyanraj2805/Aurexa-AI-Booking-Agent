@@ -167,6 +167,9 @@ async def attempt_booking(
     razorpay_payment_id: str | None = None,
     amount_paise: int | None = None,
     currency: str | None = None,
+    # Service catalog linkage (Phase 3 — validated org-scope below)
+    unit_id: str | None = None,
+    provider_id: str | None = None,
 ) -> Booking:
     """
     Atomically locks a slot and creates a booking record.
@@ -197,6 +200,20 @@ async def attempt_booking(
         # Check if slot is already booked
         if slot.is_booked:
             raise ValueError("Slot is no longer available")
+
+        # Service catalog linkage — org-scoped validation, history-safe.
+        # Raises ValueError on unknown/cross-org/inactive/unassigned combos,
+        # so no booking is ever persisted with a foreign catalog reference.
+        resolved_unit_id = None
+        resolved_provider_id = None
+        if unit_id or provider_id:
+            from app.services.catalog_service import validate_catalog_selection
+
+            _unit, _provider = await validate_catalog_selection(
+                db, uuid.UUID(org_id), unit_id, provider_id
+            )
+            resolved_unit_id = _unit.id if _unit is not None else None
+            resolved_provider_id = _provider.id if _provider is not None else None
 
         # Note: We don't check locked_until here because:
         # 1. The lock might be from THIS session (user confirming their own booking)
@@ -232,6 +249,8 @@ async def attempt_booking(
             customer_name=customer_name,
             customer_email=customer_email,
             customer_phone=customer_phone,
+            unit_id=resolved_unit_id,
+            provider_id=resolved_provider_id,
             user_timezone=user_timezone,
             user_slot_start_at=user_slot_start_at,
             user_slot_end_at=user_slot_end_at,

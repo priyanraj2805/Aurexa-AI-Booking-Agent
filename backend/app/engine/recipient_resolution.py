@@ -29,10 +29,14 @@ def resolve_email_from_collected_data(
             ):
                 candidate_keys.append(field_name.strip())
 
-    candidate_keys.append("email")
+    # Prioritize any collected key containing "email" (e.g. contact_email)
+    # before the generic "email" fallback — the test stores the fresh address
+    # under contact_email while "email" holds a stale value.
     for key in collected_data.keys():
-        if isinstance(key, str) and "email" in key.lower():
+        if isinstance(key, str) and "email" in key.lower() and key not in candidate_keys:
             candidate_keys.append(key)
+    if "email" not in candidate_keys:
+        candidate_keys.append("email")
 
     seen: set[str] = set()
     for key in candidate_keys:

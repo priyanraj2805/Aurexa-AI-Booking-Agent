@@ -6,8 +6,8 @@ import {
   Globe, RefreshCw, X, FileUp, ChevronDown,
 } from "lucide-react";
 import {
-  useDocuments, useCrawlStatus, useAgentConfig,
-  deletePdfDocument,
+  useDocuments, useCrawlStatus, useAgentConfig, useWebsiteSummary,
+  deletePdfDocument, deleteWebsiteData,
   MAX_DOCS_PER_ORG,
   type DocumentListItem,
 } from "@/hooks/use-dashboard";
@@ -98,6 +98,9 @@ export function KnowledgeBaseSection() {
   const [crawlId, setCrawlId] = useState<string | null>(null);
   const { data: crawlStatus, refetch: refetchCrawl } = useCrawlStatus(crawlId);
   const { data: agentConfig } = useAgentConfig();
+  // DB truth: what is actually stored (survives refreshes; never auto-deleted).
+  const { data: websiteSummary, refetch: refetchWebsite } = useWebsiteSummary();
+  const [pendingWebsiteDelete, setPendingWebsiteDelete] = useState(false);
 
   const docList = docs ?? [];
   const atLimit = docList.length >= MAX_DOCS_PER_ORG;
@@ -144,6 +147,22 @@ export function KnowledgeBaseSection() {
       push(msg, "error");
     } finally {
       setPendingDelete(null);
+    }
+  };
+
+  const onDeleteWebsite = async () => {
+    if (!confirm("Delete all crawled website data? The agent will no longer answer from these pages.")) return;
+    setPendingWebsiteDelete(true);
+    try {
+      const res = await deleteWebsiteData();
+      push(`Deleted crawled website data (${res.deleted_chunks} chunks).`);
+      setCrawlId(null);
+      await refetchWebsite();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Delete failed";
+      push(msg, "error");
+    } finally {
+      setPendingWebsiteDelete(false);
     }
   };
 
@@ -308,6 +327,15 @@ export function KnowledgeBaseSection() {
                 Pages crawled so far: <span className="font-medium text-foreground">{crawlStatus.pages_crawled}</span>
               </p>
             )}
+            {(crawlStatus?.stored_pages != null || websiteSummary) && (
+              <p className="text-[12px] text-muted-foreground">
+                Saved in knowledge base:{" "}
+                <span className="font-medium text-foreground">
+                  {crawlStatus?.stored_pages ?? websiteSummary?.stored_pages ?? 0} pages
+                  ({crawlStatus?.stored_chunks ?? websiteSummary?.stored_chunks ?? 0} chunks)
+                </span>
+              </p>
+            )}
             {crawlStatusText.toLowerCase() === "completed" && (
               <p className="text-[12px] text-green-500">
                 ✓ Crawl complete — content is now searchable by the agent.
@@ -315,9 +343,39 @@ export function KnowledgeBaseSection() {
             )}
             {crawlStatusText.toLowerCase() === "failed" && (
               <p className="text-[12px] text-red-500">
-                ✗ Crawl failed. Check the URL and try again.
+                ✗ Crawl failed. {((crawlStatus?.stored_pages ?? websiteSummary?.stored_pages ?? 0) > 0)
+                  ? "Pages already saved stay in the knowledge base."
+                  : "Check the URL and try again."}
               </p>
             )}
+          </div>
+        )}
+
+        {/* Persisted website data (DB truth — never auto-deleted) */}
+        {((websiteSummary?.stored_pages ?? 0) > 0 || (websiteSummary?.website_url && !crawlId)) && (
+          <div className="mt-3 border border-border rounded-lg p-3 bg-background space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Crawled website</p>
+                <p className="text-[12px] font-mono truncate text-foreground">
+                  {websiteSummary?.website_url ?? "—"}
+                </p>
+                <p className="text-[12px] text-muted-foreground mt-1">
+                  Saved: <span className="font-medium text-foreground">{websiteSummary?.stored_pages} pages ({websiteSummary?.stored_chunks} chunks)</span>
+                  {websiteSummary?.crawl_status && (
+                    <span className="ml-2 capitalize">· {websiteSummary.crawl_status}</span>
+                  )}
+                </p>
+              </div>
+              <button
+                onClick={onDeleteWebsite}
+                disabled={pendingWebsiteDelete}
+                className="inline-flex items-center gap-1.5 text-[12px] font-medium text-red-500 hover:text-red-600 disabled:opacity-50 shrink-0"
+              >
+                {pendingWebsiteDelete ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+                Delete
+              </button>
+            </div>
           </div>
         )}
       </div>

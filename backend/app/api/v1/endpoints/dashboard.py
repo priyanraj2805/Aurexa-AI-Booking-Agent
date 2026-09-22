@@ -53,7 +53,7 @@ def _filter_collected_data(raw: dict) -> dict:
         out[k] = v
     return out
 from urllib.parse import quote, unquote, urlsplit
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, BackgroundTasks, File, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -503,6 +503,7 @@ class CancelledBookingItem(BaseModel):
     booking_date: Optional[str] = None
     booking_time: Optional[str] = None
     cancelled_at: Optional[datetime] = None
+    booking_id: Optional[str] = None
 
 
 class CancelledBookingPageResponse(BaseModel):
@@ -564,13 +565,18 @@ class AgentConfigUpdate(BaseModel):
     business_name: Optional[str] = None
     require_otp: Optional[bool] = None
     require_phone_otp: Optional[bool] = None
-    max_booking_days_ahead: Optional[int] = None
+    max_booking_days_ahead: Optional[int] = Field(default=None, ge=1, le=366)
     session_retention_days: Optional[int] = Field(default=None, ge=7, le=365)
     session_cleanup_frequency: Optional[str] = None
     session_cleanup_hour_utc: Optional[int] = Field(default=None, ge=0, le=23)
     meeting_mode: Optional[MeetingMode] = None
     allow_hybrid_selection: Optional[bool] = None
     meeting_provider_default: Optional[MeetingProviderDefault] = None
+
+    @field_validator("max_booking_days_ahead")
+    @classmethod
+    def _leap_aware_horizon(cls, value):
+        return _check_horizon_cap(value, "max_booking_days_ahead")
 
 
 class SlotItem(BaseModel):
@@ -1231,7 +1237,10 @@ async def list_cancelled_bookings(
         predicates.append(
             or_(
                 ChatSession.state_data["name"].astext.ilike(like),
+                ChatSession.state_data["customer_name"].astext.ilike(like),
                 ChatSession.state_data["email"].astext.ilike(like),
+                ChatSession.state_data["customer_email"].astext.ilike(like),
+                ChatSession.state_data["phone"].astext.ilike(like),
             )
         )
     if from_date:
@@ -1247,35 +1256,69 @@ async def list_cancelled_bookings(
             raise HTTPException(status_code=422, detail="to_date must be YYYY-MM-DD")
         predicates.append(ChatSession.updated_at < td)
 
-    total = (
-        await db.execute(select(sa_func.count()).select_from(ChatSession).where(*predicates))
-    ).scalar_one()
-
+    # Fetch all matching CANCELLED sessions (latest first), then dedupe to
+    # one row per appointment. Book + cancel via lookup (web widget or
+    # WhatsApp) can touch two sessions (original booking session +
+    # cancel-lookup session) for the same appointment, so without this the
+    # page shows duplicates.
     result = await db.execute(
         select(ChatSession)
         .where(*predicates)
         .order_by(ChatSession.updated_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
     )
     sessions = result.scalars().all()
 
+    def _dedupe_key(data: dict, session_id: str) -> str:
+        email = str(data.get("email") or data.get("customer_email") or "").strip().lower()
+        phone_digits = "".join(
+            c for c in str(data.get("phone") or "") if c.isdigit()
+        )[-10:]
+        date = str(data.get("date") or "").strip()
+        if email and date:
+            return f"email:{email}|date:{date}"
+        if phone_digits and date:
+            return f"phone:{phone_digits}|date:{date}"
+        if email:
+            return f"email:{email}"
+        if phone_digits:
+            return f"phone:{phone_digits}"
+        return f"session:{session_id}"
+
+    seen: set = set()
     items = []
     for s in sessions:
         data = s.state_data or {}
+        # Prefer the stored cancelled booking id for dedupe so the original
+        # booking session and its cancel-lookup session collapse even if
+        # contact details differ slightly.
+        _bid = str(data.get("cancelled_booking_id") or "").strip()
+        _name = data.get("name") or data.get("customer_name") or ""
+        _email = data.get("email") or data.get("customer_email") or ""
+        # Skip aborted booking *requests* (legacy pre-booking CANCEL intent):
+        # no real booking was ever deleted, so no name/email/booking_id.
+        # Real cancellations always carry a name, an email, or a booking id.
+        if not _bid and not str(_name).strip() and not str(_email).strip():
+            continue
+        key = f"booking:{_bid}" if _bid else _dedupe_key(data, str(s.id))
+        if key in seen:
+            continue
+        seen.add(key)
         items.append(
             CancelledBookingItem(
                 id=str(s.id),
-                customer_name=data.get("name") or data.get("customer_name") or "Unknown",
-                customer_email=data.get("email") or data.get("customer_email") or "",
+                customer_name=str(_name).strip() or "Unknown",
+                customer_email=str(_email).strip(),
                 customer_phone=data.get("phone") or None,
                 booking_date=data.get("date") or None,
                 booking_time=data.get("time") or None,
                 cancelled_at=s.updated_at,
+                booking_id=_bid or None,
             )
         )
+    total = len(items)
+    paged = items[(page - 1) * page_size : page * page_size]
     return CancelledBookingPageResponse(
-        items=items, total=total, page=page, page_size=page_size
+        items=paged, total=total, page=page, page_size=page_size
     )
 
 
@@ -1449,6 +1492,31 @@ async def update_agent_config(
         config.require_phone_otp = update.require_phone_otp
     if update.max_booking_days_ahead is not None:
         config.max_booking_days_ahead = update.max_booking_days_ahead
+        # Bidirectional single-source sync: agent-config writes mirror into
+        # BusinessSchedule (the availability truth) + expire stale pickers.
+        try:
+            _sched_res = await db.execute(
+                select(BusinessSchedule).where(
+                    BusinessSchedule.org_id == user.org_id
+                )
+            )
+            _sched = _sched_res.scalars().first()
+            if _sched is None:
+                _sched = BusinessSchedule(org_id=user.org_id)
+                db.add(_sched)
+            _sched.booking_window_days = update.max_booking_days_ahead
+            from app.engine.booking_directive.service import (
+                DirectiveType as _DTExp2,
+            )
+            from app.engine.booking_directive.service import (
+                expire_pending_by_type as _expire_dirs2,
+            )
+
+            await _expire_dirs2(
+                db, user.org_id, [_DTExp2.SELECT_DATE, _DTExp2.SELECT_SLOT]
+            )
+        except Exception:
+            pass
     if update.session_retention_days is not None:
         config.session_retention_days = update.session_retention_days
     if update.session_cleanup_frequency is not None:
@@ -1849,6 +1917,15 @@ async def cancel_booking_admin(
 
     if chat_session:
         chat_session.session_status = "CANCELLED"
+        try:
+            _cs_data = dict(chat_session.state_data or {})
+            _cs_data["cancelled_booking_id"] = str(booking.id)
+            chat_session.state_data = _cs_data
+            from sqlalchemy.orm.attributes import flag_modified as _flag_mod2
+
+            _flag_mod2(chat_session, "state_data")
+        except Exception:
+            pass
         await db.commit()
 
     from app.core.org_notify import notify_org
@@ -3004,9 +3081,31 @@ class ScheduleResponse(BaseModel):
 
 class ScheduleUpdate(BaseModel):
     slot_duration_minutes: Optional[int] = None
-    booking_window_days: Optional[int] = None
+    # A year has 365 days (366 only when the window can include Feb 29 of a
+    # leap year) — enforced dynamically, not by a static cap.
+    booking_window_days: Optional[int] = Field(default=None, ge=1, le=366)
     timezone: Optional[str] = None
     days: Optional[List[ScheduleDayItem]] = None
+
+    @field_validator("booking_window_days")
+    @classmethod
+    def _leap_aware_horizon(cls, value):
+        return _check_horizon_cap(value, "booking_window_days")
+
+
+def _check_horizon_cap(value, field_name: str = "booking_window_days"):
+    """Leap-aware horizon ceiling shared by all write schemas."""
+    if value is None:
+        return None
+    from app.engine.scheduling_policy import max_horizon_days
+
+    cap = max_horizon_days()
+    if not (1 <= int(value) <= cap):
+        raise ValueError(
+            f"{field_name} must be between 1 and {cap} days "
+            f"(366 only when the booking window can include Feb 29 of a leap year)"
+        )
+    return value
 
 
 class ExceptionItem(BaseModel):
@@ -3158,6 +3257,23 @@ async def update_schedule(
 
     await db.commit()
     await db.refresh(sched)
+
+    # Hours/horizon changed: stored date/time prompts go stale instantly.
+    # Expire pending picker directives so the next turn regenerates them
+    # from the new schedule instead of showing yesterday's window.
+    if payload.booking_window_days is not None or payload.days is not None:
+        try:
+            from app.engine.booking_directive.service import (
+                DirectiveType as _DTExp,
+            )
+            from app.engine.booking_directive.service import (
+                expire_pending_by_type as _expire_dirs,
+            )
+
+            await _expire_dirs(db, user.org_id, [_DTExp.SELECT_DATE, _DTExp.SELECT_SLOT])
+            await db.commit()
+        except Exception:
+            pass
 
     days_result = await db.execute(
         select(ScheduleDay)
@@ -3526,8 +3642,13 @@ class OnboardingHoursDay(BaseModel):
 class OnboardingHours(BaseModel):
     timezone: str = Field(..., min_length=1)
     slot_duration_minutes: int = Field(..., ge=15, le=120)
-    booking_window_days: int = Field(..., ge=1, le=365)
+    booking_window_days: int = Field(..., ge=1, le=366)
     weekly_schedule: List[OnboardingHoursDay] = Field(..., min_length=7, max_length=7)
+
+    @field_validator("booking_window_days")
+    @classmethod
+    def _leap_aware_horizon(cls, value):
+        return _check_horizon_cap(value, "booking_window_days")
 
 
 class OnboardingAgent(BaseModel):

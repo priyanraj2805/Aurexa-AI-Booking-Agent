@@ -134,6 +134,7 @@ export interface CancelledBookingItem {
   booking_date: string | null;
   booking_time: string | null;
   cancelled_at: string | null;
+  booking_id?: string | null;
 }
 
 export interface ConversationItem {
@@ -615,6 +616,23 @@ export interface CrawlStatusResponse {
   crawl_id: string;
   status: string;
   pages_crawled?: number | null;
+  stored_pages?: number | null;
+  stored_chunks?: number | null;
+}
+
+export interface WebsiteSummary {
+  website_url?: string | null;
+  crawl_id?: string | null;
+  crawl_status?: string | null;
+  crawl_started_at?: string | null;
+  crawl_completed_at?: string | null;
+  total_pages_crawled?: number | null;
+  stored_pages: number;
+  stored_chunks: number;
+}
+
+export async function deleteWebsiteData(): Promise<{ success: boolean; deleted_chunks: number }> {
+  return api.del("/documents/website");
 }
 
 function useApiNullable<T>(path: string | null, deps: unknown[] = []) {
@@ -693,4 +711,8 @@ export function useCrawlStatus(crawlId: string | null) {
     crawlId ? `/documents/website/crawl/status/${crawlId}` : null,
     [crawlId]
   );
+}
+
+export function useWebsiteSummary() {
+  return useApiNullable<WebsiteSummary>("/documents/website", []);
 }

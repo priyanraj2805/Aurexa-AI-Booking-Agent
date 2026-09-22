@@ -27,10 +27,31 @@ import { PanelLeftIcon } from "lucide-react"
 
 const SIDEBAR_COOKIE_NAME = "sidebar_state"
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
-const SIDEBAR_WIDTH = "16rem"
 const SIDEBAR_WIDTH_MOBILE = "18rem"
 const SIDEBAR_WIDTH_ICON = "3rem"
 const SIDEBAR_KEYBOARD_SHORTCUT = "b"
+
+// Drag-to-resize bounds for the expanded sidebar (persisted in localStorage).
+const SIDEBAR_WIDTH_STORAGE_KEY = "sidebar_width_px"
+const SIDEBAR_WIDTH_DEFAULT_PX = 256 // 16rem
+const SIDEBAR_WIDTH_MIN_PX = 200
+const SIDEBAR_WIDTH_MAX_PX = 400
+
+function clampSidebarWidth(px: number) {
+  if (!Number.isFinite(px)) return SIDEBAR_WIDTH_DEFAULT_PX
+  return Math.min(SIDEBAR_WIDTH_MAX_PX, Math.max(SIDEBAR_WIDTH_MIN_PX, Math.round(px)))
+}
+
+function readStoredSidebarWidth(): number {
+  if (typeof window === "undefined") return SIDEBAR_WIDTH_DEFAULT_PX
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)
+    if (raw != null) return clampSidebarWidth(Number.parseInt(raw, 10))
+  } catch {
+    // Storage unavailable (private mode etc.) — fall back to default.
+  }
+  return SIDEBAR_WIDTH_DEFAULT_PX
+}
 
 type SidebarContextProps = {
   state: "expanded" | "collapsed"
@@ -40,6 +61,9 @@ type SidebarContextProps = {
   setOpenMobile: (open: boolean) => void
   isMobile: boolean
   toggleSidebar: () => void
+  widthPx: number
+  setWidthPx: (px: number) => void
+  resetWidth: () => void
 }
 
 const SidebarContext = React.createContext<SidebarContextProps | null>(null)
@@ -93,6 +117,21 @@ function SidebarProvider({
     return isMobile ? setOpenMobile((open) => !open) : setOpen((open) => !open)
   }, [isMobile, setOpen, setOpenMobile])
 
+  // Resizable expanded width (drag the sidebar rail). Persisted per browser.
+  const [widthPx, _setWidthPx] = React.useState<number>(readStoredSidebarWidth)
+  const setWidthPx = React.useCallback((px: number) => {
+    const next = clampSidebarWidth(px)
+    _setWidthPx(next)
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(next))
+    } catch {
+      // Storage unavailable — width still applies for this session.
+    }
+  }, [])
+  const resetWidth = React.useCallback(() => {
+    setWidthPx(SIDEBAR_WIDTH_DEFAULT_PX)
+  }, [setWidthPx])
+
   // Adds a keyboard shortcut to toggle the sidebar.
   React.useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -122,8 +161,22 @@ function SidebarProvider({
       openMobile,
       setOpenMobile,
       toggleSidebar,
+      widthPx,
+      setWidthPx,
+      resetWidth,
     }),
-    [state, open, setOpen, isMobile, openMobile, setOpenMobile, toggleSidebar]
+    [
+      state,
+      open,
+      setOpen,
+      isMobile,
+      openMobile,
+      setOpenMobile,
+      toggleSidebar,
+      widthPx,
+      setWidthPx,
+      resetWidth,
+    ]
   )
 
   return (
@@ -132,13 +185,16 @@ function SidebarProvider({
         data-slot="sidebar-wrapper"
         style={
           {
-            "--sidebar-width": SIDEBAR_WIDTH,
+            "--sidebar-width": `${widthPx}px`,
             "--sidebar-width-icon": SIDEBAR_WIDTH_ICON,
             ...style,
           } as React.CSSProperties
         }
         className={cn(
-          "group/sidebar-wrapper flex min-h-svh w-full has-data-[variant=inset]:bg-sidebar",
+          // overflow-x-clip: the fixed sidebar must never be overlapped by
+          // page-level horizontal scrolling — wide content scrolls inside
+          // its own card instead of sliding under the menu.
+          "group/sidebar-wrapper flex min-h-svh w-full overflow-x-clip has-data-[variant=inset]:bg-sidebar",
           className
         )}
         {...props}
@@ -277,19 +333,160 @@ function SidebarTrigger({
   )
 }
 
-function SidebarRail({ className, ...props }: React.ComponentProps<"button">) {
-  const { toggleSidebar } = useSidebar()
+function SidebarRail({ className, onClick, ...props }: React.ComponentProps<"button">) {
+  const { toggleSidebar, state, isMobile, widthPx, setWidthPx, resetWidth } =
+    useSidebar()
+  const dragRef = React.useRef<{
+    pointerId: number
+    startX: number
+    startWidth: number
+    moved: boolean
+    flip: 1 | -1
+    wrapper: HTMLElement | null
+  } | null>(null)
+  const justDraggedRef = React.useRef(false)
+  const lastClickAtRef = React.useRef(0)
+
+  const setWrapperVar = (wrapper: HTMLElement | null, px: number) => {
+    if (!wrapper) return
+    wrapper.style.setProperty("--sidebar-width", `${clampSidebarWidth(px)}px`)
+    wrapper.dataset.resizing = "true"
+  }
+  const clearWrapperResizing = (wrapper: HTMLElement | null) => {
+    if (!wrapper) return
+    delete wrapper.dataset.resizing
+  }
+
+  // Safety net: if pointer capture is unavailable and the release lands
+  // off-button, never leave the page in a resizing/select-locked state.
+  React.useEffect(() => {
+    const cancelDrag = () => {
+      const drag = dragRef.current
+      if (!drag) return
+      dragRef.current = null
+      try {
+        document.body.style.userSelect = ""
+      } catch {
+        // Non-DOM environment — ignore.
+      }
+      clearWrapperResizing(drag.wrapper)
+    }
+    window.addEventListener("pointerup", cancelDrag)
+    window.addEventListener("pointercancel", cancelDrag)
+    return () => {
+      window.removeEventListener("pointerup", cancelDrag)
+      window.removeEventListener("pointercancel", cancelDrag)
+    }
+  }, [])
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    // A new press always clears any stale drag flag from an older gesture.
+    justDraggedRef.current = false
+    // Drag-to-resize only in expanded desktop mode; otherwise the rail
+    // keeps its plain click-to-toggle behavior.
+    if (isMobile || state !== "expanded" || e.button !== 0) return
+    try {
+      // Avoid selecting page text while stretching the sidebar.
+      document.body.style.userSelect = "none"
+    } catch {
+      // Non-DOM environment — ignore.
+    }
+    const el = e.currentTarget
+    const wrapper = el.closest(
+      '[data-slot="sidebar-wrapper"]'
+    ) as HTMLElement | null
+    dragRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startWidth: widthPx,
+      moved: false,
+      flip: el.closest('[data-side="right"]') ? -1 : 1,
+      wrapper,
+    }
+    try {
+      el.setPointerCapture(e.pointerId)
+    } catch {
+      // Pointer capture unsupported — drag still works via window fallback.
+    }
+  }
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = dragRef.current
+    if (!drag || e.pointerId !== drag.pointerId) return
+    const dx = (e.clientX - drag.startX) * drag.flip
+    if (!drag.moved && Math.abs(e.clientX - drag.startX) < 4) return
+    drag.moved = true
+    justDraggedRef.current = true
+    setWrapperVar(drag.wrapper, drag.startWidth + dx)
+    // Sync React state (and persistence) live; the value matches what was
+    // just written to the DOM, so there is no visual jump on re-render.
+    setWidthPx(drag.startWidth + dx)
+    e.preventDefault()
+  }
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = dragRef.current
+    if (!drag || e.pointerId !== drag.pointerId) return
+    dragRef.current = null
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    } catch {
+      // Already released — nothing to do.
+    }
+    try {
+      document.body.style.userSelect = ""
+    } catch {
+      // Non-DOM environment — ignore.
+    }
+    clearWrapperResizing(drag.wrapper)
+    if (drag.moved) {
+      // Final commit (identical to the last live value) + persistence.
+      const raw =
+        drag.wrapper?.style.getPropertyValue("--sidebar-width") ?? ""
+      const px = Number.parseInt(raw, 10)
+      setWidthPx(Number.isFinite(px) ? px : drag.startWidth)
+    }
+  }
+
+  const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    if (justDraggedRef.current) {
+      // This click is the tail of a drag — swallow it, don't toggle.
+      justDraggedRef.current = false
+      e.preventDefault()
+      e.stopPropagation()
+      return
+    }
+    // Second click of a double-click is handled by onDoubleClick (reset),
+    // so skip the toggle to avoid a collapse flicker.
+    const now = Date.now()
+    if (now - lastClickAtRef.current < 350) {
+      lastClickAtRef.current = 0
+      return
+    }
+    lastClickAtRef.current = now
+    onClick?.(e)
+    if (!e.defaultPrevented) toggleSidebar()
+  }
 
   return (
     <button
       data-sidebar="rail"
       data-slot="sidebar-rail"
-      aria-label="Toggle Sidebar"
+      aria-label="Drag to resize sidebar, click to collapse"
       tabIndex={-1}
-      onClick={toggleSidebar}
-      title="Toggle Sidebar"
+      onClick={handleClick}
+      onDoubleClick={(e) => {
+        if (isMobile || state !== "expanded") return
+        e.preventDefault()
+        resetWidth()
+      }}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      title="Drag to resize · Click to collapse · Double-click to reset"
       className={cn(
-        "absolute inset-y-0 z-20 hidden w-4 transition-all ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 after:absolute after:inset-y-0 after:start-1/2 after:w-[2px] hover:after:bg-sidebar-border sm:flex ltr:-translate-x-1/2 rtl:-translate-x-1/2",
+        "group/rail absolute inset-y-0 z-20 hidden w-4 touch-none transition-all ease-linear select-none group-data-[side=left]:-right-4 group-data-[side=right]:left-0 after:absolute after:inset-y-0 after:start-1/2 after:w-[2px] hover:after:bg-sidebar-border sm:flex ltr:-translate-x-1/2 rtl:-translate-x-1/2",
         "in-data-[side=left]:cursor-w-resize in-data-[side=right]:cursor-e-resize",
         "[[data-side=left][data-state=collapsed]_&]:cursor-e-resize [[data-side=right][data-state=collapsed]_&]:cursor-w-resize",
         "group-data-[collapsible=offcanvas]:translate-x-0 group-data-[collapsible=offcanvas]:after:left-full hover:group-data-[collapsible=offcanvas]:bg-sidebar",
@@ -298,7 +495,13 @@ function SidebarRail({ className, ...props }: React.ComponentProps<"button">) {
         className
       )}
       {...props}
-    />
+    >
+      {/* Drag grip — fades in on hover so the stretch affordance is visible */}
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute top-1/2 left-1/2 hidden h-12 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-sidebar-border opacity-0 transition-opacity duration-150 group-hover/rail:opacity-100 group-data-[collapsible=icon]:hidden"
+      />
+    </button>
   )
 }
 
@@ -307,7 +510,10 @@ function SidebarInset({ className, ...props }: React.ComponentProps<"main">) {
     <main
       data-slot="sidebar-inset"
       className={cn(
-        "relative flex w-full flex-1 flex-col bg-background md:peer-data-[variant=inset]:m-2 md:peer-data-[variant=inset]:ml-0 md:peer-data-[variant=inset]:rounded-xl md:peer-data-[variant=inset]:shadow-sm md:peer-data-[variant=inset]:peer-data-[state=collapsed]:ml-2",
+        // min-w-0: lets the content shrink inside the flex shell instead of
+        // forcing page-level horizontal overflow that would slide content
+        // underneath the fixed-position sidebar.
+        "relative flex w-full min-w-0 flex-1 flex-col bg-background md:peer-data-[variant=inset]:m-2 md:peer-data-[variant=inset]:ml-0 md:peer-data-[variant=inset]:rounded-xl md:peer-data-[variant=inset]:shadow-sm md:peer-data-[variant=inset]:peer-data-[state=collapsed]:ml-2",
         className
       )}
       {...props}

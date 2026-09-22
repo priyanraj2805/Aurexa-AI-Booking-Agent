@@ -280,12 +280,30 @@
       this._buildShell();
       // Poll config every 30s so admin mode changes appear without page reload
       this._startConfigPolling();
+      // Re-check the browser zone when the tab regains focus — VPN toggles
+      // typically happen while the page sits in the background.
+      try {
+        this._tzVisibilityHandler = () => {
+          if (document.visibilityState === "visible") this._refreshTimezone(true);
+        };
+        document.addEventListener("visibilitychange", this._tzVisibilityHandler);
+        this._tzFocusHandler = () => this._refreshTimezone(true);
+        window.addEventListener("focus", this._tzFocusHandler);
+      } catch (_) {}
     }
 
     disconnectedCallback() {
       try {
         if (this._configPollInterval) clearInterval(this._configPollInterval);
         this._configPollInterval = null;
+        if (this._tzVisibilityHandler) {
+          document.removeEventListener("visibilitychange", this._tzVisibilityHandler);
+          this._tzVisibilityHandler = null;
+        }
+        if (this._tzFocusHandler) {
+          window.removeEventListener("focus", this._tzFocusHandler);
+          this._tzFocusHandler = null;
+        }
       } catch (_) {}
     }
 
@@ -709,6 +727,69 @@
       }
     }
 
+    // Re-resolve the browser timezone (VPN/network changes mid-session).
+    // Manual user selection always wins and is never overwritten. Returns
+    // true when the zone actually changed.
+    _refreshTimezone(announce = false) {
+      try {
+        if (this.timezoneSource === "user_selected") return false;
+        const live = this._detectBrowserTimezone();
+        if (live && live !== this.userTimezone) {
+          const prev = this.userTimezone;
+          this.userTimezone = live;
+          this.timezoneSource = "detected";
+          this.timezoneFallbackUsed = false;
+          this.timezoneFallbackReason = null;
+          this._timezoneNoticeShown = false;
+          this._persistTimezonePreference();
+          console.log("[DotStark] timezone updated:", prev, "->", live);
+          if (announce && this._msgList) {
+            this._appendSystem(
+              `Timezone updated to ${this._formatTimezoneDisplayName(live)} — upcoming times will use the new zone.`,
+            );
+          }
+          return true;
+        }
+      } catch (_) {}
+      return false;
+    }
+
+    // Latest bookable date (ISO) = today + horizon, for picker clamping.
+    _maxDateISO(timezone = null, daysAhead = 60) {
+      const base = this._currentDateISO(timezone);
+      try {
+        const parts = String(base).split("-").map(Number);
+        const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+        dt.setUTCDate(dt.getUTCDate() + Math.max(0, Number(daysAhead) || 0));
+        const yy = dt.getUTCFullYear();
+        const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+        const dd = String(dt.getUTCDate()).padStart(2, "0");
+        return `${yy}-${mm}-${dd}`;
+      } catch (e) {
+        return base;
+      }
+    }
+
+    _horizonDays() {
+      // Leap-aware ceiling mirroring the backend: 366 only when a Feb 29
+      // falls inside the next 366 days, otherwise 365.
+      const raw = Number(this._agentConfig?.max_booking_days_ahead);
+      const cap = (() => {
+        const now = new Date();
+        const isLeap = (y) => y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0);
+        const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const end = new Date(start.getTime() + 366 * 864e5);
+        for (let y = start.getFullYear(); y <= end.getFullYear(); y++) {
+          if (!isLeap(y)) continue;
+          const feb29 = new Date(y, 1, 29);
+          if (feb29 >= start && feb29 <= end) return 366;
+        }
+        return 365;
+      })();
+      if (!Number.isFinite(raw)) return 60;
+      return Math.min(cap, Math.max(1, Math.round(raw)));
+    }
+
     _buildAvailabilityRequestUrl(dateValue) {
       const params = new URLSearchParams();
       params.set("date", dateValue);
@@ -994,6 +1075,11 @@
 
       const thinkingEl = this._appendTyping();
 
+      // Re-resolve the browser zone every turn: a VPN/network change
+      // mid-session must move the booking timezone with it. The backend
+      // stores whatever we send here, so a stale value would stick forever.
+      this._refreshTimezone();
+
       try {
         const payload = { message: text };
         if (this.sessionId) payload.session_id = this.sessionId;
@@ -1060,7 +1146,9 @@
           if (agentMessage) {
             this._appendBubble("agent", agentMessage);
             this._pendingRefreshSkips.push({ role: "agent", content: agentMessage });
-          } else {
+          } else if (directive !== "HUMAN_ACTIVE") {
+            // HUMAN_ACTIVE legitimately carries an empty message (the text
+            // was accepted for the human agent) — never show the error bubble.
             this._appendBubble(
               "agent",
               "I received your message, but something went wrong with the reply.",
@@ -1132,9 +1220,16 @@
           );
           this._clearSkipAction();
         } else if (directive === "HUMAN_ACTIVE") {
-          // Human agent has taken over - show notification and start polling
+          // Human agent has taken over — show the join notice only once per
+          // handoff (every customer message returns HUMAN_ACTIVE, so an
+          // unguarded notice would repeat after each message). Shares the
+          // _humanJoinedShownFor guard with the WebSocket path so the two
+          // cannot double-notice in either arrival order.
           this._clearDirectiveCards();
-          this._appendSystem("👨‍💼 Support agent joined the chat");
+          if (!this._humanActive && !this._humanJoinedShownFor) {
+            this._appendSystem("👨‍💼 Support agent joined the chat");
+            this._humanJoinedShownFor = this.sessionId;
+          }
           this._updateInputMode("text", "Type a message...");
           this._clearSkipAction();
           this._humanActive = true;
@@ -1474,12 +1569,33 @@
       input.type = "date";
       input.className = "widget-date-input";
       input.min = this._currentDateISO(this.userTimezone);
+      // Clamp the picker to the booking horizon — beyond this the backend
+      // rejects the date, so don't offer it. Closed weekdays get a hint
+      // (native date inputs can't disable individual days).
+      input.max = this._maxDateISO(this.userTimezone, this._horizonDays());
       if (this.selectedDate) {
         input.value = this.selectedDate;
       } else {
         input.value = input.min;
       }
       div.appendChild(input);
+      {
+        const closedDays = Array.isArray(this._agentConfig?.closed_weekdays)
+          ? this._agentConfig.closed_weekdays
+          : [];
+        const dayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+        const closedNames = closedDays
+          .map((d) => dayNames[d] || "")
+          .filter(Boolean)
+          .join(", ");
+        const hint = document.createElement("p");
+        hint.className = "field-description";
+        hint.textContent =
+          `Book within ${this._horizonDays()} days ahead` +
+          (closedNames ? ` · Closed: ${closedNames}` : "") +
+          ".";
+        div.appendChild(hint);
+      }
 
       const btn = document.createElement("button");
       btn.className = "widget-field-btn";

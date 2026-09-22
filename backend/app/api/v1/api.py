@@ -23,6 +23,8 @@ from app.api.v1.endpoints import (
     notifications,
     razorpay,
     razorpay_route,
+    catalog,
+    roles,
 )
 from app.core.config import settings
 from app.api.v1.endpoints.internal import bridge as internal_bridge
@@ -57,6 +59,12 @@ api_router.include_router(account.router, prefix="/account", tags=["account"])
 api_router.include_router(
     notifications.router, prefix="/dashboard/notifications", tags=["notifications"]
 )
+
+# Service catalog: generic units / providers / fees (org-scoped CRUD)
+api_router.include_router(catalog.router, prefix="/catalog", tags=["catalog"])
+
+# GCP-style IAM policy management: custom roles, bindings, deny rules
+api_router.include_router(roles.router, prefix="/roles", tags=["roles"])
 
 # Razorpay Route payments + provider payouts (always mounted; routes themselves enforce auth / org scope)
 api_router.include_router(razorpay.router, prefix="", tags=["razorpay"])

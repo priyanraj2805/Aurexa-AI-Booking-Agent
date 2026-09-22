@@ -1,0 +1,121 @@
+"""Knowledge grounding guards — relevance gating, answer verification,
+entity blocking. All deterministic, all on live data (no hardcoded KB)."""
+from app.engine import knowledge_guards as guards
+
+
+def test_gate_keeps_overlapping_chunks():
+    chunks = [
+        {"content": "Our clinic opens daily from 9 AM to 6 PM for consultations."},
+        {"content": "The football match starts at midnight under floodlights."},
+    ]
+    kept, dropped_all = guards.gate_chunks_by_relevance(
+        chunks, "what are your clinic hours?"
+    )
+    assert len(kept) == 1
+    assert "clinic" in kept[0]["content"]
+    assert dropped_all is False
+
+
+def test_gate_drops_everything_unrelated():
+    chunks = [
+        {"content": "The football match starts at midnight under floodlights."},
+    ]
+    kept, dropped_all = guards.gate_chunks_by_relevance(
+        chunks, "what are your clinic consultation fees?"
+    )
+    assert kept == []
+    assert dropped_all is True
+
+
+def test_gate_respects_rerank_score():
+    chunks = [{"content": "Totally unrelated words here.", "rerank_score": 8}]
+    kept, dropped_all = guards.gate_chunks_by_relevance(chunks, "clinic hours?")
+    assert len(kept) == 1
+    assert dropped_all is False
+
+
+def test_gate_empty_input():
+    kept, dropped_all = guards.gate_chunks_by_relevance([], "anything?")
+    assert kept == []
+    assert dropped_all is False
+
+
+def test_verify_grounded_answer_passes():
+    chunks = [{"content": "Our clinic opens daily from 9 AM to 6 PM."}]
+    ok, reason = guards.verify_knowledge_answer(
+        "We are open daily from 9 AM to 6 PM.", chunks
+    )
+    assert ok is True
+    assert reason == "grounded"
+
+
+def test_verify_honest_decline_passes():
+    ok, reason = guards.verify_knowledge_answer(
+        "Sorry, I don't have that information right now.", []
+    )
+    assert ok is True
+    assert reason == "decline"
+
+
+def test_verify_ungrounded_answer_fails():
+    chunks = [{"content": "Our clinic opens daily from 9 AM to 6 PM."}]
+    ok, reason = guards.verify_knowledge_answer(
+        "Our head surgeon Dr. Invented charges premium rates on Mars.", chunks
+    )
+    assert ok is False
+    assert reason == "ungrounded"
+
+
+def test_unlisted_phone_blocked_but_listed_passes():
+    facts = ["Call our clinic at +91 98765 43210 for appointments."]
+    assert guards.find_unlisted_entities(
+        "Call us at +91 98765 43210.", facts
+    ) == []
+    blocked = guards.find_unlisted_entities("Call us at +91 11111 22222.", facts)
+    assert blocked == ["+91 11111 22222"]
+
+
+def test_unlisted_price_blocked_but_customer_echo_passes():
+    facts = ["Consultation fee is INR 500."]
+    assert guards.find_unlisted_entities("Your fee is INR 500.", facts) == []
+    blocked = guards.find_unlisted_entities(
+        "That will be Rs 5000 payable now.", facts
+    )
+    assert len(blocked) == 1
+    assert "5000" in blocked[0]
+
+
+def test_guard_final_text_pass_through_and_block():
+    body = "Hello! How can I help you today?"
+    safe, blocked, ents = guards.guard_final_text(
+        body, org_facts=["Acme Clinic"], session_details=[]
+    )
+    assert blocked is False
+    assert safe == body
+    assert ents == []
+
+    body2 = "Sure, call Dr. X at +91 11111 22222 to confirm."
+    safe2, blocked2, ents2 = guards.guard_final_text(
+        body2, org_facts=["Acme Clinic"], session_details=[]
+    )
+    assert blocked2 is True
+    assert ents2 == ["+91 11111 22222"]
+    assert "don't have that information" in safe2
+
+
+def test_guard_final_text_payment_skips_price():
+    body = "Please pay INR 500 via this Razorpay order link."
+    safe, blocked, _ = guards.guard_final_text(
+        body, org_facts=["Acme Clinic"], session_details=[]
+    )
+    assert blocked is False
+    assert safe == body
+
+
+def test_no_hardcoded_business_content_in_module():
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[2] / "app" / "engine" / "knowledge_guards.py"
+    text = src.read_text(encoding="utf-8")
+    for literal in ("98765", "reediff", "example.com", "Dr. ", "Rs 500", "9 AM to 6 PM"):
+        assert literal not in text, f"hardcoded business content leaked: {literal}"

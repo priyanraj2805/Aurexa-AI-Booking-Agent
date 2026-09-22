@@ -1,0 +1,621 @@
+"""Service catalog CRUD (generic Units / Providers / Fees).
+
+Org-admin surface for ANY booking business: units are departments/branches/
+lanes, providers are doctors/stylists/coaches. All isolation derives
+``org_id`` from the authenticated user; mutating ops additionally refuse
+impersonated sessions (same convention as documents.py).
+"""
+
+import uuid
+from datetime import datetime, timezone
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+
+from app.api.v1.endpoints.auth import deny_impersonation, get_current_user
+from app.core.rbac import require_permission
+from app.db.database import get_db
+from app.models.service_unit import Provider, ProviderFee, ServiceUnit, UnitProvider
+from app.models.user import User
+
+# Pilot RBAC surface: every catalog route requires at least catalog.view
+# (DB-loaded per request); mutating routes additionally require
+# catalog.manage. Other dashboard routes keep legacy any-active-user access
+# until they are migrated one surface at a time.
+router = APIRouter(dependencies=[Depends(require_permission("catalog.view"))])
+
+
+# ── Schemas ────────────────────────────────────────────────────────────────
+
+class UnitCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    description: Optional[str] = Field(default=None, max_length=500)
+    is_active: bool = True
+
+
+class UnitUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    description: Optional[str] = Field(default=None, max_length=500)
+    is_active: Optional[bool] = None
+
+
+class UnitOut(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    is_active: bool
+    providers_count: int = 0
+
+
+class ProviderCreate(BaseModel):
+    full_name: str = Field(..., min_length=1, max_length=255)
+    role_label: Optional[str] = Field(default=None, max_length=120)
+    email: Optional[str] = Field(default=None, max_length=255)
+    phone: Optional[str] = Field(default=None, max_length=50)
+    is_active: bool = True
+
+
+class ProviderUpdate(BaseModel):
+    full_name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    role_label: Optional[str] = Field(default=None, max_length=120)
+    email: Optional[str] = Field(default=None, max_length=255)
+    phone: Optional[str] = Field(default=None, max_length=50)
+    is_active: Optional[bool] = None
+
+
+class ProviderOut(BaseModel):
+    id: str
+    full_name: str
+    role_label: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    is_active: bool
+    units: List[str] = []
+
+
+class AssignIn(BaseModel):
+    provider_id: str
+    is_primary: bool = False
+
+
+class FeeCreate(BaseModel):
+    unit_id: Optional[str] = None
+    provider_id: Optional[str] = None
+    amount_paise: int = Field(..., gt=0)
+    currency: str = Field(default="INR", max_length=10)
+    label: Optional[str] = Field(default=None, max_length=120)
+    is_active: bool = True
+
+
+class FeeUpdate(BaseModel):
+    amount_paise: Optional[int] = Field(default=None, gt=0)
+    currency: Optional[str] = Field(default=None, max_length=10)
+    label: Optional[str] = Field(default=None, max_length=120)
+    is_active: Optional[bool] = None
+
+
+class FeeOut(BaseModel):
+    id: str
+    unit_id: Optional[str] = None
+    unit_name: Optional[str] = None
+    provider_id: Optional[str] = None
+    provider_name: Optional[str] = None
+    amount_paise: int
+    currency: str
+    label: Optional[str] = None
+    is_active: bool
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+async def _get_unit(db: AsyncSession, org_id, unit_id: str) -> ServiceUnit:
+    unit = (
+        await db.execute(
+            select(ServiceUnit).where(
+                ServiceUnit.id == unit_id, ServiceUnit.org_id == org_id
+            )
+        )
+    ).scalars().first()
+    if unit is None:
+        raise HTTPException(status_code=404, detail="Unit not found")
+    return unit
+
+
+async def _get_provider(db: AsyncSession, org_id, provider_id: str) -> Provider:
+    provider = (
+        await db.execute(
+            select(Provider).where(
+                Provider.id == provider_id, Provider.org_id == org_id
+            )
+        )
+    ).scalars().first()
+    if provider is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    return provider
+
+
+# ── Units ──────────────────────────────────────────────────────────────────
+
+@router.get("/units", response_model=List[UnitOut])
+async def list_units(
+    include_inactive: bool = Query(default=True),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    q = select(ServiceUnit).where(ServiceUnit.org_id == user.org_id)
+    if not include_inactive:
+        q = q.where(ServiceUnit.is_active.is_(True))
+    rows = (await db.execute(q.order_by(ServiceUnit.name))).scalars().all()
+    out = []
+    for u in rows:
+        n = (
+            await db.execute(
+                select(UnitProvider).where(UnitProvider.unit_id == u.id)
+            )
+        )
+        count = len(n.scalars().all())
+        out.append(
+            UnitOut(
+                id=str(u.id),
+                name=u.name,
+                description=u.description,
+                is_active=bool(u.is_active),
+                providers_count=count,
+            )
+        )
+    return out
+
+
+@router.post("/units", response_model=UnitOut, status_code=201)
+async def create_unit(
+    data: UnitCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    _perm: None = Depends(require_permission("catalog.manage")),
+):
+    unit = ServiceUnit(
+        id=uuid.uuid4(),
+        org_id=user.org_id,
+        name=data.name.strip(),
+        description=(data.description or "").strip() or None,
+        is_active=data.is_active,
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    if not unit.name:
+        raise HTTPException(status_code=422, detail="Unit name is required")
+    db.add(unit)
+    await db.commit()
+    await db.refresh(unit)
+    return UnitOut(
+        id=str(unit.id),
+        name=unit.name,
+        description=unit.description,
+        is_active=bool(unit.is_active),
+        providers_count=0,
+    )
+
+
+@router.get("/units/{unit_id}", response_model=UnitOut)
+async def get_unit(
+    unit_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    unit = await _get_unit(db, user.org_id, unit_id)
+    n = (
+        await db.execute(
+            select(UnitProvider).where(UnitProvider.unit_id == unit.id)
+        )
+    )
+    return UnitOut(
+        id=str(unit.id),
+        name=unit.name,
+        description=unit.description,
+        is_active=bool(unit.is_active),
+        providers_count=len(n.scalars().all()),
+    )
+
+
+@router.patch("/units/{unit_id}", response_model=UnitOut)
+async def update_unit(
+    unit_id: str,
+    data: UnitUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    _perm: None = Depends(require_permission("catalog.manage")),
+):
+    unit = await _get_unit(db, user.org_id, unit_id)
+    if data.name is not None:
+        name = data.name.strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Unit name is required")
+        unit.name = name
+    if data.description is not None:
+        unit.description = data.description.strip() or None
+    if data.is_active is not None:
+        unit.is_active = bool(data.is_active)
+    unit.updated_at = _now()
+    await db.commit()
+    await db.refresh(unit)
+    return await get_unit(unit_id, db, user)
+
+
+@router.delete("/units/{unit_id}", status_code=204)
+async def delete_unit(
+    unit_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    _perm: None = Depends(require_permission("catalog.manage")),
+):
+    unit = await _get_unit(db, user.org_id, unit_id)
+    await db.delete(unit)
+    await db.commit()
+    return None
+
+
+# ── Providers ──────────────────────────────────────────────────────────────
+
+@router.get("/providers", response_model=List[ProviderOut])
+async def list_providers(
+    include_inactive: bool = Query(default=True),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    q = select(Provider).where(Provider.org_id == user.org_id)
+    if not include_inactive:
+        q = q.where(Provider.is_active.is_(True))
+    rows = (await db.execute(q.order_by(Provider.full_name))).scalars().all()
+    out = []
+    for p in rows:
+        links = (
+            await db.execute(
+                select(UnitProvider).where(UnitProvider.provider_id == p.id)
+            )
+        ).scalars().all()
+        out.append(
+            ProviderOut(
+                id=str(p.id),
+                full_name=p.full_name,
+                role_label=p.role_label,
+                email=p.email,
+                phone=p.phone,
+                is_active=bool(p.is_active),
+                units=[str(a.unit_id) for a in links],
+            )
+        )
+    return out
+
+
+@router.post("/providers", response_model=ProviderOut, status_code=201)
+async def create_provider(
+    data: ProviderCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    _perm: None = Depends(require_permission("catalog.manage")),
+):
+    provider = Provider(
+        id=uuid.uuid4(),
+        org_id=user.org_id,
+        full_name=data.full_name.strip(),
+        role_label=(data.role_label or "").strip() or None,
+        email=(data.email or "").strip() or None,
+        phone=(data.phone or "").strip() or None,
+        is_active=data.is_active,
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    if not provider.full_name:
+        raise HTTPException(status_code=422, detail="Provider name is required")
+    db.add(provider)
+    await db.commit()
+    await db.refresh(provider)
+    return ProviderOut(
+        id=str(provider.id),
+        full_name=provider.full_name,
+        role_label=provider.role_label,
+        email=provider.email,
+        phone=provider.phone,
+        is_active=bool(provider.is_active),
+        units=[],
+    )
+
+
+@router.get("/providers/{provider_id}", response_model=ProviderOut)
+async def get_provider(
+    provider_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    provider = await _get_provider(db, user.org_id, provider_id)
+    links = (
+        await db.execute(
+            select(UnitProvider).where(UnitProvider.provider_id == provider.id)
+        )
+    ).scalars().all()
+    return ProviderOut(
+        id=str(provider.id),
+        full_name=provider.full_name,
+        role_label=provider.role_label,
+        email=provider.email,
+        phone=provider.phone,
+        is_active=bool(provider.is_active),
+        units=[str(a.unit_id) for a in links],
+    )
+
+
+@router.patch("/providers/{provider_id}", response_model=ProviderOut)
+async def update_provider(
+    provider_id: str,
+    data: ProviderUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    _perm: None = Depends(require_permission("catalog.manage")),
+):
+    provider = await _get_provider(db, user.org_id, provider_id)
+    if data.full_name is not None:
+        name = data.full_name.strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Provider name is required")
+        provider.full_name = name
+    if data.role_label is not None:
+        provider.role_label = data.role_label.strip() or None
+    if data.email is not None:
+        provider.email = data.email.strip() or None
+    if data.phone is not None:
+        provider.phone = data.phone.strip() or None
+    if data.is_active is not None:
+        provider.is_active = bool(data.is_active)
+    provider.updated_at = _now()
+    await db.commit()
+    await db.refresh(provider)
+    return await get_provider(provider_id, db, user)
+
+
+@router.delete("/providers/{provider_id}", status_code=204)
+async def delete_provider(
+    provider_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    _perm: None = Depends(require_permission("catalog.manage")),
+):
+    provider = await _get_provider(db, user.org_id, provider_id)
+    await db.delete(provider)
+    await db.commit()
+    return None
+
+
+# ── Assignments ────────────────────────────────────────────────────────────
+
+@router.get("/units/{unit_id}/providers", response_model=List[ProviderOut])
+async def unit_providers(
+    unit_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    unit = await _get_unit(db, user.org_id, unit_id)
+    links = (
+        await db.execute(
+            select(UnitProvider).where(UnitProvider.unit_id == unit.id)
+        )
+    ).scalars().all()
+    out = []
+    for a in links:
+        p = await _get_provider(db, user.org_id, str(a.provider_id))
+        out.append(
+            ProviderOut(
+                id=str(p.id),
+                full_name=p.full_name,
+                role_label=p.role_label,
+                email=p.email,
+                phone=p.phone,
+                is_active=bool(p.is_active),
+                units=[str(unit.id)],
+            )
+        )
+    return out
+
+
+@router.post("/units/{unit_id}/providers", status_code=201)
+async def assign_provider(
+    unit_id: str,
+    data: AssignIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    _perm: None = Depends(require_permission("catalog.manage")),
+):
+    unit = await _get_unit(db, user.org_id, unit_id)
+    provider = await _get_provider(db, user.org_id, data.provider_id)
+    existing = (
+        await db.execute(
+            select(UnitProvider).where(
+                UnitProvider.unit_id == unit.id,
+                UnitProvider.provider_id == provider.id,
+            )
+        )
+    ).scalars().first()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Provider already assigned to this unit")
+    link = UnitProvider(
+        id=uuid.uuid4(),
+        org_id=user.org_id,
+        unit_id=unit.id,
+        provider_id=provider.id,
+        is_primary=bool(data.is_primary),
+        created_at=_now(),
+    )
+    db.add(link)
+    await db.commit()
+    return {"unit_id": str(unit.id), "provider_id": str(provider.id)}
+
+
+@router.delete("/units/{unit_id}/providers/{provider_id}", status_code=204)
+async def unassign_provider(
+    unit_id: str,
+    provider_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    _perm: None = Depends(require_permission("catalog.manage")),
+):
+    unit = await _get_unit(db, user.org_id, unit_id)
+    provider = await _get_provider(db, user.org_id, provider_id)
+    link = (
+        await db.execute(
+            select(UnitProvider).where(
+                UnitProvider.unit_id == unit.id,
+                UnitProvider.provider_id == provider.id,
+            )
+        )
+    ).scalars().first()
+    if link is None:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    await db.delete(link)
+    await db.commit()
+    return None
+
+
+# ── Fees ───────────────────────────────────────────────────────────────────
+
+async def _fee_out(db: AsyncSession, fee: ProviderFee) -> FeeOut:
+    unit_name = None
+    if fee.unit_id is not None:
+        u = (
+            await db.execute(select(ServiceUnit).where(ServiceUnit.id == fee.unit_id))
+        ).scalars().first()
+        unit_name = u.name if u else None
+    provider_name = None
+    if fee.provider_id is not None:
+        p = (
+            await db.execute(select(Provider).where(Provider.id == fee.provider_id))
+        ).scalars().first()
+        provider_name = p.full_name if p else None
+    return FeeOut(
+        id=str(fee.id),
+        unit_id=str(fee.unit_id) if fee.unit_id else None,
+        unit_name=unit_name,
+        provider_id=str(fee.provider_id) if fee.provider_id else None,
+        provider_name=provider_name,
+        amount_paise=fee.amount_paise,
+        currency=fee.currency,
+        label=fee.label,
+        is_active=bool(fee.is_active),
+    )
+
+
+@router.get("/fees", response_model=List[FeeOut])
+async def list_fees(
+    unit_id: Optional[str] = Query(default=None),
+    provider_id: Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    q = select(ProviderFee).where(ProviderFee.org_id == user.org_id)
+    if unit_id:
+        q = q.where(ProviderFee.unit_id == unit_id)
+    if provider_id:
+        q = q.where(ProviderFee.provider_id == provider_id)
+    rows = (await db.execute(q.order_by(ProviderFee.created_at))).scalars().all()
+    return [await _fee_out(db, f) for f in rows]
+
+
+@router.post("/fees", response_model=FeeOut, status_code=201)
+async def create_fee(
+    data: FeeCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    _perm: None = Depends(require_permission("catalog.manage")),
+):
+    if not data.unit_id and not data.provider_id:
+        raise HTTPException(
+            status_code=422, detail="Fee needs a unit, a provider, or both"
+        )
+    if data.unit_id:
+        await _get_unit(db, user.org_id, data.unit_id)
+    if data.provider_id:
+        await _get_provider(db, user.org_id, data.provider_id)
+    fee = ProviderFee(
+        id=uuid.uuid4(),
+        org_id=user.org_id,
+        unit_id=data.unit_id,
+        provider_id=data.provider_id,
+        amount_paise=data.amount_paise,
+        currency=(data.currency or "INR").upper(),
+        label=(data.label or "").strip() or None,
+        is_active=data.is_active,
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    db.add(fee)
+    await db.commit()
+    await db.refresh(fee)
+    return await _fee_out(db, fee)
+
+
+@router.patch("/fees/{fee_id}", response_model=FeeOut)
+async def update_fee(
+    fee_id: str,
+    data: FeeUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    _perm: None = Depends(require_permission("catalog.manage")),
+):
+    fee = (
+        await db.execute(
+            select(ProviderFee).where(
+                ProviderFee.id == fee_id, ProviderFee.org_id == user.org_id
+            )
+        )
+    ).scalars().first()
+    if fee is None:
+        raise HTTPException(status_code=404, detail="Fee not found")
+    if data.amount_paise is not None:
+        fee.amount_paise = data.amount_paise
+    if data.currency is not None:
+        fee.currency = data.currency.upper()
+    if data.label is not None:
+        fee.label = data.label.strip() or None
+    if data.is_active is not None:
+        fee.is_active = bool(data.is_active)
+    fee.updated_at = _now()
+    await db.commit()
+    await db.refresh(fee)
+    return await _fee_out(db, fee)
+
+
+@router.delete("/fees/{fee_id}", status_code=204)
+async def delete_fee(
+    fee_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    _perm: None = Depends(require_permission("catalog.manage")),
+):
+    fee = (
+        await db.execute(
+            select(ProviderFee).where(
+                ProviderFee.id == fee_id, ProviderFee.org_id == user.org_id
+            )
+        )
+    ).scalars().first()
+    if fee is None:
+        raise HTTPException(status_code=404, detail="Fee not found")
+    await db.delete(fee)
+    await db.commit()
+    return None

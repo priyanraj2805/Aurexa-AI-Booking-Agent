@@ -54,6 +54,8 @@ async def test_web_runtime_emits_single_server_selected_directive(monkeypatch) -
     assert payload.widget_directive == "REQUIRE_DATE_PICKER"
     assert payload.field_meta["name"] == "date"
     assert isinstance(payload.widget_directive, str)
+    assert "BUSINESS HOURS" not in payload.message
+    assert not payload.message.startswith("Hours:")
 
 
 @pytest.mark.asyncio
