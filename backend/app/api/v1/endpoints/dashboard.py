@@ -86,6 +86,15 @@ from app.schemas.agent import FieldDefinition, get_required_field_names, order_f
 router = APIRouter()
 logger = logging.getLogger(__name__)
 MAX_FIELD_DEFINITIONS = 20
+
+async def _member_provider_id(db, user: User):
+    """If user is a member (providers.user_id), return provider.id else None — for own-dashboard scoping."""
+    try:
+        from app.models.service_unit import Provider
+        row = (await db.execute(select(Provider.id).where(Provider.user_id==user.id, Provider.org_id==user.org_id))).scalars().first()
+        return row
+    except Exception:
+        return None
 MAX_SELECT_OPTIONS = 50
 CORE_FIELD_NAMES = {"name", "email", "phone", "date", "time"}
 
@@ -1026,10 +1035,14 @@ async def list_bookings(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Paginated bookings list for the current org (search + date range + status + attendance + mode)."""
+    """Paginated bookings list for the current org (search + date range + status + attendance + mode). Members see only own provider bookings."""
     from datetime import timedelta
 
     predicates = [Booking.org_id == user.org_id]
+    # Member own-dashboard scoping: providers.user_id → only own bookings
+    _mpid = await _member_provider_id(db, user)
+    if _mpid is not None:
+        predicates.append(Booking.provider_id == _mpid)
     if search:
         like = f"%{search}%"
         predicates.append(

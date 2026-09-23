@@ -108,6 +108,14 @@ class Settings(BaseSettings):
         os.getenv("TELEMETRY_ENABLED", "false").lower() in ("true", "1", "yes")
     )
 
+    # ── Human handover auto-expiry ────────────────────────────────────
+    # A takeover with no admin message for this long returns control to the
+    # AI automatically (with an inbox notice), so customers are never left
+    # in silence by an abandoned takeover. 0 disables (manual release only).
+    HANDOVER_AUTO_RELEASE_MINUTES: int = int(
+        os.getenv("HANDOVER_AUTO_RELEASE_MINUTES", "30")
+    )
+
     # ── Support tickets forwarding (Phase 12) ─────────────────────────────
     # URL of the backend-super control plane. The tenant backend forwards org
     # admin support requests there (service-key-auth'd), so tickets live in the

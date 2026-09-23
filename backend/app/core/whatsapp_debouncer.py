@@ -28,6 +28,18 @@ CLEANUP_INTERVAL = 300  # 5 minutes
 MESSAGE_ID_TTL = 300  # 5 minutes
 LOCK_TTL = 3600  # 1 hour
 
+# Flood protection: sliding-window per-sender counter. A plain TTL cache
+# rewrites its expiry on EVERY hit, so any sustained conversation (replies
+# every <60s) trips it and then stays tripped — the customer is silenced
+# with zero feedback. A sliding log only counts messages inside the last
+# 60 seconds, so normal pacing can chat forever and only true bursts pause.
+RATE_LIMIT_MAX_MESSAGES = 10
+RATE_LIMIT_WINDOW_SECONDS = 60.0
+_RATE_MAX_SENDERS = 10000
+
+# sender key -> ascending list of hit timestamps (oldest first)
+_sender_message_times: Dict[str, list] = {}
+
 _processed_task: Optional[asyncio.Task] = None
 
 
@@ -56,6 +68,14 @@ async def _cleanup_loop():
                 logger.debug(
                     f"Cleaned up {len(expired_msg_ids)} expired WhatsApp message IDs"
                 )
+
+            # Clean up expired rate-limit windows
+            try:
+                pruned = prune_rate_limit_state(now=now)
+                if pruned:
+                    logger.debug(f"Cleaned up {pruned} expired WhatsApp rate-limit windows")
+            except Exception:
+                pass
 
             # Clean up stale session locks
             stale_locks = [k for k, v in _lock_timestamps.items() if now - v > LOCK_TTL]
@@ -105,6 +125,52 @@ def is_duplicate(message_id: str) -> bool:
 
     _processed_message_ids[message_id] = time.time()
     return False
+
+
+def _prune_sender_hits(hits: list, cutoff: float) -> None:
+    """Drop timestamps outside the window, in place (lists stay tiny)."""
+    while hits and hits[0] <= cutoff:
+        hits.pop(0)
+
+
+def check_sender_rate_limit(
+    sender_key: str, *, now: Optional[float] = None
+) -> tuple:
+    """Sliding-window flood check for one sender.
+
+    Returns (limited, retry_after_seconds). Counts only messages inside the
+    last RATE_LIMIT_WINDOW_SECONDS, so steady conversations never trip it —
+    only true bursts pause, and callers must answer those with a slowdown
+    notice, never silence.
+    """
+    ts = now if now is not None else time.time()
+    hits = _sender_message_times.get(sender_key)
+    if hits is None:
+        if len(_sender_message_times) >= _RATE_MAX_SENDERS:
+            # Best-effort cap: evict the oldest-inserted sender.
+            _sender_message_times.pop(next(iter(_sender_message_times)), None)
+        hits = []
+        _sender_message_times[sender_key] = hits
+    _prune_sender_hits(hits, ts - RATE_LIMIT_WINDOW_SECONDS)
+    if len(hits) >= RATE_LIMIT_MAX_MESSAGES:
+        retry_after = hits[0] + RATE_LIMIT_WINDOW_SECONDS - ts
+        return True, max(0.0, retry_after)
+    hits.append(ts)
+    return False, 0.0
+
+
+def prune_rate_limit_state(*, now: Optional[float] = None) -> int:
+    """Drop fully-expired sender windows. Returns entries removed."""
+    ts = now if now is not None else time.time()
+    cutoff = ts - RATE_LIMIT_WINDOW_SECONDS
+    stale = [
+        key
+        for key, hits in _sender_message_times.items()
+        if not hits or hits[-1] <= cutoff
+    ]
+    for key in stale:
+        _sender_message_times.pop(key, None)
+    return len(stale)
 
 
 def get_session_lock(session_id: str) -> asyncio.Lock:

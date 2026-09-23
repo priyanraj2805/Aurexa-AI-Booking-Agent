@@ -50,6 +50,12 @@ class Provider(Base):
         nullable=False,
         index=True,
     )
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     full_name = Column(String(255), nullable=False)
     role_label = Column(String(120), nullable=True)  # Doctor, Stylist, Coach…
     email = Column(String(255), nullable=True)

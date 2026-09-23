@@ -16,6 +16,7 @@ class FakeGateway:
     def __init__(self):
         self.calls = []
         self.mode = "ok"  # ok | down | unknown | no_qr
+        self.gw_status = "connected"  # live socket truth for get_session_status
 
     async def start_session(self, connection_id):
         self.calls.append(("start", connection_id))
@@ -41,7 +42,7 @@ class FakeGateway:
             raise WaGatewayError("WhatsApp gateway is unreachable")
         if self.mode == "unknown":
             return None
-        return {"connectionId": connection_id, "status": "connected",
+        return {"connectionId": connection_id, "status": self.gw_status,
                 "phoneNumber": "919521433306", "displayName": "Test Biz",
                 "lastSeenAt": "2026-09-10T00:00:00+00:00"}
 
@@ -203,6 +204,7 @@ async def test_reconnect_needs_scan_when_logged_out(client, registered_user, mon
 
 async def test_reconnect_drives_gateway(client, registered_user, monkeypatch, db_session):
     fake = FakeGateway()
+    fake.gw_status = "reconnecting"  # live socket actually down
     _patch(monkeypatch, fake)
     h = registered_user["headers"]
     db_session.add(WhatsAppConnection(
@@ -212,6 +214,26 @@ async def test_reconnect_drives_gateway(client, registered_user, monkeypatch, db
     r = await client.post("/api/v1/dashboard/whatsapp-qr/reconnect", headers=h)
     assert r.status_code == 200
     assert any(c[0] == "reconnect" for c in fake.calls)
+
+
+async def test_reconnect_noop_when_socket_already_connected(
+    client, registered_user, monkeypatch, db_session
+):
+    """A healthy socket must never be force-restarted: killing it triggers
+    a WhatsApp `replaced` conflict storm and drops in-flight replies."""
+    fake = FakeGateway()  # gw_status defaults to "connected"
+    _patch(monkeypatch, fake)
+    h = registered_user["headers"]
+    db_session.add(WhatsAppConnection(
+        org_id=registered_user["user"]["org_id"],
+        status=WhatsAppConnectionStatus.DISCONNECTED))  # stale row
+    await db_session.commit()
+    r = await client.post("/api/v1/dashboard/whatsapp-qr/reconnect", headers=h)
+    assert r.status_code == 200
+    assert r.json()["status"] == "CONNECTED"
+    assert not any(c[0] == "reconnect" for c in fake.calls)
+    row = await _row(db_session, registered_user["user"]["org_id"])
+    assert row.status == "CONNECTED"  # stale row healed without restart
 
 
 async def test_cross_org_isolation(client, registered_user, monkeypatch, db_session):
@@ -404,6 +426,126 @@ class TestQrInbound:
         assert body["status"] == "ok"
         assert body["reply"]["type"] == "text"
         assert "₹500.00" in body["reply"]["body"]
+
+
+# ── Gateway lifecycle events (P-event push) ────────────────────────────
+
+class TestQrEvents:
+    def _headers(self, monkeypatch):
+        monkeypatch.setattr(settings, "WA_GATEWAY_SERVICE_KEY", "test-gw-key")
+        return {"X-Gateway-Key": "test-gw-key"}
+
+    async def _row_with_status(self, db_session, org_id, status):
+        row = WhatsAppConnection(org_id=org_id, status=status)
+        db_session.add(row)
+        await db_session.commit()
+        await db_session.refresh(row)
+        return row
+
+    async def test_rejects_bad_service_key(self, client):
+        r = await client.post(
+            "/api/v1/internal/whatsapp-qr/events",
+            json={"connectionId": str(uuid.uuid4()), "event": "logged_out"},
+            headers={"X-Gateway-Key": "wrong"},
+        )
+        assert r.status_code == 403
+
+    async def test_unknown_connection_ignored(
+        self, client, registered_user, monkeypatch
+    ):
+        r = await client.post(
+            "/api/v1/internal/whatsapp-qr/events",
+            json={"connectionId": str(uuid.uuid4()), "event": "logged_out"},
+            headers=self._headers(monkeypatch),
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "ignored"
+
+    async def test_logged_out_marks_row_and_raises_alert(
+        self, client, registered_user, monkeypatch, db_session
+    ):
+        from app.models.system_alert import SystemAlert
+
+        org_id = registered_user["user"]["org_id"]
+        row = await self._row_with_status(
+            db_session, org_id, WhatsAppConnectionStatus.CONNECTED
+        )
+        r = await client.post(
+            "/api/v1/internal/whatsapp-qr/events",
+            json={"connectionId": str(row.id), "event": "logged_out"},
+            headers=self._headers(monkeypatch),
+        )
+        assert r.status_code == 200 and r.json()["status"] == "ok"
+        await db_session.refresh(row)
+        assert row.status == "LOGGED_OUT"
+        alerts = (
+            await db_session.execute(
+                select(SystemAlert).where(
+                    SystemAlert.org_id == org_id,
+                    SystemAlert.code == "WHATSAPP_LOGGED_OUT",
+                    SystemAlert.resolved_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        assert len(alerts) == 1
+
+        # Repeat push dedupes (no second open alert).
+        r2 = await client.post(
+            "/api/v1/internal/whatsapp-qr/events",
+            json={"connectionId": str(row.id), "event": "logged_out"},
+            headers=self._headers(monkeypatch),
+        )
+        assert r2.json()["status"] == "ok"
+
+    async def test_connected_resolves_alert(
+        self, client, registered_user, monkeypatch, db_session
+    ):
+        from app.models.system_alert import SystemAlert
+
+        org_id = registered_user["user"]["org_id"]
+        row = await self._row_with_status(
+            db_session, org_id, WhatsAppConnectionStatus.CONNECTED
+        )
+        h = self._headers(monkeypatch)
+        await client.post(
+            "/api/v1/internal/whatsapp-qr/events",
+            json={"connectionId": str(row.id), "event": "logged_out"},
+            headers=h,
+        )
+        r = await client.post(
+            "/api/v1/internal/whatsapp-qr/events",
+            json={"connectionId": str(row.id), "event": "connected"},
+            headers=h,
+        )
+        assert r.status_code == 200 and r.json()["status"] == "ok"
+        await db_session.refresh(row)
+        assert row.status == "CONNECTED"
+        open_alerts = (
+            await db_session.execute(
+                select(SystemAlert).where(
+                    SystemAlert.org_id == org_id,
+                    SystemAlert.code == "WHATSAPP_LOGGED_OUT",
+                    SystemAlert.resolved_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        assert open_alerts == []
+
+    async def test_unknown_event_ignored(
+        self, client, registered_user, monkeypatch, db_session
+    ):
+        org_id = registered_user["user"]["org_id"]
+        row = await self._row_with_status(
+            db_session, org_id, WhatsAppConnectionStatus.CONNECTED
+        )
+        r = await client.post(
+            "/api/v1/internal/whatsapp-qr/events",
+            json={"connectionId": str(row.id), "event": "something-else"},
+            headers=self._headers(monkeypatch),
+        )
+        assert r.json()["status"] == "ignored"
+        await db_session.refresh(row)
+        assert row.status == "CONNECTED"
 
 
 # ── Booking toggle gate ──────────────────────────────────────────────────

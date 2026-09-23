@@ -20,7 +20,6 @@ import re
 import time as _time
 from typing import Any, Optional
 
-from cachetools import TTLCache
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,10 +32,6 @@ from app.db.database import get_db
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# Cloud inbound per-sender rate limit — mirrors the QR transport
-# (max 10 messages per sender per 60 seconds; OTP/knowledge exempt).
-_inbound_rate_cache: TTLCache = TTLCache(maxsize=10000, ttl=60)
 
 # Dedicated channel so Cloud (wa_id) identities never collide with
 # Baileys (LID) identities. No conversion between the two, by design.
@@ -191,12 +186,9 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
             is_knowledge = _is_potential_knowledge_question(text)
         except Exception:
             is_knowledge = False
-        if not is_otp_code and not is_knowledge:
-            count = _inbound_rate_cache.get(from_phone, 0)
-            if count >= 10:
-                logger.warning("meta webhook rate limit exceeded")
-                return False
-            _inbound_rate_cache[from_phone] = count + 1
+        # Flood accounting is enforced AFTER session load so a burst gets a
+        # spoken slowdown notice, never silence.
+        _rate_exempt = bool(is_otp_code or is_knowledge)
 
         from app.crud import chat as crud_chat
         from app.engine import runtime_router
@@ -211,6 +203,42 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
         chat_session = await crud_chat.get_or_create_channel_session(
             db, str(org.id), CLOUD_CHANNEL, from_phone
         )
+        # Human handover: admin owns the conversation — persist for the
+        # inbox and send nothing. Returning True marks the event handled.
+        try:
+            if await crud_chat.is_human_takeover_active(db, str(chat_session.session_id)):
+                try:
+                    await crud_chat.save_message(db, str(chat_session.session_id), "user", text)
+                except Exception:
+                    pass
+                return True
+        except Exception:
+            pass
+        # Flood protection (sliding window — steady pacing never trips it).
+        # A burst gets a spoken slowdown notice, never silence.
+        if not _rate_exempt:
+            from app.core.whatsapp_debouncer import check_sender_rate_limit as _check_rl
+
+            _limited, _retry_after = _check_rl(f"meta:{from_phone}")
+            if _limited:
+                _wait = max(1, int(round(_retry_after)))
+                _slow_body = (
+                    f"You're sending messages very quickly — please wait about "
+                    f"{_wait} seconds and send that again."
+                )
+                try:
+                    await crud_chat.save_message(db, str(chat_session.session_id), "user", text)
+                    await crud_chat.save_message(db, str(chat_session.session_id), "agent", _slow_body)
+                except Exception:
+                    pass
+                try:
+                    await whatsapp_cloud.send_booking_reply(
+                        from_phone, {"type": "text", "body": _slow_body[:4096]}
+                    )
+                except Exception:
+                    pass
+                logger.warning("meta webhook burst slowed (retry in ~%ss)", _wait)
+                return True
         # Structured directive tap — same pre-LLM handling as the QR path.
         try:
             _active_id = None
@@ -392,21 +420,42 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                         "value": _iso_g,
                                     }
                                 else:
-                                    _horizon_g = str(getattr(_dir, "description", "") or "").strip()
-                                    _wrong_body = _guards.date_correction(text, _corr_g or "", _horizon_g)
+                                    # Not a date value: let the LLM decide (lookup /
+                                    # cancel / change / questions reach the engine).
+                                    _bypass_c = False
                                     try:
-                                        await crud_chat.save_message(db, str(chat_session.session_id), "user", text)
-                                        await crud_chat.save_message(db, str(chat_session.session_id), "agent", _wrong_body)
+                                        from app.engine import check_booking_flow as _check_flow_c
+
+                                        _bypass_c = await _check_flow_c.should_bypass_step_guard(text)
                                     except Exception:
-                                        pass
-                                    try:
-                                        await whatsapp_cloud.send_booking_reply(
-                                            from_phone, {"type": "text", "body": _wrong_body[:4096]}
-                                        )
-                                    except Exception:
-                                        pass
-                                    logger.info(f"Directive {str(_dir.id)[:8]} wrong-date corrected ({_reason_g}) (cloud): {text[:40]!r}")
-                                    return True
+                                        _bypass_c = False
+                                    if _bypass_c:
+                                        _dir.status = "EXPIRED"
+                                        _cd_bc = dict(chat_session.collected_data or {})
+                                        _cd_bc.pop("active_directive_id", None)
+                                        chat_session.collected_data = _cd_bc
+                                        try:
+                                            await db.commit()
+                                        except Exception:
+                                            pass
+                                        logger.info(f"Directive {str(_dir.id)[:8]} LLM bypass to engine (cloud): {text[:40]!r}")
+                                        _step_handled = True
+                                    else:
+                                        _horizon_g = str(getattr(_dir, "description", "") or "").strip()
+                                        _wrong_body = _guards.date_correction(text, _corr_g or "", _horizon_g)
+                                        try:
+                                            await crud_chat.save_message(db, str(chat_session.session_id), "user", text)
+                                            await crud_chat.save_message(db, str(chat_session.session_id), "agent", _wrong_body)
+                                        except Exception:
+                                            pass
+                                        try:
+                                            await whatsapp_cloud.send_booking_reply(
+                                                from_phone, {"type": "text", "body": _wrong_body[:4096]}
+                                            )
+                                        except Exception:
+                                            pass
+                                        logger.info(f"Directive {str(_dir.id)[:8]} wrong-date corrected ({_reason_g}) (cloud): {text[:40]!r}")
+                                        return True
                             # Change-intent on CONFIRM_BOOKING.
                             if not _matched and str(getattr(_dir, "type", "")) == "CONFIRM_BOOKING":
                                 try:
@@ -450,8 +499,27 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                             pass
                                         logger.info(f"Directive {str(_dir.id)[:8]} field-change ({_change_field}) to engine (cloud): {text[:40]!r}")
                                         _step_handled = True
-                            # Wrong-slot guard: deterministic format correction —
-                            # no numbers (prompts show none), never the LLM.
+                            # Wrong-slot guard: LLM bypass first so lookup/cancel /
+                            # change / questions reach the engine, never a correction.
+                            if not _matched and not _step_handled and str(getattr(_dir, "type", "")) in ("SELECT_SLOT", "SELECT_TIME", "SELECT_DATE"):
+                                _llm_bypass_c2 = False
+                                try:
+                                    from app.engine import check_booking_flow as _check_flow_c2
+
+                                    _llm_bypass_c2 = await _check_flow_c2.should_bypass_step_guard(text)
+                                except Exception:
+                                    _llm_bypass_c2 = False
+                                if _llm_bypass_c2:
+                                    _dir.status = "EXPIRED"
+                                    _cd_bc2 = dict(chat_session.collected_data or {})
+                                    _cd_bc2.pop("active_directive_id", None)
+                                    chat_session.collected_data = _cd_bc2
+                                    try:
+                                        await db.commit()
+                                    except Exception:
+                                        pass
+                                    logger.info(f"Directive {str(_dir.id)[:8]} LLM bypass to engine (cloud slot guard): {text[:40]!r}")
+                                    _step_handled = True
                             if not _matched and not _step_handled and str(getattr(_dir, "type", "")) in ("SELECT_SLOT", "SELECT_TIME", "SELECT_DATE"):
                                 _dtype_c = str(getattr(_dir, "type", "") or "")
                                 if _dtype_c == "SELECT_DATE":
@@ -726,6 +794,9 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                         await crud_chat.update_chat_session(db, str(chat_session.session_id), chat_session)
             except Exception as _e:
                 logger.warning(f"booking-template cloud send failed: {_e}")
+            # Human handover won the race after the early check: stay silent.
+            if str(getattr(action, "widget_directive", "") or "") == "HUMAN_ACTIVE":
+                return True
             sent = await whatsapp_cloud.send_booking_reply(from_phone, wa_msg)
             logger.info(
                 "meta webhook booking turn done in %.1fs reply_type=%s cloud_sent=%s",

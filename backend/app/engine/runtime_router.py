@@ -169,6 +169,21 @@ async def route_whatsapp_message(
     so a graph failure must never silently kill customer replies. Fallback
     activations are logged with full tracebacks for ops visibility.
     """
+    # Human handover: when an admin owns the conversation the AI must stay
+    # silent on WhatsApp exactly like it does on web (ConversationManager).
+    # The flag is re-read from the DB so a mid-typing takeover applies now.
+    try:
+        if await crud_chat.is_human_takeover_active(db, str(getattr(chat_session, "session_id", "") or "")):
+            try:
+                await crud_chat.save_message(db, str(chat_session.session_id), "user", message_text)
+                await db.commit()
+            except Exception:
+                pass
+            from app.schemas.agent import ActionPayload as _AP
+
+            return _AP(message="", widget_directive="HUMAN_ACTIVE", field_meta={"handoff_active": True})
+    except Exception:
+        pass
     try:
         return await process_message_with_graph(
             db=db,

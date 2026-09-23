@@ -103,6 +103,7 @@ Output:"""
             "PROVIDE_DATA",
             "EDIT_DATA",
             "CANCEL_BOOKING",
+            "CHECK_BOOKING",
             "ASK_QUESTION",
             "CONFIRM_BOOKING",
         ]
@@ -235,6 +236,8 @@ Output:"""
 
 ### YOUR TASKS:
 1. Determine the user's current INTENT from this list: {", ".join(valid_intents)}
+   - CHECK_BOOKING means the user wants to view, confirm, or ask about the status/details of an EXISTING booking/appointment/reservation they believe they already have — as opposed to creating a new one, cancelling, or providing a field value. When in doubt between a field value and a lookup request, prefer the lookup meaning if the message asks about what already exists.
+   - When intent is CHECK_BOOKING, leave extracted_entities EMPTY (the message is not a field value) and keep response_message brief — the system will fetch live booking details deterministically.
 2. EXTRACT ONLY THE NEXT MISSING FIELD from the message ({next_field_label}). 
    - ONLY extract a value if it is ACTUALLY PRESENT in the user's message.
    - DO NOT extract values for other missing fields - even if they are missing.
@@ -244,7 +247,12 @@ Output:"""
    - For "select" type fields, the value MUST be one of the defined options.
    - If the user's message does NOT contain a value for the next missing field, leave extracted_entities EMPTY.
   3. GENERATE a polite, humble, and conversational RESPONSE to the user.
+    - Write like a human texting: short plain sentences, no em dashes (use commas/periods), no AI boilerplate ("As an AI", "Great question", "I hope this helps", "delve", "furthermore"). Answer directly.
     - If the user asked a question or expressed concern (e.g. "why do I need this?", "what is this for?"), answer naturally and helpfully. Then gently guide them back to the booking. Do NOT force the next field if they're asking questions.
+    - REFUSAL vs MEMORY LAPSE: only an explicit refusal ("don't want to give/share", "skip it") lets you move past a field — and then only to the next REQUIRED field in order. "I don't remember / forgot / not sure" is NOT a refusal: help briefly and keep asking for the SAME field. NEVER waive or postpone a required field on your own.
+    - If the user corrects YOU ("I never gave X"), acknowledge it plainly first, then continue correctly. Keep replies to praise/jokes to a few words and return to the booking — never let them advance or waive a field.
+    - Gibberish, keyboard-mashing, or random syllables are NEVER field values: leave extracted_entities EMPTY and re-ask the same next field. Never advance the flow or claim anything was saved.
+    - KNOWLEDGE HONESTY: every person name or factual claim in response_message must come from COMPANY KNOWLEDGE CONTEXT above — never from general knowledge. If it isn't there, say you don't have it. If the user disputes a fact you stated, concede rather than defend: acknowledge you may be wrong and only re-assert what the materials support.
     - If the user just provided a value for a field, acknowledge it warmly, THEN ask for the next missing field: {next_field_label}
     - If the user is just chatting or greeting, respond naturally and guide them toward the booking.
     - CRITICAL: You MUST ask for EXACTLY ONE missing field at a time. Your response_message MUST ask for ONLY the next field: {next_field_label}. Do NOT mention any other missing fields. Do NOT list requirements. It is overwhelming.

@@ -38,6 +38,25 @@ def test_fake_phone_all_same():
     assert "phone" in errors
 
 
+def test_fake_phone_sequential_walk_rejected():
+    valid, errors = DataValidator.validate_entities({"phone": "1234567890"})
+    assert "phone" not in valid
+    assert "phone" in errors
+
+
+def test_fake_phone_near_uniform_rejected():
+    # The exact shape abused in prod (1 + zeros + 1): only 2 distinct digits.
+    valid, errors = DataValidator.validate_entities({"phone": "1000000001"})
+    assert "phone" not in valid
+    assert "phone" in errors
+
+
+def test_fake_phone_descending_walk_rejected():
+    valid, errors = DataValidator.validate_entities({"phone": "9876543210"})
+    assert "phone" not in valid
+    assert "phone" in errors
+
+
 def test_past_date():
     valid, errors = DataValidator.validate_entities({"date": "2020-01-01"})
     assert "date" not in valid
@@ -98,6 +117,14 @@ def test_valid_name():
     valid, errors = DataValidator.validate_entities({"name": "Devang Sharma"})
     assert valid["name"] == "Devang Sharma"
     assert "name" not in errors
+
+
+def test_name_keyboard_mashing_rejected():
+    """The exact abuse from prod: 'Fhaaaaaaaa' / 'Heeee' must never validate."""
+    for mash in ("Fhaaaaaaaa", "Heeee", "ookkkk", "Noheu29"):
+        valid, errors = DataValidator.validate_entities({"name": mash})
+        assert "name" not in valid, mash
+        assert "name" in errors, mash
 
 
 def test_name_with_garbage_numbers():

@@ -15,6 +15,8 @@ interface User {
   avatar_url: string | null;
   is_active: boolean;
   created_at: string;
+  roles: string[];
+  permissions: string[];
 }
 
 interface AuthContextType {

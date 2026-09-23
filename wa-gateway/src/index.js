@@ -38,6 +38,7 @@ function createManager(deps) {
     // Default wiring is the live backend. Tests inject fakes via deps.
     deliverInbound: (deps && deps.deliverInbound) || deliverToBackend,
     sendReply: deps && deps.sendReply,
+    notifyEvent: (deps && deps.notifyEvent) || deliverEventToBackend,
     outbox: (deps && deps.outbox) || null,
     logger: { info: (m) => log('info', m), warn: (m) => log('warn', m), error: (m) => log('error', m) },
   });
@@ -85,6 +86,28 @@ async function deliverToBackend(connectionId, envelope) {
     throw err;
   }
   return res.json();
+}
+
+// Lifecycle push: spontaneous logout/connect straight to the backend so the
+// DB row and unlink alerts update within seconds (no admin polling needed).
+// Best-effort: throws after logging; callers must swallow (fire-and-forget).
+async function deliverEventToBackend(connectionId, event) {
+  const key = serviceKey();
+  if (!key) throw new Error('WA_GATEWAY_SERVICE_KEY is empty');
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const res = await fetch(`${BACKEND_BASE_URL}/api/v1/internal/whatsapp-qr/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Gateway-Key': key },
+      body: JSON.stringify({ connectionId, event: event && event.type }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`backend events failed status=${res.status}`);
+    return res.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function createApp(deps) {
@@ -168,4 +191,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createApp, createManager, deliverToBackend };
+module.exports = { createApp, createManager, deliverToBackend, deliverEventToBackend };

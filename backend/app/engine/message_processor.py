@@ -1247,6 +1247,27 @@ async def process_message(
         )
         return action
 
+    # ── CHECK override (LLM-driven, no keywords) ─────────────
+    # When the LLM classifies the turn as CHECK_BOOKING, show live booking
+    # details instead of treating the message as a field value. Booking
+    # progress is preserved so the user can resume afterwards.
+    if intent == "CHECK_BOOKING":
+        from app.engine import check_booking_flow as _check_flow
+
+        return await _check_flow.handle_check_booking(
+            db, org, org_config, chat_session
+        )
+
+    # ── Pending lookup completion ─────────────────────────────
+    # Contact sent after a lookup request finishes the check.
+    from app.engine import check_booking_flow as _check_flow2
+
+    _pending_action = await _check_flow2.maybe_complete_pending_lookup(
+        db, org, org_config, chat_session, message_text
+    )
+    if _pending_action is not None:
+        return _pending_action
+
     # ── CONFIRM override (deterministic Python-side) ──────────
     if not chat_session.missing_fields and _msg_is_confirm:
         intent = "CONFIRM_BOOKING"

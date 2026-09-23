@@ -12,6 +12,7 @@ class AlertComponent(str, Enum):
     DATABASE = "database"
     BOOKING = "booking"
     TIMEZONE = "timezone"
+    WHATSAPP = "whatsapp"
 
 
 class AlertSeverity(str, Enum):

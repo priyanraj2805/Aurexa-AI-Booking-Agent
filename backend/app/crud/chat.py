@@ -90,7 +90,13 @@ async def get_or_create_channel_session(
             ChatSession.org_id == org_id,
             ChatSession.channel == channel,
             ChatSession.channel_user_id == channel_user_id,
-            ChatSession.session_status.in_(["ACTIVE", "CONFIRMING"]),
+            # Human-handover sessions live under "human_active" (takeover)
+            # and "active" (release writes lowercase) — both must resolve to
+            # the SAME conversation, otherwise the next customer message
+            # spawns a fresh AI session and the handover is silently lost.
+            ChatSession.session_status.in_(
+                ["ACTIVE", "CONFIRMING", "human_active", "active"]
+            ),
         )
         .order_by(ChatSession.updated_at.desc())
     )
@@ -334,6 +340,26 @@ async def get_session_messages(
 # ── Human Handoff helpers ────────────────────────────────────────────
 
 
+async def is_human_takeover_active(db: AsyncSession, session_id: str) -> bool:
+    """Fresh read of the human-handover flag (never from cached state).
+
+    WhatsApp and web inbound paths call this on EVERY message so an admin
+    takeover/release mid-typing is respected on the very next turn.
+
+    Abandoned takeovers auto-expire first (see `maybe_expire_handover`), so
+    a stale takeover can never silence the customer forever.
+    """
+    try:
+        await maybe_expire_handover(db, session_id)
+        result = await db.execute(
+            select(ChatSession).where(ChatSession.id == session_id)
+        )
+        sess = result.scalars().first()
+        return bool(sess and getattr(sess, "human_agent_active", False))
+    except Exception:
+        return False
+
+
 async def set_human_takeover(
     db: AsyncSession,
     session_id: str,
@@ -374,8 +400,13 @@ async def release_human_control(
     db: AsyncSession,
     session_id: str,
     org_id: str,
+    reason: str = "released",
 ) -> Optional[ChatSession]:
-    """Atomically release human control back to AI."""
+    """Atomically release human control back to AI.
+
+    `reason` is "released" (admin clicked Release) or "expired" (abandoned
+    takeover auto-released) — the inbox system notice reflects it.
+    """
     result = await db.execute(
         select(ChatSession)
         .where(ChatSession.id == session_id, ChatSession.org_id == org_id)
@@ -392,16 +423,88 @@ async def release_human_control(
     session.session_status = "active"
 
     # Save system message
+    if reason == "expired":
+        notice = (
+            "👨‍💼 Handover expired after 30 minutes without an admin reply. "
+            "AI assistant resumed."
+        )
+        meta = {"human_left": True, "auto_expired": True}
+    else:
+        notice = "👨‍💼 Support agent left the chat. AI assistant resumed."
+        meta = {"human_left": True}
     await save_message(
         db, session_id, "agent",
-        "👨‍💼 Support agent left the chat. AI assistant resumed.",
+        notice,
         sender_type="system",
-        metadata={"human_left": True}
+        metadata=meta
     )
 
     await db.commit()
     await db.refresh(session)
     return session
+
+
+def _handover_timeout_minutes() -> int:
+    try:
+        from app.core.config import settings as _settings
+
+        return max(0, int(getattr(_settings, "HANDOVER_AUTO_RELEASE_MINUTES", 30) or 0))
+    except Exception:
+        return 30
+
+
+async def maybe_expire_handover(db: AsyncSession, session_id: str) -> bool:
+    """Auto-release an abandoned takeover. Returns True if released now.
+
+    A takeover expires when no admin (human) message arrived within
+    HANDOVER_AUTO_RELEASE_MINUTES of the last admin message — or of the
+    takeover itself when the admin never wrote. The inbox gets the same
+    system notice as a manual release. Best-effort: any failure keeps the
+    current state (never breaks message handling).
+    """
+    try:
+        timeout = _handover_timeout_minutes()
+        if timeout <= 0:
+            return False
+        result = await db.execute(
+            select(ChatSession).where(ChatSession.id == session_id)
+        )
+        session = result.scalars().first()
+        if session is None or not getattr(session, "human_agent_active", False):
+            return False
+        last_human = await db.execute(
+            select(ChatMessage.created_at)
+            .where(
+                ChatMessage.session_id == session.id,
+                ChatMessage.sender_type == "human",
+            )
+            .order_by(ChatMessage.created_at.desc())
+            .limit(1)
+        )
+        last_human_at = last_human.scalars().first()
+        baseline = last_human_at or getattr(session, "ai_paused_at", None)
+        if baseline is None:
+            return False
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+
+            now = _dt.now(_tz.utc)
+            if baseline.tzinfo is None:
+                baseline = baseline.replace(tzinfo=_tz.utc)
+            idle_seconds = (now - baseline).total_seconds()
+        except Exception:
+            return False
+        if idle_seconds < timeout * 60:
+            return False
+        try:
+            await release_human_control(
+                db, str(session.id), str(session.org_id), reason="expired"
+            )
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False
 
 
 async def save_human_message(

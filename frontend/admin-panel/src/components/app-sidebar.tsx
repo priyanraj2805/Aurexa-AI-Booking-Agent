@@ -20,6 +20,11 @@ import {
   Upload,
   Trash2,
   Link as LinkIcon,
+  Users,
+  UserPlus,
+  Shield,
+  Building2,
+  ChevronDown,
 } from "lucide-react";
 
 import {
@@ -66,6 +71,12 @@ const navApp = [
   { title: "Inbox", url: "/dashboard/conversations", icon: Inbox },
 ];
 
+const navOrg = [
+  { title: "Users", url: "/dashboard/users", icon: Users, perm: "users.view" },
+  { title: "Members", url: "/dashboard/members", icon: UserPlus, perm: "users.view" },
+  { title: "Roles", url: "/dashboard/roles", icon: Shield, perm: "roles.view" },
+];
+
 const navSettings = [
   { title: "Agent Personalisation", url: "/dashboard/agent", icon: Bot },
   { title: "Business Hours", url: "/dashboard/business-hours", icon: CalendarClock },
@@ -79,6 +90,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const router = useRouter();
   const { isMobile, setOpenMobile, openMobile } = useSidebar();
   const [confirmLogout, setConfirmLogout] = React.useState(false);
+  const [orgOpen, setOrgOpen] = React.useState(false);
   const avatarInputRef = React.useRef<HTMLInputElement>(null);
   const [avatarUploading, setAvatarUploading] = React.useState(false);
 
@@ -150,6 +162,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     if (url === "/dashboard") return pathname === "/dashboard";
     return pathname === url || pathname.startsWith(url + "/");
   };
+
+  const hasPerm = (perm: string) => (user as unknown as { permissions?: string[] })?.permissions?.includes(perm) ?? false;
 
   // Close the mobile drawer whenever the route changes (covers clicks, back/forward).
   React.useEffect(() => {
@@ -254,6 +268,50 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             ))}
           </SidebarMenu>
         </div>
+
+        {/* ── Organization Dropdown in menubar — Users/Members inside */}
+        {navOrg.some((i) => hasPerm(i.perm)) && (
+          <>
+            <div className="w-full h-0 bg-border opacity-0 transition-all duration-250 ease-in-out group-data-[collapsible=icon]:h-px group-data-[collapsible=icon]:my-2 group-data-[collapsible=icon]:opacity-100" />
+            <div className="mt-1">
+              <button
+                onClick={() => setOrgOpen((v) => !v)}
+                className={[
+                  "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground hover:bg-accent transition-colors",
+                  "group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0",
+                ].join(" ")}
+              >
+                <span className="flex items-center gap-2 group-data-[collapsible=icon]:hidden">
+                  <Building2 className="size-3.5" /> Organization
+                </span>
+                <Building2 className="size-4 hidden group-data-[collapsible=icon]:block" />
+                <ChevronDown
+                  className={`size-3 opacity-60 transition-transform group-data-[collapsible=icon]:hidden ${orgOpen ? "rotate-180" : ""}`}
+                />
+              </button>
+              {orgOpen && (
+                <SidebarMenu className="gap-1 px-1 mt-1 group-data-[collapsible=icon]:hidden">
+                  {navOrg
+                    .filter((item) => hasPerm(item.perm))
+                    .map((item) => (
+                      <SidebarMenuItem key={item.title}>
+                        <SidebarMenuButton
+                          isActive={isActive(item.url)}
+                          tooltip={item.title}
+                          onClick={handleNavClick(item.url)}
+                          className="h-8 gap-2 text-[13px] text-muted-foreground hover:text-foreground hover:bg-accent data-[active=true]:bg-primary/10 data-[active=true]:text-primary"
+                          render={<Link href={item.url} prefetch={false} />}
+                        >
+                          <item.icon className="size-4 shrink-0" />
+                          <span>{item.title}</span>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    ))}
+                </SidebarMenu>
+              )}
+            </div>
+          </>
+        )}
 
         {/* ── Separator (Only visible in icon mode) ── */}
         <div className="w-full h-0 bg-border opacity-0 transition-all duration-250 ease-in-out group-data-[collapsible=icon]:h-px group-data-[collapsible=icon]:my-2 group-data-[collapsible=icon]:opacity-100" />

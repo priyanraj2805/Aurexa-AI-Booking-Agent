@@ -58,10 +58,19 @@ function snapshot(id, rec) {
   };
 }
 
-function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, deliverInbound, sendReply, outbox, typingBeatMs }) {
+function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, deliverInbound, sendReply, outbox, typingBeatMs, notifyEvent }) {
   const clock = now || (() => Date.now());
   const beatMs = typingBeatMs || TYPING_BEAT_MS;
   const log = logger || { info: () => {}, warn: () => {}, error: () => {} };
+  // Lifecycle push to the backend (spontaneous logout/connect only).
+  // Best-effort by contract: failures never touch socket handling.
+  const notify = notifyEvent || (async () => null);
+  const fireEvent = (id, event) => {
+    try {
+      const p = notify(id, event);
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch (_) { /* never break socket handling */ }
+  };
   // P7 inbound pipeline (wired by index.js; tests inject fakes).
   const deliver = deliverInbound || (async () => null);
   // P8 outbound: route through the per-connection outbox when available so
@@ -241,6 +250,7 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
           rec.displayName = (user && user.name) || null;
           touch(id);
           log.info(`session connected`);
+          fireEvent(id, { type: 'connected' });
         },
         onClose: async ({ loggedOut }) => {
           touch(id);
@@ -249,6 +259,7 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
             rec.qr = null;
             rec.handle = null;
             log.warn(`session logged out (unlinked from phone)`);
+            fireEvent(id, { type: 'logged_out' });
             try {
               await wipeAuth(id);
             } catch (_) { /* already logged inside wipeAuth */ }
@@ -371,8 +382,21 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
     return started;
   }
 
-  async function closeAll() {
-    // Best-effort end of every live socket (shutdown path; P4 adds queue drain).
+  // Admin-initiated push (human handover): send plain text to a customer
+  // chat on this connection's socket. Routes through the same paced,
+  // retried outbox as inbound replies. Throws NO_SOCKET when offline.
+  async function sendTo(id, chatJid, body, idemKey) {
+    if (!ID_RE.test(id || '')) throw new InvalidConnectionId();
+    const text = String(body || '').trim();
+    if (!text) throw new Error('EMPTY_BODY');
+    const jid = String(chatJid || '').trim();
+    if (!jid) throw new Error('EMPTY_RECIPIENT');
+    await replyVia(id, jid, { type: 'text', body: text.slice(0, 4096) }, idemKey || null);
+    touch(id);
+    return { connectionId: id, sent: true };
+  }
+
+  async function closeAll() {    // Best-effort end of every live socket (shutdown path; P4 adds queue drain).
     await Promise.all([...sessions.values()].map(async (rec) => {
       if (rec.handle) {
         try {
@@ -386,7 +410,7 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
     }));
   }
 
-  return { start, status, freshQr, logout, list, get, resume, closeAll, forceReconnect, touch, handleInboundMessage };
+  return { start, status, freshQr, logout, list, get, resume, closeAll, forceReconnect, touch, handleInboundMessage, sendTo };
 }
 
 module.exports = { createSessionManager, InvalidConnectionId, parsePhoneNumber, backoffDelayMs };

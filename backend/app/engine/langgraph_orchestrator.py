@@ -18,6 +18,7 @@ from app.engine.agent.graph import booking_agent
 from app.engine.evaluator import StateEvaluator
 from app.engine import message_processor
 from app.engine import cancel_flow
+from app.engine import check_booking_flow
 from app.engine.recipient_resolution import resolve_email_from_collected_data
 from app.engine.user_visible_text import (
     extract_user_visible_text,
@@ -660,6 +661,14 @@ async def process_message_with_graph(
     if cancel_action is not None:
         return cancel_action
 
+    # Pending lookup completion: contact sent after a lookup request
+    # finishes the check instead of feeding the booking flow.
+    pending_action = await check_booking_flow.maybe_complete_pending_lookup(
+        db, org, org_config, chat_session, message_text
+    )
+    if pending_action is not None:
+        return pending_action
+
     # Fast-path: explicit OTP resend while awaiting verification.
     # The LLM is unreliable at routing a bare "resend", so handle it directly.
     if _is_resend_request(message_text) and _is_awaiting_otp(chat_session):
@@ -887,6 +896,18 @@ async def process_message_with_graph(
             assistant_message=action.message,
             directive=action.widget_directive or "TEXT_INPUT",
             intent="CANCEL_BOOKING",
+        )
+        return action
+
+    # Existing-booking lookup: driven SOLELY by the LLM's classification
+    # (user_intent == check_booking / CHECK_BOOKING). No keyword/regex
+    # inspection of message_text here — the model reads the actual meaning,
+    # so paraphrases ("do i have one?", "show my details", ...) all work.
+    # Booking progress is preserved inside the handler.
+    _normalized_intent = llm_intent.strip().lower().replace(" ", "_")
+    if _normalized_intent in ("check_booking", "checkbooking", "lookup_booking"):
+        action = await check_booking_flow.handle_check_booking(
+            db, org, org_config, chat_session
         )
         return action
     
@@ -2157,6 +2178,36 @@ async def process_message_with_graph(
                     errors={},
                     llm_generated_msg=assistant_message,
                 )
+            else:
+                # F1 next-field guard (mirrors the legacy path): the reply
+                # must visibly ask for the directive's field. A single-field
+                # mention of the WRONG field (e.g. asking "phone" while the
+                # next missing field is "email") is replaced with the
+                # deterministic ask — the LLM may never reorder required
+                # fields on its own.
+                _need_field = str((field_meta or {}).get("name") or "")
+                _collection_intent = str(chat_session.current_intent or "")
+                if (
+                    _need_field
+                    and _collection_intent in ("START_BOOKING", "PROVIDE_DATA")
+                    and not message_processor._response_asks_for_field(
+                        assistant_message,
+                        _need_field,
+                        (field_meta or {}).get("label"),
+                    )
+                ):
+                    logger.info(
+                        "next_field_guard(graph): reply missed '%s'; using deterministic ask",
+                        _need_field,
+                    )
+                    assistant_message = message_processor._build_context_aware_response(
+                        directive=directive,
+                        field_meta=field_meta,
+                        collected_data=dict(chat_session.collected_data or {}),
+                        valid_data={},
+                        errors={},
+                        llm_generated_msg=assistant_message,
+                    )
 
     assistant_message = _guard_user_visible_booking_message(
         assistant_message=assistant_message,

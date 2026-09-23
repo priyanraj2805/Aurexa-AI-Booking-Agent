@@ -22,6 +22,26 @@ def format_action_for_whatsapp(action_payload) -> dict:
     message = action_payload.message or ""
     # Strip markdown bold (WhatsApp uses *bold* natively)
     message = message.replace("**", "*")
+    # Human-texting style guarantee: em/en dashes read as AI-generated.
+    # Spaced em dashes become commas, bare ones get spaces trimmed into
+    # commas, and en dashes (often ranges) become plain hyphens.
+    message = message.replace(" — ", ", ").replace("—", ",").replace("–", "-")
+
+    # Validator corrections must be spoken, not just attached. The engine
+    # composes its text BEFORE validation runs, and WhatsApp has no inline
+    # validation UI (unlike the web widget) — so a rejected value's precise
+    # reason (e.g. "Invalid email: ...") is prepended here when the body
+    # doesn't already carry it. Without this, users get vague prose and no
+    # correction after typing a wrong email/phone/name.
+    try:
+        field_meta = getattr(action_payload, "field_meta", None) or {}
+        correction = str(field_meta.get("validation_error") or "").strip()
+        if correction and correction.replace("**", "*").lower() not in message.lower():
+            message = f"{correction}\n\n{message}" if message else correction
+            message = message.replace("**", "*")
+            message = message.replace(" — ", ", ").replace("—", ",").replace("–", "-")
+    except Exception:
+        pass
 
     # Summary / confirmation cards → interactive buttons
     if directive in ("REQUEST_CONFIRMATION", "BOOKING_SUMMARY_CARD"):

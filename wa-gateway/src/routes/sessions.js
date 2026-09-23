@@ -71,6 +71,27 @@ function sessionRoutes(manager) {
     }
   });
 
+  // Admin-initiated push (human handover): plain-text DM to a customer
+  // chat on this connection. Body: { to, body }. 404 unknown session,
+  // 409 socket offline, 400 bad payload.
+  router.post('/:id/send', async (req, res) => {
+    try {
+      const to = String((req.body && req.body.to) || '').trim();
+      const body = String((req.body && req.body.body) || '').trim();
+      if (!to || !body) return res.status(400).json({ detail: 'to and body are required' });
+      const idemKey = req.body && req.body.idemKey ? String(req.body.idemKey) : undefined;
+      const out = await manager.sendTo(req.params.id, to, body, idemKey);
+      return res.status(202).json(out);
+    } catch (err) {
+      if (err instanceof InvalidConnectionId) return invalidId(res);
+      if (err && err.message === 'NO_SOCKET') return res.status(409).json({ detail: 'SOCKET_OFFLINE' });
+      if (err && (err.message === 'EMPTY_BODY' || err.message === 'EMPTY_RECIPIENT')) {
+        return res.status(400).json({ detail: err.message });
+      }
+      throw err;
+    }
+  });
+
   router.get('/', (_req, res) => res.json({ sessions: manager.list() }));
 
   return router;

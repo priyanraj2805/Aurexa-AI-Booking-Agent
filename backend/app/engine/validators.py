@@ -26,6 +26,41 @@ except ImportError:
     HAS_PHONE_NUMBERS = False
 
 
+def _is_monotonic_run(digits: str) -> bool:
+    """True for strictly ascending/descending digit runs (e.g. 1234567890).
+
+    Allows the 9->0 wrap so full-keypad walks are caught. Single-step
+    comparison only — no reference to any specific number.
+    """
+    if len(digits) < 7:
+        return False
+    asc = all(
+        (int(digits[i + 1]) - int(digits[i])) % 10 == 1 for i in range(len(digits) - 1)
+    )
+    desc = all(
+        (int(digits[i]) - int(digits[i + 1])) % 10 == 1 for i in range(len(digits) - 1)
+    )
+    return asc or desc
+
+
+def _looks_like_fake_number(digits: str) -> bool:
+    """Heuristic fake-number screen for the lenient digit fallback.
+
+    Catches keypad walks (1234567890), near-uniform strings (1000000001 —
+    only 2 distinct digits across 10+ digits), and zeros-heavy placeholders.
+    Real subscriber numbers almost always carry 4+ distinct digits. Generic
+    pattern analysis — no blocklist of specific numbers.
+    """
+    core = digits[-10:] if len(digits) >= 10 else digits
+    if len(core) >= 10 and len(set(core)) <= 2:
+        return True
+    if _is_monotonic_run(core):
+        return True
+    if len(core) >= 10 and core.count("0") >= len(core) - 2:
+        return True
+    return False
+
+
 class DataValidator:
     """
     The strict Python backend boundary that verifies LLM extracted entities
@@ -144,6 +179,10 @@ class DataValidator:
                     canonical = phonenumbers.format_number(
                         parsed, phonenumbers.PhoneNumberFormat.E164
                     )
+                    # Even structurally valid ranges contain famous test
+                    # sequences (9876543210). Screen those generically.
+                    if _looks_like_fake_number(re.sub(r"\D", "", canonical)):
+                        return None, "Please provide a valid phone number.", metadata
                     region = phonenumbers.region_code_for_number(parsed) or normalized_country
                     metadata["country_code"] = region or normalized_country
                     return canonical, None, metadata
@@ -159,6 +198,12 @@ class DataValidator:
                     try:
                         _parsed_in = phonenumbers.parse(_digits_only, "IN")
                         if phonenumbers.is_valid_number(_parsed_in):
+                            if _looks_like_fake_number(_digits_only):
+                                return (
+                                    None,
+                                    "Please provide a valid phone number.",
+                                    metadata,
+                                )
                             metadata["country_code"] = "IN"
                             return (
                                 phonenumbers.format_number(
@@ -180,6 +225,8 @@ class DataValidator:
             return None, "Phone number is too long.", metadata
         # Reject obviously fake patterns (all same digit or sequential)
         if len(set(digits)) == 1:
+            return None, "Please provide a valid phone number.", metadata
+        if _looks_like_fake_number(digits):
             return None, "Please provide a valid phone number.", metadata
         return f"+{digits}", None, metadata
 
@@ -231,6 +278,14 @@ class DataValidator:
             return (
                 None,
                 "That doesn't look like a valid name. Please provide your real name.",
+            )
+        # Keyboard mashing ("Fhaaaaaaaa", "Heeee", "okkkkk") is never a name:
+        # no real name repeats one letter 3+ times in a row.
+        lowered = value.lower()
+        if re.search(r"(.)\1\1", lowered):
+            return (
+                None,
+                "That doesn't look like a real name. Please provide your full name.",
             )
         # Clean up extra whitespace
         cleaned = " ".join(value.split())

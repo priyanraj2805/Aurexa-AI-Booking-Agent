@@ -15,7 +15,10 @@ from app.api.v1.endpoints.auth import get_current_user
 from app.core.audit import log_audit_event
 from app.core.ws_manager import ws_manager
 from app.schemas.audit import AuditAction
+import logging
 import uuid
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -198,6 +201,60 @@ async def send_human_message(
     
     # Save human message
     message = await crud_chat.save_human_message(db, str(conversation_id), str(user.id), payload.content)
+
+    # Deliver to WhatsApp when the conversation lives there. Web delivery
+    # stays on the existing WebSocket broadcast below.
+    _channel = str(getattr(session, "channel", "") or "").lower()
+    if _channel in ("whatsapp", "whatsapp_cloud"):
+        try:
+            from app.core import whatsapp_cloud as _cloud
+
+            _to = str(getattr(session, "channel_user_id", "") or "")
+            if _channel == "whatsapp_cloud":
+                _res = await _cloud.send_cloud_text(_to, payload.content)
+                logger.info(
+                    "human message cloud send session=%s success=%s",
+                    str(conversation_id)[:8], _res.get("success"),
+                )
+            else:
+                from app.core import wa_gateway as _gw
+                from app.models.whatsapp_connection import WhatsAppConnection as _Conn
+
+                _conn_res = await db.execute(
+                    select(_Conn).where(
+                        _Conn.org_id == session.org_id
+                    )
+                )
+                _conn = _conn_res.scalars().first()
+                if _conn is not None:
+                    _sdata = session.state_data if isinstance(getattr(session, "state_data", None), dict) else {}
+                    _jid = str(_sdata.get("whatsapp_chat_jid") or "").strip()
+                    if not _jid:
+                        import re as _re
+
+                        _digits = "".join(_re.findall(r"\d", _to))
+                        _jid = f"{_digits}@s.whatsapp.net" if _digits else ""
+                    if _jid:
+                        _res = await _gw.send_session_message(
+                            str(_conn.id), _jid, payload.content,
+                            idem_key=f"human:{message.id}",
+                        )
+                        logger.info(
+                            "human message QR send session=%s sent=%s",
+                            str(conversation_id)[:8], _res.get("sent"),
+                        )
+                    else:
+                        logger.warning(
+                            "human message QR skipped (no recipient JID) session=%s",
+                            str(conversation_id)[:8],
+                        )
+                else:
+                    logger.warning(
+                        "human message QR skipped (no connection) session=%s",
+                        str(conversation_id)[:8],
+                    )
+        except Exception:
+            logger.warning("human message WhatsApp delivery failed", exc_info=True)
 
     # Best-effort real-time broadcast to the customer widget (Phase 3+5).
     try:

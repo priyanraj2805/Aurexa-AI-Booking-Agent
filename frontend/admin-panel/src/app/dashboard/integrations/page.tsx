@@ -395,6 +395,9 @@ export default function IntegrationsPage() {
     loadCalendarConfig();
     loadWidgetToken();
     loadRouteStatus();
+    // Overview cards (e.g. WhatsApp API badge) render from this state —
+    // without an initial load they permanently show "Configure".
+    loadQrStatus();
 
     const fromQuery = normalizeApiBase(searchParams.get("public_api_base"));
     const fromStorage =

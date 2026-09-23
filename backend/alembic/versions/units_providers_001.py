@@ -21,7 +21,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision: str = "units_providers_001"
-down_revision: Union[str, Sequence[str], None] = "remove_adminplus_hierarchy"
+down_revision: Union[str, Sequence[str], None] = "add_provider_user_link"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

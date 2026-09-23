@@ -12,7 +12,6 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 
-from cachetools import TTLCache
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
@@ -24,7 +23,11 @@ from app.core.audit import log_audit_event
 from app.core import wa_gateway
 from app.core.wa_gateway import WaGatewayError
 from app.core.limiter import limiter
-from app.core.whatsapp_debouncer import get_session_lock, is_duplicate
+from app.core.whatsapp_debouncer import (
+    get_session_lock,
+    is_duplicate,
+    check_sender_rate_limit,
+)
 from app.db.database import get_db
 from app.models.organization import Organization
 from app.models.user import User
@@ -35,11 +38,6 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# Inbound per-sender rate limit for the QR transport (mirrors Meta webhook:
-# max 10 messages per sender per 60 seconds).
-_inbound_rate_cache: TTLCache = TTLCache(maxsize=10000, ttl=60)
-
 
 class ConnectionSnapshot(BaseModel):
     status: str
@@ -130,8 +128,75 @@ def _apply_gateway_status(row: WhatsAppConnection, gw: dict) -> None:
             row.disconnected_at = now
 
 
-def _audit(request: Request, background_tasks: BackgroundTasks, user: User, action: AuditAction) -> None:
-    log_audit_event(
+async def _alert_whatsapp_unlinked(db: AsyncSession, row: WhatsAppConnection) -> None:
+    """Fire a deduped critical alert + org notification when the number unlinks.
+
+    Best-effort and never raises — status polling must keep working even if
+    alerting fails. `create_system_alert` dedupes on (org, component, code),
+    so repeated polls bump a counter instead of spamming.
+    """
+    try:
+        from app.crud import monitoring as _mon
+        from app.schemas.monitoring import (
+            AlertComponent as _AC,
+            AlertSeverity as _AS,
+            SystemAlertCreate as _SAC,
+        )
+        from app.core.org_notify import notify_org as _notify
+
+        await _mon.create_system_alert(
+            db,
+            _SAC(
+                org_id=row.org_id,
+                component=_AC.WHATSAPP,
+                severity=_AS.CRITICAL,
+                code="WHATSAPP_LOGGED_OUT",
+                message=(
+                    "WhatsApp was unlinked from the phone — the booking agent "
+                    "cannot reply on WhatsApp until you scan a fresh QR code."
+                ),
+                context={"connection_id": str(row.id)},
+            ),
+        )
+        await _notify(
+            org_id=row.org_id,
+            kind="whatsapp_disconnected",
+            title="WhatsApp disconnected",
+            body=(
+                "Your WhatsApp number was unlinked. Open Integrations → "
+                "WhatsApp and scan the QR code to reconnect."
+            ),
+            resource_type="whatsapp_connection",
+            resource_id=str(row.id),
+        )
+    except Exception:
+        logger.warning("whatsapp unlink alert failed", exc_info=True)
+
+
+async def _resolve_whatsapp_alerts(db: AsyncSession, row: WhatsAppConnection) -> None:
+    """Clear open unlink alerts once the number is back (re-paired/connected)."""
+    try:
+        from app.models.system_alert import SystemAlert
+
+        now = datetime.now(timezone.utc)
+        res = await db.execute(
+            select(SystemAlert).where(
+                SystemAlert.org_id == row.org_id,
+                SystemAlert.code == "WHATSAPP_LOGGED_OUT",
+                SystemAlert.resolved_at.is_(None),
+            )
+        )
+        changed = False
+        for alert in res.scalars().all():
+            alert.resolved_at = now
+            changed = True
+        if changed:
+            await db.commit()
+    except Exception:
+        logger.warning("whatsapp alert resolve failed", exc_info=True)
+
+
+def _audit(request: Request, background_tasks: BackgroundTasks, user: User, action: AuditAction) -> None:    log_audit_event(
         background_tasks,
         org_id=user.org_id,
         actor_id=user.id,
@@ -182,6 +247,8 @@ async def connect_start(
     _apply_gateway_status(row, gw)
     await db.commit()
     await db.refresh(row)
+    # Re-pairing supersedes any open unlink alert.
+    await _resolve_whatsapp_alerts(db, row)
     _audit(request, background_tasks, user, AuditAction.WHATSAPP_QR_CONNECT)
     logger.info("whatsapp-qr pairing started org=%s", user.org_id)
     return _snapshot(row)
@@ -216,6 +283,7 @@ async def get_status(
     row = await _get_row(db, user.org_id)
     if row is None:
         return _snapshot(None)
+    _prev_status = row.status
     try:
         gw = await wa_gateway.get_session_status(str(row.id))
     except WaGatewayError as exc:
@@ -231,6 +299,13 @@ async def get_status(
     _apply_gateway_status(row, gw or {})
     await db.commit()
     await db.refresh(row)
+    # Transition alerts: unlinking needs a loud, deduped signal (admins
+    # otherwise discover it only when customers go silent); recovery clears it.
+    if _prev_status != row.status:
+        if row.status == WhatsAppConnectionStatus.LOGGED_OUT:
+            await _alert_whatsapp_unlinked(db, row)
+        elif row.status == WhatsAppConnectionStatus.CONNECTED:
+            await _resolve_whatsapp_alerts(db, row)
     return _snapshot(row)
 
 
@@ -255,6 +330,8 @@ async def disconnect(
     row.disconnected_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(row)
+    # A deliberate disconnect supersedes any open unlink alert.
+    await _resolve_whatsapp_alerts(db, row)
     _audit(request, background_tasks, user, AuditAction.WHATSAPP_QR_DISCONNECT)
     logger.info("whatsapp-qr disconnected org=%s", user.org_id)
     return _snapshot(row)
@@ -274,6 +351,19 @@ async def reconnect(
             status_code=409,
             detail="Session was unlinked. Start connecting again to scan a fresh QR.",
         )
+    # Never force-restart a healthy socket: killing a live connection makes
+    # WhatsApp replace it (conflict storm) and drops in-flight replies. When
+    # the gateway reports connected, sync the row and report — no-op.
+    try:
+        _live = await wa_gateway.get_session_status(str(row.id))
+    except WaGatewayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    if _live is not None and str(_live.get("status") or "") == "connected":
+        _apply_gateway_status(row, _live)
+        await db.commit()
+        await db.refresh(row)
+        logger.info("whatsapp-qr reconnect no-op (already connected) org=%s", user.org_id)
+        return _snapshot(row)
     try:
         gw = await wa_gateway.reconnect_session(str(row.id))
     except WaGatewayError as exc:
@@ -351,6 +441,13 @@ class QrInboundPayload(BaseModel):
     pushName: Optional[str] = None
 
 
+class QrEventPayload(BaseModel):
+    """Gateway lifecycle push (service-key auth, no JWT)."""
+
+    connectionId: str
+    event: str  # logged_out | connected
+
+
 async def _require_gateway_key(request: Request) -> None:
     want = settings.WA_GATEWAY_SERVICE_KEY or ""
     got = request.headers.get("X-Gateway-Key", "")
@@ -358,9 +455,55 @@ async def _require_gateway_key(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Invalid gateway credentials")
 
 
+@router.post("/internal/whatsapp-qr/events")
+async def qr_events(
+    payload: QrEventPayload,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(_require_gateway_key),
+):
+    """Gateway lifecycle push: spontaneous logout / (re)connect.
+
+    Polling-only status goes stale between admin visits, so the gateway
+    reports terminal events directly: the DB row, the unlink alert, and
+    its resolution all update within seconds, with no admin action.
+    Unknown connections and unknown events are ignored (never 500 — the
+    gateway must not retry-loop these).
+    """
+    import uuid as _uuid
+
+    try:
+        connection_uuid = _uuid.UUID(str(payload.connectionId))
+    except ValueError:
+        return {"status": "ignored", "reason": "unknown_connection"}
+    row = (
+        await db.execute(
+            select(WhatsAppConnection).where(WhatsAppConnection.id == connection_uuid)
+        )
+    ).scalars().first()
+    if row is None:
+        return {"status": "ignored", "reason": "unknown_connection"}
+    event = str(payload.event or "").strip().lower()
+    now = datetime.now(timezone.utc)
+    if event == "logged_out":
+        if row.status != WhatsAppConnectionStatus.LOGGED_OUT:
+            row.status = WhatsAppConnectionStatus.LOGGED_OUT
+            row.disconnected_at = now
+            await db.commit()
+            await _alert_whatsapp_unlinked(db, row)
+        return {"status": "ok"}
+    if event == "connected":
+        row.status = WhatsAppConnectionStatus.CONNECTED
+        row.connected_at = row.connected_at or now
+        row.last_seen_at = now
+        await db.commit()
+        await _resolve_whatsapp_alerts(db, row)
+        return {"status": "ok"}
+    return {"status": "ignored", "reason": "unknown_event"}
+
+
 @router.post("/internal/whatsapp-qr/inbound")
-async def qr_inbound(
-    payload: QrInboundPayload,
+async def qr_inbound(    payload: QrInboundPayload,
     request: Request,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
@@ -424,12 +567,9 @@ async def qr_inbound(
         is_knowledge = _is_potential_knowledge_question(text)
     except Exception:
         is_knowledge = False
-    if not is_otp_code and not is_knowledge:
-        count = _inbound_rate_cache.get(from_phone, 0)
-        if count >= 10:
-            logger.warning("QR inbound rate limit exceeded")
-            return {"status": "rate_limited"}
-        _inbound_rate_cache[from_phone] = count + 1
+    # Flood accounting is enforced AFTER session load so a burst gets a
+    # spoken slowdown notice, never silence.
+    _rate_exempt = bool(is_otp_code or is_knowledge)
 
     from app.crud import chat as crud_chat
     from app.engine import runtime_router
@@ -454,6 +594,53 @@ async def qr_inbound(
     chat_session = await crud_chat.get_or_create_channel_session(
         db, str(org.id), "whatsapp", from_phone
     )
+    # Stash the full chat JID (+ push name) for admin→customer pushes.
+    # channel_user_id holds digits only, which is unreliable for LID
+    # identities — the stored JID always routes.
+    try:
+        _cd_jid = dict(chat_session.collected_data or {})
+        if str(payload.chatJid or "").strip():
+            _cd_jid["whatsapp_chat_jid"] = str(payload.chatJid).strip()
+        if str(payload.pushName or "").strip():
+            _cd_jid["pushName"] = str(payload.pushName).strip()[:128]
+        chat_session.collected_data = _cd_jid
+        await crud_chat.update_chat_session(db, str(chat_session.session_id), chat_session)
+    except Exception:
+        pass
+    # Human handover: the admin owns this conversation — persist the
+    # customer message for the inbox and send NOTHING back. (Directive-tap
+    # guards below must not reply either.)
+    try:
+        if await crud_chat.is_human_takeover_active(db, str(chat_session.session_id)):
+            try:
+                await crud_chat.save_message(db, str(chat_session.session_id), "user", text)
+            except Exception:
+                pass
+            logger.info(
+                "qr inbound human-active: AI silent, session=%s",
+                str(chat_session.session_id)[:8],
+            )
+            return {"status": "ok", "session_id": str(chat_session.session_id), "reply": None}
+    except Exception:
+        pass
+    # Flood protection (sliding window — steady pacing never trips it). A
+    # burst gets a spoken slowdown notice with the transcript saved, never
+    # silence: silent drops were reported as "agent stops replying".
+    if not _rate_exempt:
+        _limited, _retry_after = check_sender_rate_limit(f"qr:{from_phone}")
+        if _limited:
+            _wait = max(1, int(round(_retry_after)))
+            _slow_body = (
+                f"You're sending messages very quickly — please wait about "
+                f"{_wait} seconds and send that again."
+            )
+            try:
+                await crud_chat.save_message(db, str(chat_session.session_id), "user", text)
+                await crud_chat.save_message(db, str(chat_session.session_id), "agent", _slow_body)
+            except Exception:
+                pass
+            logger.warning("QR inbound burst slowed (retry in ~%ss)", _wait)
+            return {"status": "ok", "session_id": str(chat_session.session_id), "reply": {"type": "text", "body": _slow_body[:4096]}}
     # Structured directive tap — handle without LLM if text matches active directive's option
     try:
         _active_id = None
@@ -632,15 +819,38 @@ async def qr_inbound(
                                 "value": _iso_g,
                             }
                         else:
-                            _horizon_g = str(getattr(_dir, "description", "") or "").strip()
-                            _body = _guards.date_correction(text, _corr_g or "", _horizon_g)
+                            # Not a date value: let the LLM decide. Lookup /
+                            # cancel / change / question turns must reach the
+                            # engine instead of being trapped by a date-format
+                            # correction. Pure LLM judgment — no phrase lists.
+                            _bypass = False
                             try:
-                                await crud_chat.save_message(db, str(chat_session.session_id), "user", text)
-                                await crud_chat.save_message(db, str(chat_session.session_id), "agent", _body)
+                                from app.engine import check_booking_flow as _check_flow
+
+                                _bypass = await _check_flow.should_bypass_step_guard(text)
                             except Exception:
-                                pass
-                            logger.info(f"Directive {str(_dir.id)[:8]} wrong-date corrected ({_reason_g}): {text[:40]!r}")
-                            return {"status": "ok", "session_id": str(chat_session.session_id), "reply": {"type": "text", "body": _body[:4096]}}
+                                _bypass = False
+                            if _bypass:
+                                _dir.status = "EXPIRED"
+                                _cd_b = dict(chat_session.collected_data or {})
+                                _cd_b.pop("active_directive_id", None)
+                                chat_session.collected_data = _cd_b
+                                try:
+                                    await db.commit()
+                                except Exception:
+                                    pass
+                                logger.info(f"Directive {str(_dir.id)[:8]} LLM bypass to engine: {text[:40]!r}")
+                                _step_handled = True
+                            else:
+                                _horizon_g = str(getattr(_dir, "description", "") or "").strip()
+                                _body = _guards.date_correction(text, _corr_g or "", _horizon_g)
+                                try:
+                                    await crud_chat.save_message(db, str(chat_session.session_id), "user", text)
+                                    await crud_chat.save_message(db, str(chat_session.session_id), "agent", _body)
+                                except Exception:
+                                    pass
+                                logger.info(f"Directive {str(_dir.id)[:8]} wrong-date corrected ({_reason_g}): {text[:40]!r}")
+                                return {"status": "ok", "session_id": str(chat_session.session_id), "reply": {"type": "text", "body": _body[:4096]}}
                     # Change-intent on CONFIRM_BOOKING ("change my date"): map to
                     # the change option like the typo-tolerant confirm mapping.
                     if not _matched and str(getattr(_dir, "type", "")) == "CONFIRM_BOOKING":
@@ -690,6 +900,27 @@ async def qr_inbound(
                     # Wrong-slot guard: an active time picker exists but the
                     # text matches NOTHING. Deterministic format correction —
                     # no numbers (simple-text prompts show none), never the LLM.
+                    if not _matched and not _step_handled and str(getattr(_dir, "type", "")) in ("SELECT_SLOT", "SELECT_TIME", "SELECT_DATE"):
+                        # LLM bypass first: lookup/cancel/change/questions go
+                        # to the engine, never into a format correction.
+                        _llm_bypass2 = False
+                        try:
+                            from app.engine import check_booking_flow as _check_flow2
+
+                            _llm_bypass2 = await _check_flow2.should_bypass_step_guard(text)
+                        except Exception:
+                            _llm_bypass2 = False
+                        if _llm_bypass2:
+                            _dir.status = "EXPIRED"
+                            _cd_b2 = dict(chat_session.collected_data or {})
+                            _cd_b2.pop("active_directive_id", None)
+                            chat_session.collected_data = _cd_b2
+                            try:
+                                await db.commit()
+                            except Exception:
+                                pass
+                            logger.info(f"Directive {str(_dir.id)[:8]} LLM bypass to engine (slot guard): {text[:40]!r}")
+                            _step_handled = True
                     if not _matched and not _step_handled and str(getattr(_dir, "type", "")) in ("SELECT_SLOT", "SELECT_TIME", "SELECT_DATE"):
                         _dtype = str(getattr(_dir, "type", "") or "")
                         if _dtype == "CONFIRM_BOOKING":
@@ -822,6 +1053,9 @@ async def qr_inbound(
             logger.exception("qr inbound engine raised")
             raise
         _dt = _time.monotonic() - _t0
+        # Human handover won the race after the early check: stay silent.
+        if str(getattr(action, "widget_directive", "") or "") == "HUMAN_ACTIVE":
+            return {"status": "ok", "session_id": str(chat_session.session_id), "reply": None}
         # If a BookingDirective was just created for this turn, render it via the
         # dedicated WhatsAppDirectiveRenderer (stable IDs) instead of the generic
         # field_meta path. This ensures the outgoing Baileys payload contains

@@ -40,12 +40,14 @@ def _headers() -> Dict[str, str]:
     }
 
 
-async def _request(method: str, path: str) -> Optional[Dict[str, Any]]:
+async def _request(
+    method: str, path: str, payload: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
     """Returns parsed JSON, or None on gateway 404 (unknown session / no QR)."""
     url = f"{_base_url()}{path}"
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as http:
-            resp = await http.request(method, url, headers=_headers())
+            resp = await http.request(method, url, headers=_headers(), json=payload)
     except httpx.HTTPError as exc:
         logger.warning("wa-gateway %s %s unreachable: %s", method, path, type(exc).__name__)
         raise WaGatewayError("WhatsApp gateway is unreachable") from exc
@@ -83,3 +85,18 @@ async def logout_session(connection_id: str) -> Dict[str, Any]:
 
 async def reconnect_session(connection_id: str) -> Optional[Dict[str, Any]]:
     return await _request("POST", f"/sessions/{connection_id}/reconnect")
+
+
+async def send_session_message(
+    connection_id: str, to: str, body: str, idem_key: Optional[str] = None
+) -> Dict[str, Any]:
+    """Admin-initiated push (human handover) to a customer chat.
+
+    Raises WaGatewayError when the socket is offline (409) or unreachable.
+    Never logs message content.
+    """
+    payload: Dict[str, Any] = {"to": to, "body": body[:4096]}
+    if idem_key:
+        payload["idemKey"] = idem_key
+    data = await _request("POST", f"/sessions/{connection_id}/send", payload)
+    return data or {"connectionId": connection_id, "sent": True}

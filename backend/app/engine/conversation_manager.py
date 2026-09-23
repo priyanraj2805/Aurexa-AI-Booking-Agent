@@ -103,6 +103,9 @@ class ConversationManager:
         if not session_id:
             return False
         try:
+            # Abandoned takeovers auto-expire first — a stale takeover can
+            # never silence the customer forever.
+            await crud_chat.maybe_expire_handover(self.db, session_id)
             from sqlalchemy import select
             from app.models.session import ChatSession
 

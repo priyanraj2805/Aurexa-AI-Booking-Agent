@@ -223,6 +223,20 @@ def _build_compaction_segment(messages: List[BaseMessage]) -> str:
         content = _message_content(message).strip()
         if not content:
             continue
+        if role == "ai":
+            # AI turns are raw structured JSON (response_text, extracted
+            # fields, intents). Compacting the raw blob leaks internals into
+            # future prompts and wastes the token budget — keep only what the
+            # customer actually saw.
+            try:
+                from app.engine.user_visible_text import extract_user_visible_text
+
+                content, _ = extract_user_visible_text(content)
+                content = content.strip()
+                if not content:
+                    continue
+            except Exception:
+                pass
         clipped = content[:SUMMARY_ITEM_CHAR_LIMIT]
         segments.append(f"{role}: {clipped}")
     return " | ".join(segments)
@@ -856,8 +870,55 @@ async def call_model(
         invalid_fields = data.get("invalid_fields", {})
         skipped_fields = data.get("skipped_fields", [])
         conflicts = data.get("conflicts", {})
-        unknown_fields = data.get("unknown_fields", {})
+        unknown_fields = data.get("unknown_fields", [])
         reopen_fields = data.get("reopen_fields", [])
+
+        # Name-grounding guard: company materials were injected this turn,
+        # so every person-name-shaped phrase in the visible reply must occur
+        # in them. Otherwise the model completed from training knowledge
+        # (e.g. inventing leadership names) — swap in an honest decline
+        # while keeping any extracted booking fields intact.
+        try:
+            from app.engine.user_visible_text import (
+                extract_user_visible_text as _extract_visible,
+            )
+            from app.engine.knowledge_guards import (
+                find_ungrounded_names as _find_names,
+                knowledge_decline as _kb_decline,
+            )
+
+            _injected_chunks = locals().get("rag_chunks") or []
+            if _injected_chunks:
+                _visible_now, _ = _extract_visible(str(response.content))
+                _chunk_texts = [
+                    str((c or {}).get("content") or "")
+                    for c in _injected_chunks
+                    if isinstance(c, dict)
+                ]
+                _safe_now: List[str] = [str(org_config.get("business_name") or "")]
+                _custom_prompts = org_config.get("custom_prompts") or {}
+                if isinstance(_custom_prompts, dict):
+                    _persona_now = _custom_prompts.get("persona") or {}
+                    if isinstance(_persona_now, dict):
+                        if _persona_now.get("agent_name"):
+                            _safe_now.append(str(_persona_now.get("agent_name")))
+                _bad_names = _find_names(
+                    _visible_now,
+                    _chunk_texts + [str(org_config.get("knowledge_context") or "")],
+                    safe_names=tuple(name for name in _safe_now if name),
+                )
+                if _bad_names:
+                    logger.warning(
+                        "knowledge_name_gate_blocked",
+                        extra={
+                            "session_id": state.get("session_id"),
+                            "names": _bad_names,
+                        },
+                    )
+                    data["response_text"] = _kb_decline()
+                    response = AIMessage(content=json.dumps(data))
+        except Exception:
+            logger.warning("knowledge_name_gate_failed_open", exc_info=True)
 
         required_fields = [
             field["name"] for field in field_definitions if field.get("required", True)

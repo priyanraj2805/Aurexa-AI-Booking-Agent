@@ -44,6 +44,46 @@ _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _PRICE_RE = re.compile(r"(?:₹|Rs\.?|INR|\$)\s?\d[\d,]*")
 _CLOCK_RE = re.compile(r"\b\d{1,2}:\d{2}\s?(?:AM|PM|am|pm)?\b|\b\d{1,2}\s?(?:AM|PM|am|pm)\b")
 
+# Two-or-more capitalized words: person-name shaped ("Aditya Grover").
+# Single capitalized words (Monday, DotStark, Confirm) are too noisy.
+_NAME_CANDIDATE_RE = re.compile(r"\b([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})+)\b")
+
+# Boilerplate / structural phrases that match the name shape but are never
+# a person's name. Generic site-chrome English — never business content.
+_GENERIC_NAME_PHRASES = frozenset(
+    {
+        "about us", "contact us", "privacy policy", "terms conditions",
+        "terms of service", "all rights reserved", "customer support",
+        "support team", "help center", "knowledge base", "frequently asked",
+        "asked questions", "read more", "learn more", "get started",
+        "book now", "book appointment", "privacy statement",
+    }
+)
+
+# Job-title words: "Chief Executive Officer" matches the shape but names
+# nobody. A candidate made ONLY of these is skipped.
+_TITLE_WORDS = frozenset(
+    {
+        "chief", "executive", "officer", "founder", "co-founder", "cofounder",
+        "president", "vice", "director", "managing", "manager", "head",
+        "chairman", "chairwoman", "partner", "associate", "assistant",
+        "senior", "junior", "lead", "team",
+    }
+)
+
+# Conversational openers and instruction verbs that glue onto a capitalized
+# word ("Thanks Somya", "See About Us", "Confirm Monday"). Generic UX
+# English — never business content.
+_NON_NAME_LEADERS = frozenset(
+    {
+        "thanks", "thank", "hello", "hi", "hey", "dear", "welcome",
+        "sure", "great", "perfect", "sorry", "yes", "no", "okay",
+        "see", "check", "visit", "read", "find", "learn", "explore",
+        "discover", "click", "open", "confirm", "select", "choose",
+        "pick", "share", "provide", "enter", "type", "send", "reply",
+    }
+)
+
 
 def _stem(word: str) -> str:
     """Light stem so open/opens, hour/hours, consultation/consultations match."""
@@ -189,6 +229,46 @@ def find_unlisted_entities(
                     found.append(candidate)
                 if len(found) >= 5:
                     return found
+    return found
+
+
+def find_ungrounded_names(
+    answer: str,
+    allowed_texts: List[str],
+    *,
+    safe_names: Tuple[str, ...] = (),
+) -> List[str]:
+    """Person-name-shaped phrases in `answer` absent from every allowed text.
+
+    Catches training-knowledge invention ("Aditya Grover is on the
+    leadership team") when the retrieved materials name nobody (or name
+    others). A candidate is skipped when it is site boilerplate, a bare job
+    title, a conversational opener glued to a name ("Thanks Somya"), or an
+    explicitly safe name (business / agent / persona names from live config).
+    No business content is hardcoded — every comparison runs on live data.
+    Returns the offending phrases (deduplicated, capped).
+    """
+    if is_honest_decline(answer):
+        return []
+    pooled_lower = " ".join(t or "" for t in allowed_texts).lower()
+    safe_lower = {str(n or "").strip().lower() for n in safe_names if str(n or "").strip()}
+    found: List[str] = []
+    for match in _NAME_CANDIDATE_RE.finditer(answer or ""):
+        candidate = match.group(1).strip()
+        lowered = candidate.lower()
+        if lowered in _GENERIC_NAME_PHRASES or lowered in safe_lower:
+            continue
+        words = lowered.split()
+        if all(word in _TITLE_WORDS for word in words):
+            continue
+        if words and words[0] in _NON_NAME_LEADERS:
+            continue
+        if lowered in pooled_lower:
+            continue
+        if candidate not in found:
+            found.append(candidate)
+        if len(found) >= 5:
+            break
     return found
 
 

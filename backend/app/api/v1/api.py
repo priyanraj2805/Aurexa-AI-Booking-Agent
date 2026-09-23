@@ -25,6 +25,7 @@ from app.api.v1.endpoints import (
     razorpay_route,
     catalog,
     roles,
+    members,
 )
 from app.core.config import settings
 from app.api.v1.endpoints.internal import bridge as internal_bridge
@@ -65,6 +66,9 @@ api_router.include_router(catalog.router, prefix="/catalog", tags=["catalog"])
 
 # GCP-style IAM policy management: custom roles, bindings, deny rules
 api_router.include_router(roles.router, prefix="/roles", tags=["roles"])
+
+# Org members & users (users share same admin-panel, members have own provider dashboard)
+api_router.include_router(members.router, prefix="/members", tags=["members"])
 
 # Razorpay Route payments + provider payouts (always mounted; routes themselves enforce auth / org scope)
 api_router.include_router(razorpay.router, prefix="", tags=["razorpay"])
