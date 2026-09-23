@@ -5,9 +5,10 @@
 //   restarted (socket wedged), via manager.forceReconnect().
 // - Transport activity = any socket event (QR/open/close) plus, from P7,
 //   inbound messages via manager.touch().
-// - Logout/dead states are left alone; only connected|reconnecting restart.
-const DEFAULT_SILENCE_MS = 10 * 60 * 1000;
-const DEFAULT_INTERVAL_MS = 30 * 1000;
+// - Logout/dead states are left alone; only RECONNECTING stale is restarted.
+//   Connected idle is left alone until Docker down or WA unlink (user request).
+const DEFAULT_SILENCE_MS = 60 * 60 * 1000;
+const DEFAULT_INTERVAL_MS = 60 * 1000;
 
 function createWatchdog({ manager, silentMs, intervalMs, now, logger, onRestart }) {
   const budget = silentMs ?? DEFAULT_SILENCE_MS;
@@ -26,7 +27,8 @@ function createWatchdog({ manager, silentMs, intervalMs, now, logger, onRestart 
     }
     const restarted = [];
     for (const s of sessions) {
-      if (s.status !== 'connected' && s.status !== 'reconnecting') continue;
+      // Only restart stale RECONNECTING, never a healthy connected idle (user request: stay up until WA unlink or Docker down)
+      if (s.status !== 'reconnecting') continue;
       const last = s.lastSeenAt ? Date.parse(s.lastSeenAt) : 0;
       if (Number.isNaN(last)) continue;
       if (clock() - last <= budget) continue;

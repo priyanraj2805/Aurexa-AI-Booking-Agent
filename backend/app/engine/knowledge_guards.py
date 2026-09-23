@@ -206,7 +206,20 @@ def find_unlisted_entities(
     pooled_lower = pooled.lower()
     found: List[str] = []
 
+    def _looks_like_date(candidate: str) -> bool:
+        c = candidate.strip()
+        # ISO date or time like 2026-09-25 or 09:00 AM - these are booking slots, not phone
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", c):
+            return True
+        if re.match(r"^\d{1,2}:\d{2}\s*(AM|PM|am|pm)?$", c.strip()):
+            return True
+        if re.match(r"^\d{1,2}-\d{2}-\d{4}$", c):
+            return True
+        return False
+
     def _missing(candidate: str, *, digit_compare: bool) -> bool:
+        if _looks_like_date(candidate):
+            return False
         if digit_compare:
             return _digits_only(candidate) not in pooled_groups
         return candidate.lower() not in pooled_lower

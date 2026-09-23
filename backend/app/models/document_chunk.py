@@ -21,6 +21,6 @@ class DocumentChunk(Base):
     page_number = Column(Integer, nullable=True)
     source_type = Column(String(20), nullable=False)  # pdf | docx | xlsx | csv | txt | md | website
     source_url = Column(Text, nullable=True)
-    metadata = Column(JSONB, default={})
+    chunk_metadata = Column("metadata", JSONB, default={})
     tsvector_col = Column(TSVECTOR, nullable=True)
     created_at = Column(DateTime, server_default=func.now())

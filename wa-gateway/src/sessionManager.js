@@ -12,7 +12,14 @@ const QRCode = require('qrcode');
 const { QR_FRESH_MS } = require('./baileys');
 const { ensureAuthDir, wipeConnection, discoverPaired } = require('./authStore');
 const { normalizeInbound } = require('./inbound');
-const { sendViaHandle } = require('./send');
+const { sendViaHandle, withTimeout } = require('./send');
+
+// Presence stanzas ride the same socket as messages: on a half-open socket
+// they hang forever with no error. Bound them well below any turn budget so
+// a wedged socket delays a turn by seconds, never swallows it silently.
+const PRESENCE_TIMEOUT_MS = 3000;
+// Minimum gap between transport-failure self-heals for one connection.
+const SELF_HEAL_DEBOUNCE_MS = 30 * 1000;
 
 const DELIVER_ATTEMPTS = 3;
 const DELIVER_BACKOFF_MS = [1000, 2000, 4000];
@@ -22,10 +29,11 @@ const DELIVER_BACKOFF_MS = [1000, 2000, 4000];
 // so the customer sees continuous typing until the reply (or failure).
 const TYPING_BEAT_MS = 8000;
 
-const ID_RE = /^[0-9a-fA-F-]{36}$/;
+  const ID_RE = /^[0-9a-fA-F-]{36}$/;
 
 const RECONNECT_BASE_MS = 2000;
 const RECONNECT_MAX_MS = 5 * 60 * 1000;
+const WHATSAPP_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 // Exponential backoff with jitter for reconnects (P4 hardening).
 function backoffDelayMs(attempt) {
@@ -93,6 +101,27 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
   });
   const sessions = new Map(); // id -> record
   const starting = new Map(); // id -> in-flight start promise
+  const rateBuckets = new Map(); // key: `${id}:${chatJid}` -> [timestamps ms] for per-phone 30/min guardrail
+  const RATE_LIMIT_MAX = 30;
+  const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+  function isRateLimited(id, chatJid) {
+    const key = `${id}:${String(chatJid || '')}`;
+    const nowMs = clock();
+    const arr = rateBuckets.get(key) || [];
+    const fresh = arr.filter((t) => t > nowMs - RATE_LIMIT_WINDOW_MS);
+    if (fresh.length >= RATE_LIMIT_MAX) {
+      rateBuckets.set(key, fresh);
+      return true;
+    }
+    fresh.push(nowMs);
+    rateBuckets.set(key, fresh);
+    if (rateBuckets.size > 2000) {
+      for (const [k, v] of rateBuckets) {
+        if (!v.length || v[0] < nowMs - RATE_LIMIT_WINDOW_MS) rateBuckets.delete(k);
+      }
+    }
+    return false;
+  }
 
   async function wipeAuth(id) {
     try {
@@ -115,6 +144,8 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
   async function handleInboundMessage(id, raw, source) {
     const rec = sessions.get(id);
     if (!rec || !rec.handle) return { dropped: 'no-session' };
+    // Any socket activity (even ignored from-me/no-text) proves transport is alive -> touch for watchdog
+    touch(id);
     let parsed;
     try {
       parsed = normalizeInbound(raw);
@@ -143,6 +174,10 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
     }
     const { last4, jidKind } = require('./diag');
     const envelope = parsed.envelope;
+    if (isRateLimited(id, envelope.chatJid)) {
+      log.warn(`inbound rate-limited for ${jidKind(envelope.chatJid)}:${last4(envelope.from)} (30/min)`);
+      return { dropped: 'rate-limited' };
+    }
     log.info(
       `inbound accepted src=${source || 'notify'} from=${jidKind(envelope.chatJid)}:${last4(envelope.from)} ` +
       `msgid=${String(envelope.messageId).slice(0, 24)} text_len=${envelope.text.length}`
@@ -157,9 +192,13 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
         const live = sessions.get(id);
         const handle = live && live.handle;
         if (handle && typeof handle.presence === 'function') {
-          await handle.presence(envelope.chatJid, state);
+          await withTimeout(handle.presence(envelope.chatJid, state), PRESENCE_TIMEOUT_MS, 'PRESENCE_TIMEOUT');
         }
-      } catch (_) { /* presence never fails the turn */ }
+      } catch (err) {
+        // A presence timeout on a "connected" socket is the signature of a
+        // half-open connection — say so loudly instead of stalling silently.
+        log.warn(`presence ${state} timed out or failed: ${(err && err.code) || (err && err.message) || 'unknown'}`);
+      }
     };
     const stopTyping = async () => {
       if (typingTimer) {
@@ -205,7 +244,13 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
     log.info(
       `backend replied: ${replyDict ? `type=${replyDict.type || '?'} body_len=${String(replyDict.body || '').length}` : 'no-reply'}`
     );
+    // P1-7 24h window guardrail: if customer hasn't written in 24h, free-form outside window should use template
+    // For now we log and still send text, but backend can enforce template based on lastSeenAt
     if (replyDict && (replyDict.body || replyDict.type)) {
+      const windowStart = rec.lastSeenAt ? Date.parse(rec.lastSeenAt) : 0;
+      if (windowStart && clock() - windowStart > WHATSAPP_WINDOW_MS) {
+        log.warn(`outside 24h window for ${envelope.chatJid}, free-form reply may need template (24h)`);
+      }
       try {
         await replyVia(id, envelope.chatJid, replyDict, `qr-reply:${envelope.messageId}`);
         log.info(`reply handed to outbox for delivery`);
@@ -213,6 +258,7 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
         return { delivered: true, replied: true };
       } catch (err) {
         log.error(`reply send failed: ${err.message}`);
+        noteTransportFailure(id, err);
         await stopTyping();
         return { delivered: true, replied: false };
       }
@@ -271,12 +317,15 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
           rec.reconnectAttempts += 1;
           log.warn(`socket closed, reconnecting in ${waitMs}ms (attempt ${rec.reconnectAttempts})`);
           setTimeout(() => {
-            // Only restart if nobody else did (e.g. explicit start/logout).
+            // Only restart if nobody else did (e.g. explicit start/logout) and no concurrent open in progress.
             const current = sessions.get(id);
-            if (current === rec && rec.status === 'reconnecting') {
-              openSocket(id, rec).catch((err) => {
+            if (current === rec && rec.status === 'reconnecting' && !starting.has(id)) {
+              // Use starting guard to avoid 2 concurrent makeSocket for same id (caused conflict replaced)
+              const p = openSocket(id, rec).catch((err) => {
                 log.error(`reconnect failed: ${err.message}`);
               });
+              starting.set(id, p);
+              p.finally(() => starting.delete(id));
             }
           }, waitMs).unref?.();
         },
@@ -349,6 +398,7 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
   // Never touches auth state (logged-out sessions need a re-scan, not a restart).
   async function forceReconnect(id) {
     if (!ID_RE.test(id || '')) throw new InvalidConnectionId();
+    if (starting.has(id)) return starting.get(id).then(() => snapshot(id, sessions.get(id)));
     const rec = sessions.get(id);
     if (!rec || rec.status === 'logged_out') return rec ? snapshot(id, rec) : null;
     if (rec.handle) {
@@ -359,7 +409,13 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
     }
     rec.status = 'reconnecting';
     touch(id);
-    await openSocket(id, rec);
+    const p = openSocket(id, rec);
+    starting.set(id, p);
+    try {
+      await p;
+    } finally {
+      starting.delete(id);
+    }
     return snapshot(id, rec);
   }
   function list() {
@@ -391,9 +447,30 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
     if (!text) throw new Error('EMPTY_BODY');
     const jid = String(chatJid || '').trim();
     if (!jid) throw new Error('EMPTY_RECIPIENT');
-    await replyVia(id, jid, { type: 'text', body: text.slice(0, 4096) }, idemKey || null);
+    try {
+      await replyVia(id, jid, { type: 'text', body: text.slice(0, 4096) }, idemKey || null);
+    } catch (err) {
+      noteTransportFailure(id, err);
+      throw err;
+    }
     touch(id);
     return { connectionId: id, sent: true };
+  }
+
+  // A failed transport await on a "connected" socket usually means it is
+  // half-open (server will not close it for us). Nudge one background
+  // reconnect, debounced — the next turn then rides a fresh socket instead
+  // of timing out again. Never throws; never blocks the caller.
+  function noteTransportFailure(id, err) {
+    try {
+      const rec = sessions.get(id);
+      if (!rec) return;
+      if (rec.status !== 'connected' && rec.status !== 'reconnecting') return;
+      if (clock() - (rec.lastTransportHeal || 0) < SELF_HEAL_DEBOUNCE_MS) return;
+      rec.lastTransportHeal = clock();
+      log.warn(`transport failure (${(err && err.code) || (err && err.message) || 'unknown'}), healing socket`);
+      forceReconnect(id).catch(() => {});
+    } catch (_) { /* self-heal must never break sends */ }
   }
 
   async function closeAll() {    // Best-effort end of every live socket (shutdown path; P4 adds queue drain).

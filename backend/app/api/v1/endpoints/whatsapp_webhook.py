@@ -709,6 +709,16 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                 _parts.append(_summary)
                             _parts.append("Reply CONFIRM to confirm or CHANGE to modify.")
                         _body = "\n\n".join(_parts).strip()
+                        # Same knowledge-answer combine as the QR transport:
+                        # never drop the engine's answer behind the step.
+                        try:
+                            _fm_c = getattr(action, "field_meta", None) or {}
+                            if isinstance(_fm_c, dict) and _fm_c.get("knowledge_answer"):
+                                _body = whatsapp_client.attach_knowledge_answer(
+                                    getattr(action, "message", ""), _body
+                                )
+                        except Exception:
+                            pass
                         wa_msg = {"type": "text", "body": _body[:4096]}
                         logger.info(f"Rendered simple-text directive (cloud) type={_dir_after.type} directive={str(_dir_after.id)[:8]}")
                 except Exception as _e:
@@ -747,7 +757,7 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                     _facts0.append(f"{(_f.currency or 'INR')} {(_f.amount_paise / 100):,.2f}")
                         except Exception:
                             pass
-                        _sess0 = [str(_cd0.get(k) or "") for k in ("name", "email", "phone")]
+                        _sess0 = [str(_cd0.get(k) or "") for k in ("name", "email", "phone", "date", "time")]
                         _safe0, _blocked0, _ents0 = _kb_guards.guard_final_text(
                             _body0, org_facts=_facts0, session_details=_sess0
                         )

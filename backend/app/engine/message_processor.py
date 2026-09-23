@@ -1147,6 +1147,16 @@ async def process_message(
         _dates_action = ActionPayload(message=_combined_dates_msg, widget_directive=_dir_for_dates, field_meta=_meta_for_dates)
         await _save_transcript(db, chat_session.session_id, message_text, _combined_dates_msg, _dir_for_dates)
         return _dates_action
+    # Field refusal pre-LLM: "no" / "don't want to share X" aimed at the
+    # current missing field gets a soft re-ask of the SAME field — the LLM
+    # never sees it, so it can neither skip ahead nor interrogate.
+    from app.engine import decline_flow as _decline_flow_pre
+
+    _refusal_action = await _decline_flow_pre.maybe_handle_field_refusal(
+        db, org, chat_session, message_text
+    )
+    if _refusal_action is not None:
+        return _refusal_action
     if is_oos:
         scope_label = persona.get("industry_context") or "our services"
         clarifying_msg = (
@@ -1246,6 +1256,15 @@ async def process_message(
             intent="CANCEL_BOOKING",
         )
         return action
+
+    # ── Decline override (deterministic, pre-LLM classification) ──
+    # An explicit "don't want to book" exits gracefully instead of being
+    # interrogated. Cancellations are excluded inside the helper itself.
+    from app.engine import decline_flow as _decline_flow_gate
+
+    if _decline_flow_gate.is_no_booking_request(message_text):
+        return await _decline_flow_gate.start_decline(db, org, chat_session)
+    await _decline_flow_gate.maybe_reengage(db, chat_session, message_text)
 
     # ── CHECK override (LLM-driven, no keywords) ─────────────
     # When the LLM classifies the turn as CHECK_BOOKING, show live booking
@@ -1676,21 +1695,27 @@ async def process_message(
             # reply must ask for the true next missing field. Free-form prose
             # that re-asks an already-collected field (the "stuck on email"
             # loop) is replaced with the deterministic single-field ask.
+            # A declined session gets answers only — never interrogation.
+            # Otherwise the deterministic ask is APPENDED (never replacing),
+            # so answers and acknowledgments are never squashed by the flow.
             _need_field = (chat_session.missing_fields or [None])[0]
             _fm = next_step.get("field_meta") if isinstance(next_step, dict) else None
+            from app.engine import decline_flow as _decline_flow
+            from app.engine.user_visible_text import looks_like_json_debris
+
+            # Debris check: raw JSON containing the field name would fool the
+            # cue test into thinking the reply asks for the field.
+            _visibly_asks_legacy = _response_asks_for_field(
+                llm_generated_msg, _need_field, (_fm or {}).get("label")
+            ) and not looks_like_json_debris(llm_generated_msg)
             if (
                 intent in _COLLECTION_INTENTS
                 and _need_field
                 and isinstance(next_step, dict)
-                and not _response_asks_for_field(
-                    llm_generated_msg, _need_field, (_fm or {}).get("label")
-                )
+                and not _decline_flow.is_declined(chat_session)
+                and not _visibly_asks_legacy
             ):
-                logger.info(
-                    "next_field_guard: free-form reply missed '%s'; using deterministic ask",
-                    _need_field,
-                )
-                msg = _build_context_aware_response(
+                _det_ask = _build_context_aware_response(
                     directive=next_step.get("directive", "TEXT_INPUT"),
                     field_meta=_fm,
                     collected_data=chat_session.collected_data,
@@ -1699,6 +1724,17 @@ async def process_message(
                     llm_generated_msg=llm_generated_msg,
                     agent_name=persona.get("agent_name", "Booking Assistant"),
                 )
+                # Machine debris is never appended — replace unconditionally.
+                if (isinstance(errors, dict) and errors.get(_need_field)) or looks_like_json_debris(
+                    llm_generated_msg
+                ):
+                    logger.info(
+                        "next_field_guard: free-form reply missed '%s'; using deterministic ask",
+                        _need_field,
+                    )
+                    msg = _det_ask
+                else:
+                    msg = f"{llm_generated_msg}\n\n{_det_ask}"
             else:
                 # Let the LLM handle it naturally (answer questions, explain why
                 # fields are needed, handle complaints).

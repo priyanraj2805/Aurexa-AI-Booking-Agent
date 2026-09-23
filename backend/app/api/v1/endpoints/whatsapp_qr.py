@@ -399,23 +399,11 @@ async def booking_toggle(
     if row is None:
         raise HTTPException(status_code=404, detail="No WhatsApp connection. Connect first.")
     row.whatsapp_booking_enabled = bool(body.enabled)
-    if body.enabled:
-        # WhatsApp bookings verify over email by default — enabling booking
-        # auto-enables email OTP (never auto-disables). Phone OTP remains
-        # independently controllable so OTP can still be sent on WhatsApp
-        # even while WhatsApp booking is on.
-        from app.models.config import OrgConfig as _OrgConfig
-
-        _cfg_res = await db.execute(
-            select(_OrgConfig).where(_OrgConfig.org_id == user.org_id)  # type: ignore[arg-type]
-        )
-        _cfg = _cfg_res.scalars().first()
-        if _cfg is not None and not bool(getattr(_cfg, "require_otp", True)):
-            _cfg.require_otp = True
-            logger.info(
-                "whatsapp-qr booking toggle auto-enabled email OTP org=%s",
-                user.org_id,
-            )
+    # NOTE: this toggle never touches email/phone OTP flags. An explicit
+    # admin OFF must always win — auto-enabling email OTP here silently
+    # reverted the Agent-page setting on every toggle (reported bug).
+    # Bookings with both OTPs off confirm unverified; the Agent page
+    # already warns about that next to the toggles.
     await db.commit()
     await db.refresh(row)
     _audit(request, background_tasks, user, AuditAction.WHATSAPP_QR_BOOKING_TOGGLE)
@@ -1136,6 +1124,17 @@ async def qr_inbound(    payload: QrInboundPayload,
                             _parts.append(_summary)
                         _parts.append("Reply CONFIRM to confirm or CHANGE to modify.")
                     _body = "\n\n".join(_parts).strip()
+                    # Knowledge answers must not die behind the step render:
+                    # mid-booking questions are answered AND the pending step
+                    # stays visible (answer first, step second).
+                    try:
+                        _fm_after = getattr(action, "field_meta", None) or {}
+                        if isinstance(_fm_after, dict) and _fm_after.get("knowledge_answer"):
+                            _body = whatsapp_client.attach_knowledge_answer(
+                                getattr(action, "message", ""), _body
+                            )
+                    except Exception:
+                        pass
                     wa_msg = {"type": "text", "body": _body[:4096]}
                     logger.info(f"Rendered simple-text directive type={_dir_after.type} directive={str(_dir_after.id)[:8]}")
             except Exception as _e:
@@ -1178,7 +1177,7 @@ async def qr_inbound(    payload: QrInboundPayload,
                                 _facts0.append(f"{(_f.currency or 'INR')} {(_f.amount_paise / 100):,.2f}")
                     except Exception:
                         pass
-                    _sess0 = [str(_cd0.get(k) or "") for k in ("name", "email", "phone")]
+                    _sess0 = [str(_cd0.get(k) or "") for k in ("name", "email", "phone", "date", "time")]
                     _safe0, _blocked0, _ents0 = _kb_guards.guard_final_text(
                         _body0, org_facts=_facts0, session_details=_sess0
                     )

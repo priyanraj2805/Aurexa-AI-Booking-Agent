@@ -48,28 +48,60 @@ function numberedFallback(body, options) {
   return lines.length > 0 ? `${body}\n\n${lines.join('\n')}\n\nReply with the option number.` : body;
 }
 
+// A half-open socket (post-rebuild flaps, server-side `replaced` fights)
+// can leave a transport await hanging FOREVER — no error, no close event.
+// Every handle call below is bounded: a wedged socket fails fast instead
+// of wedging the connection's outbox FIFO behind one stuck task.
+const DEFAULT_PRESENCE_TIMEOUT_MS = 3000;
+const DEFAULT_SEND_TIMEOUT_MS = 20000;
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(label || 'TRANSPORT_TIMEOUT');
+      err.code = 'TRANSPORT_TIMEOUT';
+      reject(err);
+    }, ms);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([Promise.resolve(promise), timeout]).finally(() => {
+    clearTimeout(timer);
+  });
+}
+
 // Sends via a socket handle ({ sendRaw, presence }). Typing presence is
 // best-effort and never fails the send.
-async function sendViaHandle(handle, chatJid, reply) {
+async function sendViaHandle(handle, chatJid, reply, opts) {
+  const timeouts = (opts && opts.timeouts) || {};
+  const presenceMs = timeouts.presenceMs ?? DEFAULT_PRESENCE_TIMEOUT_MS;
+  const sendMs = timeouts.sendMs ?? DEFAULT_SEND_TIMEOUT_MS;
   const rendered = toBaileysPayload(reply);
   if (typeof handle.presence === 'function') {
     try {
-      await handle.presence(chatJid, 'composing');
+      await withTimeout(handle.presence(chatJid, 'composing'), presenceMs, 'PRESENCE_TIMEOUT');
     } catch (_) { /* best effort */ }
   }
   try {
-    return await handle.sendRaw(chatJid, rendered.payload);
+    return await withTimeout(handle.sendRaw(chatJid, rendered.payload), sendMs, 'SEND_TIMEOUT');
   } catch (err) {
     if (rendered.kind === 'text') throw err;
     // Rich shape rejected (e.g. deprecated button type) — fall back to text.
-    return handle.sendRaw(chatJid, { text: rendered.fallbackText });
+    return withTimeout(handle.sendRaw(chatJid, { text: rendered.fallbackText }), sendMs, 'SEND_TIMEOUT');
   } finally {
     if (typeof handle.presence === 'function') {
       try {
-        await handle.presence(chatJid, 'paused');
+        await withTimeout(handle.presence(chatJid, 'paused'), presenceMs, 'PRESENCE_TIMEOUT');
       } catch (_) { /* best effort */ }
     }
   }
 }
 
-module.exports = { toBaileysPayload, numberedFallback, sendViaHandle };
+module.exports = {
+  toBaileysPayload,
+  numberedFallback,
+  sendViaHandle,
+  withTimeout,
+  DEFAULT_PRESENCE_TIMEOUT_MS,
+  DEFAULT_SEND_TIMEOUT_MS,
+};

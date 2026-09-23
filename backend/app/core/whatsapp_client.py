@@ -13,6 +13,23 @@ from typing import Dict, List
 logger = logging.getLogger(__name__)
 
 
+def attach_knowledge_answer(action_message: str, directive_body: str) -> str:
+    """Prepend a knowledge answer above a pending-step render.
+
+    Mid-booking questions ("tell me about X") are answered by the engine
+    while the booking step stays pending. Without this, the step render
+    replaces the answer and the customer never sees it. Returns the
+    directive body unchanged when there is no substantive answer.
+    """
+    answer = str(action_message or "").strip().replace("**", "*")
+    body = str(directive_body or "").strip()
+    if not answer or not body:
+        return body or answer
+    if answer.lower() in body.lower() or body.lower() in answer.lower():
+        return body
+    return f"{answer}\n\n{body}"[:4096]
+
+
 def format_action_for_whatsapp(action_payload) -> dict:
     """
     Convert an ActionPayload into a WhatsApp-friendly message dict.

@@ -17,17 +17,22 @@ import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-
 # ── Map PostgreSQL types to SQLite equivalents ────────────────────────
 from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB as PG_JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB as PG_JSONB, TSVECTOR as PG_TSVECTOR
 
 @compiles(PG_UUID, "sqlite")
 def compile_uuid_sqlite(type_, compiler, **kw):
     return "CHAR(36)"
 
+
 @compiles(PG_JSONB, "sqlite")
 def compile_jsonb_sqlite(type_, compiler, **kw):
+    return "TEXT"
+
+
+@compiles(PG_TSVECTOR, "sqlite")
+def compile_tsvector_sqlite(type_, compiler, **kw):
     return "TEXT"
 
 
@@ -90,15 +95,54 @@ PG_JSONB.result_processor = _jsonb_result_sqlite
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-do-not-use-in-production")
 os.environ.setdefault("DEBUG", "true")
 os.environ.setdefault("POSTGRES_SERVER", "localhost")
+os.environ.setdefault("TELEMETRY_ENABLED", "false")
+# Dummy LLM creds so ChatOpenAI can init without real provider; actual calls are mocked/fail gracefully
+os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
+os.environ.setdefault("LLM_API_KEY", "test-llm-key")
+os.environ.setdefault("LLM_BASE_URL", "https://example.com/v1")
 
 from app.db.base import Base
 from app.db.database import get_db
-from app.main import app
+from app.main import app as fastapi_app
 from app.core.security import create_access_token
 from app.core.limiter import limiter as shared_limiter
 
+# Ensure all models are imported before Base.metadata.create_all so
+# tables like org_notifications / document_chunks are created in sqlite.
+# Use importlib to avoid binding `app` name locally (would shadow fastapi_app).
+import importlib as _importlib
+
+for _mod in [
+    "app.models.organization",
+    "app.models.user",
+    "app.models.config",
+    "app.models.booking",
+    "app.models.session",
+    "app.models.message",
+    "app.models.otp",
+    "app.models.whatsapp_connection",
+    "app.models.system_alert",
+    "app.models.audit_log",
+    "app.models.org_notification",
+    "app.models.email_delivery",
+    "app.models.document_chunk",
+    "app.models.service_unit",
+    "app.models.rbac",
+    "app.models.razorpay_route",
+    "app.models.payment",
+    "app.models.booking_directive",
+    "app.models.escalation_policy",
+    "app.models.login_code",
+]:
+    _importlib.import_module(_mod)
+
 # ── Disable rate limiting for tests ──────────────────────────────────
 shared_limiter.enabled = False
+
+# Keep `app` alias for backward-compat with fixtures that expect `app`
+app = fastapi_app
+
+
 
 # ── Async SQLite engine (in-memory) ──────────────────────────────────
 
@@ -117,6 +161,36 @@ TestSessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
 )
+
+# ── Patch background sessions to use test engine ────────────────
+# app.core.org_notify / email_delivery_service / telemetry create their
+# own AsyncSessionLocal bound to real Postgres. For tests we rebind them
+# to the sqlite test engine so best-effort inserts hit the test DB.
+try:
+    import app.core.org_notify as _org_notify_mod
+
+    _org_notify_mod.AsyncSessionLocal = TestSessionLocal
+except Exception:
+    pass
+try:
+    import app.core.email_delivery_service as _email_svc_mod
+
+    _email_svc_mod.AsyncSessionLocal = TestSessionLocal
+except Exception:
+    pass
+try:
+    import app.core.telemetry as _tele_mod
+
+    if hasattr(_tele_mod, "AsyncSessionLocal"):
+        _tele_mod.AsyncSessionLocal = TestSessionLocal
+except Exception:
+    pass
+try:
+    import app.core.tasks as _tasks_mod
+
+    _tasks_mod.AsyncSessionLocal = TestSessionLocal
+except Exception:
+    pass
 
 
 # ── Database lifecycle ───────────────────────────────────────────────

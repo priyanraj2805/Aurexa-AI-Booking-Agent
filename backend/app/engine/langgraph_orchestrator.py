@@ -19,11 +19,13 @@ from app.engine.evaluator import StateEvaluator
 from app.engine import message_processor
 from app.engine import cancel_flow
 from app.engine import check_booking_flow
+from app.engine import decline_flow
 from app.engine.recipient_resolution import resolve_email_from_collected_data
 from app.engine.user_visible_text import (
     extract_user_visible_text,
     looks_like_confirmation_claim,
     looks_like_field_saved_claim,
+    looks_like_json_debris,
 )
 from app.schemas.agent import FieldDefinition, parse_field_definitions, order_field_definitions
 
@@ -661,6 +663,32 @@ async def process_message_with_graph(
     if cancel_action is not None:
         return cancel_action
 
+    # Booking decline: an explicit "don't want to book" exits gracefully
+    # instead of being interrogated for fields. (Cancel turns already
+    # returned above, so this never swallows a cancellation.)
+    if decline_flow.is_no_booking_request(message_text):
+        action = await decline_flow.start_decline(db, org, chat_session)
+        await _persist_transcript_best_effort(
+            db,
+            session_id=session_id,
+            user_message=message_text,
+            assistant_message=action.message,
+            directive=action.widget_directive or "TEXT_INPUT",
+            intent="DECLINED_BOOKING",
+        )
+        return action
+    # Re-engagement clears a recorded decline (values or book-words).
+    await decline_flow.maybe_reengage(db, chat_session, message_text)
+
+    # Field refusal: "no" / "don't want to share X" aimed at the current
+    # missing field gets a soft re-ask of the SAME field — never a jump
+    # ahead, never interrogation for something else.
+    refusal_action = await decline_flow.maybe_handle_field_refusal(
+        db, org, chat_session, message_text
+    )
+    if refusal_action is not None:
+        return refusal_action
+
     # Pending lookup completion: contact sent after a lookup request
     # finishes the check instead of feeding the booking flow.
     pending_action = await check_booking_flow.maybe_complete_pending_lookup(
@@ -929,6 +957,9 @@ async def process_message_with_graph(
                 if isinstance(raw_input, str) and raw_input.strip():
                     merged_collected_data["phone_raw_input"] = raw_input.strip()
         chat_session.collected_data = merged_collected_data
+    # Providing real booking data re-engages a declined session.
+    if isinstance(result.get("captured_deltas"), dict) and result["captured_deltas"]:
+        await decline_flow.clear_decline(db, chat_session)
     follow_up_fields = result.get("follow_up_fields")
     if result.get("slot_unavailable"):
         existing_follow_ups = list(follow_up_fields) if isinstance(follow_up_fields, list) else []
@@ -1386,6 +1417,27 @@ async def process_message_with_graph(
                                     if len(_slot_labels) >= 10:
                                         break
                                 _raw = _slot_labels
+                                # WhatsApp text-only guardrail: when user selects date, show all available slots as plain messages (no directive)
+                                # User explicitly requested: "we are not using any directives for our whatsapp bookings"
+                                if _is_whatsapp and _dtype == _DT.SELECT_SLOT:
+                                    # Build plain-text slots list for WhatsApp (no interactive)
+                                    if _slot_labels:
+                                        slots_text = "\n".join([f"• {label}" for label in _slot_labels])
+                                        assistant_message = f"Available slots for {str(_target)}:\n{slots_text}\n\nPlease reply with your preferred time (e.g., {_slot_labels[0]})"
+                                    else:
+                                        assistant_message = f"No available slots for {str(_target)}. Please try another date (e.g., {(await _resolve_horizon(db, org.id, org_config))[0] if False else 'tomorrow'})."
+                                    directive = "TEXT_INPUT"
+                                    field_meta = {
+                                        "name": "time",
+                                        "type": "time",
+                                        "label": "Preferred Time",
+                                        "available_slots": _slot_labels,
+                                        "target_date": str(_target),
+                                        "whatsapp_text_slots": True,
+                                    }
+                                    # Skip directive creation - text only
+                                    _raw = []
+                                    # Continue to bypass directive creation; will return as TEXT_INPUT below
                                 # Also set time prompt in requested format: hours + duration, with closure/exception
                                 if _slot_labels and not directive_meta.get("description"):
                                     try:
@@ -1658,6 +1710,13 @@ async def process_message_with_graph(
                     "date_reset_required": True,
                 }
             )
+
+    # Knowledge-answer marker: the graph injected company materials this
+    # turn, so the visible reply may carry retrieved facts. WhatsApp renders
+    # a pending booking step INSTEAD of the reply — the marker tells the
+    # transports to show both (answer + step) rather than dropping the answer.
+    if result.get("knowledge_answer") and isinstance(field_meta, dict):
+        field_meta["knowledge_answer"] = True
 
     booking_field_meta: Optional[Dict[str, Any]] = None
     raw_require_otp = getattr(org_config, "require_otp", True)
@@ -2165,6 +2224,9 @@ async def process_message_with_graph(
         # Exempt the intentional edit-details prompt which lists fields by design
         if field_meta.get("name") == "edit_details":
             pass
+        # A declined session gets answers only — never interrogation.
+        elif decline_flow.is_declined(chat_session):
+            pass
         else:
             # If LLM mentions 2+ fields or lists them, replace with deterministic single-field message
             _lower = (assistant_message or "").lower()
@@ -2184,23 +2246,29 @@ async def process_message_with_graph(
                 # mention of the WRONG field (e.g. asking "phone" while the
                 # next missing field is "email") is replaced with the
                 # deterministic ask — the LLM may never reorder required
-                # fields on its own.
+                # fields on its own. But when the message was NOT a field
+                # attempt at all (a question, refusal, chitchat — no
+                # validation error), the LLM's answer is KEPT and the
+                # deterministic ask is appended, so answers are never
+                # squashed by the flow.
                 _need_field = str((field_meta or {}).get("name") or "")
                 _collection_intent = str(chat_session.current_intent or "")
-                if (
-                    _need_field
-                    and _collection_intent in ("START_BOOKING", "PROVIDE_DATA")
-                    and not message_processor._response_asks_for_field(
+                # Debris check: raw JSON containing the field name would fool
+                # the cue test into thinking the reply asks for the field.
+                _visibly_asks = (
+                    message_processor._response_asks_for_field(
                         assistant_message,
                         _need_field,
                         (field_meta or {}).get("label"),
                     )
+                    and not looks_like_json_debris(assistant_message)
+                )
+                if (
+                    _need_field
+                    and _collection_intent in ("START_BOOKING", "PROVIDE_DATA")
+                    and not _visibly_asks
                 ):
-                    logger.info(
-                        "next_field_guard(graph): reply missed '%s'; using deterministic ask",
-                        _need_field,
-                    )
-                    assistant_message = message_processor._build_context_aware_response(
+                    _deterministic_ask = message_processor._build_context_aware_response(
                         directive=directive,
                         field_meta=field_meta,
                         collected_data=dict(chat_session.collected_data or {}),
@@ -2208,6 +2276,21 @@ async def process_message_with_graph(
                         errors={},
                         llm_generated_msg=assistant_message,
                     )
+                    _had_validation_error = bool(
+                        str((field_meta or {}).get("validation_error") or "").strip()
+                    )
+                    # Machine debris is never appended — it would leak raw
+                    # JSON into the chat. Replace unconditionally.
+                    if _had_validation_error or looks_like_json_debris(
+                        assistant_message
+                    ):
+                        logger.info(
+                            "next_field_guard(graph): reply missed '%s'; using deterministic ask",
+                            _need_field,
+                        )
+                        assistant_message = _deterministic_ask
+                    else:
+                        assistant_message = f"{assistant_message}\n\n{_deterministic_ask}"
 
     assistant_message = _guard_user_visible_booking_message(
         assistant_message=assistant_message,

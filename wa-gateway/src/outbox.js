@@ -13,6 +13,10 @@ const DEFAULT_MAX_PER_MINUTE = 20;
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_BASE_BACKOFF_MS = 1000;
 const DEFAULT_DEDUPE_TTL_MS = 10 * 60 * 1000;
+// A task that never settles (wedged socket await) must not wedge the whole
+// connection FIFO behind it: bound every attempt, fail into the normal
+// retry path on timeout.
+const DEFAULT_TASK_TIMEOUT_MS = 30000;
 
 function createOutbox(options) {
   const o = options || {};
@@ -21,6 +25,7 @@ function createOutbox(options) {
   const maxAttempts = o.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const baseBackoffMs = o.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS;
   const dedupeTtlMs = o.dedupeTtlMs ?? DEFAULT_DEDUPE_TTL_MS;
+  const taskTimeoutMs = o.taskTimeoutMs ?? DEFAULT_TASK_TIMEOUT_MS;
   const now = o.now || (() => Date.now());
   const delay = o.delay || ((ms) => new Promise((r) => setTimeout(r, ms)));
   const log = o.logger || { info: () => {}, warn: () => {}, error: () => {} };
@@ -70,6 +75,21 @@ function createOutbox(options) {
     }
   }
 
+  function runTaskWithTimeout(task) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const err = new Error('TASK_TIMEOUT');
+        err.code = 'TASK_TIMEOUT';
+        reject(err);
+      }, taskTimeoutMs);
+      if (timer.unref) timer.unref();
+    });
+    return Promise.race([Promise.resolve().then(task), timeout]).finally(() => {
+      clearTimeout(timer);
+    });
+  }
+
   async function pump(id) {
     if (pumping.get(id)) return;
     pumping.set(id, true);
@@ -81,7 +101,7 @@ function createOutbox(options) {
         await waitForRateWindow(id);
         item.attempts += 1;
         try {
-          const result = await item.task();
+          const result = await runTaskWithTimeout(item.task);
           q.shift();
           sentAt.set(id, [...(sentAt.get(id) || []), now()]);
           lastSend.set(id, now());

@@ -605,8 +605,10 @@ class TestBookingToggle:
         assert r.json()["booking_enabled"] is False
         assert r.json()["booking_active"] is False
 
-        # Enabling WhatsApp booking auto-enables email OTP (default channel):
-        # force it off first so the toggle-on must turn it back on.
+        # Enabling WhatsApp booking must NOT touch OTP flags: an explicit
+        # admin OFF always wins (auto-enable silently reverted the Agent
+        # page setting on every toggle). Force both off first so the
+        # toggle-on must leave them off.
         from app.models.config import OrgConfig
 
         cfg = (
@@ -617,7 +619,7 @@ class TestBookingToggle:
             )
         ).scalars().first()
         cfg.require_otp = False
-        cfg.require_phone_otp = True
+        cfg.require_phone_otp = False
         await db_session.commit()
 
         r = await client.post(
@@ -628,8 +630,8 @@ class TestBookingToggle:
         assert r.status_code == 200, r.text
         assert r.json()["booking_enabled"] is True
         await db_session.refresh(cfg)
-        assert cfg.require_otp is True
-        assert cfg.require_phone_otp is True  # phone OTP stays independently controllable
+        assert cfg.require_otp is False
+        assert cfg.require_phone_otp is False  # phone OTP stays independently controllable
 
         r = await client.post(
             "/api/v1/dashboard/whatsapp-qr/booking-toggle",

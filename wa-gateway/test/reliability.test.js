@@ -100,8 +100,9 @@ test('watchdog restarts silent sessions, spares active and logged-out ones', asy
   let now = 1_000_000;
   const restarted = [];
   const sessions = [
-    { connectionId: 'silent-1', status: 'connected', lastSeenAt: new Date(now - 20 * 60 * 1000).toISOString() },
+    { connectionId: 'silent-1', status: 'reconnecting', lastSeenAt: new Date(now - 20 * 60 * 1000).toISOString() },
     { connectionId: 'active-1', status: 'connected', lastSeenAt: new Date(now - 60 * 1000).toISOString() },
+    { connectionId: 'connected-idle-1', status: 'connected', lastSeenAt: new Date(now - 70 * 60 * 1000).toISOString() },
     { connectionId: 'dead-1', status: 'logged_out', lastSeenAt: new Date(0).toISOString() },
     { connectionId: 'fresh-1', status: 'awaiting_qr', lastSeenAt: new Date(0).toISOString() },
   ];

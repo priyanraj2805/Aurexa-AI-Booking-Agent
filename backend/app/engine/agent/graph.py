@@ -72,6 +72,20 @@ _KNOWLEDGE_QUERY_TOKEN_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+# P1-6 AI anti-injection guardrail: strip common prompt-hijack phrases before LLM
+_INJECTION_RE = re.compile(
+    r"(?i)(ignore\s+previous\s+instructions?|ignore\s+all\s+instructions?|system\s*:\s*|jailbreak|do\s+not\s+follow\s+previous|bypass\s+safety)",
+    flags=re.IGNORECASE,
+)
+
+
+def _sanitize_user_message(text: str) -> str:
+    if not text:
+        return text
+    cleaned = _INJECTION_RE.sub("", text)
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", cleaned)
+    return cleaned.strip()[:2000]
+
 
 def _looks_like_booking_field_value(message_text: str) -> bool:
     """True when a user message is a bare field value or short confirmation.
@@ -308,7 +322,7 @@ async def call_model(
     latest_user_message = ""
     for message in reversed(active_messages):
         if isinstance(message, HumanMessage):
-            latest_user_message = _message_content(message).strip()
+            latest_user_message = _sanitize_user_message(_message_content(message).strip())
             if latest_user_message:
                 break
 
@@ -342,6 +356,7 @@ async def call_model(
                 "validation_errors": {},
                 "validated_field_metadata": {},
                 "current_intent": "ASK_QUESTION",
+                "knowledge_answer": True,
                 "otp_required": bool(state.get("otp_required", False)),
                 "otp_event_key": str(state.get("otp_event_key") or ""),
                 "otp_code": str(state.get("otp_code") or ""),
@@ -385,6 +400,7 @@ async def call_model(
                 "validation_errors": {},
                 "validated_field_metadata": {},
                 "current_intent": "ASK_QUESTION",
+                "knowledge_answer": True,
                 "otp_required": bool(state.get("otp_required", False)),
                 "otp_event_key": str(state.get("otp_event_key") or ""),
                 "otp_code": str(state.get("otp_code") or ""),
@@ -1029,6 +1045,16 @@ async def call_model(
             else ""
         )
 
+        # Knowledge-answer marker: company materials were injected into THIS
+        # turn's prompt, so the visible reply may carry retrieved facts. The
+        # chat transports render a pending booking step INSTEAD of the reply
+        # unless they know an answer is inside — this flag tells them to show
+        # both. Booking-only turns (RAG skipped) never set it.
+        _knowledge_answer_now = bool(
+            (locals().get("rag_tier") or "skip") != "skip"
+            and locals().get("rag_chunks")
+        )
+
         return {
             "messages": [response],
             "summary": active_summary,
@@ -1043,6 +1069,7 @@ async def call_model(
             "merge_diagnostics": merge_result["diagnostics"],
             "validation_errors": validation_errors,
             "validated_field_metadata": validated_metadata,
+            "knowledge_answer": _knowledge_answer_now,
             "date_reset_required": date_reset_required,
             "fallback_reason": fallback_reason,
             "fallback_next_step": fallback_next_step,

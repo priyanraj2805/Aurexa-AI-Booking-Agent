@@ -66,3 +66,21 @@ def test_em_and_en_dashes_rewritten():
     assert "—" not in out["body"]
     assert "–" not in out["body"]
     assert "10-11 AM" in out["body"]
+
+
+def test_knowledge_answer_combines_with_step():
+    from app.core.whatsapp_client import attach_knowledge_answer
+
+    combined = attach_knowledge_answer(
+        "DotStark is an AI consultancy in Jaipur.",
+        "Please choose your preferred date for the appointment.",
+    )
+    assert combined.startswith("DotStark is an AI consultancy in Jaipur.")
+    assert "preferred date" in combined
+
+
+def test_knowledge_combine_noops_on_empty_or_dup():
+    from app.core.whatsapp_client import attach_knowledge_answer
+
+    assert attach_knowledge_answer("", "Pick a date") == "Pick a date"
+    assert attach_knowledge_answer("Pick a date", "Pick a date") == "Pick a date"

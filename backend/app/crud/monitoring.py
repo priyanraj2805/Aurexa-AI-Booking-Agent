@@ -35,11 +35,36 @@ def build_alert_dedupe_key(
     return f"{org_key}:{component}:{code}"
 
 
+def _sanitize_alert_context(ctx: dict | None) -> dict | None:
+    if not isinstance(ctx, dict):
+        return ctx
+    sanitized: dict = {}
+    for k, v in ctx.items():
+        lk = str(k).lower()
+        # PII guardrail: never store email/phone/token/name/http in alert context
+        if lk in {"email", "phone", "phone_number", "customer_email", "admin_email", "recipient_email", "name", "token", "authorization", "api_key", "password"}:
+            continue
+        if "email" in lk or "phone" in lk or "token" in lk or lk == "http" or "url" in lk:
+            # Allow meeting_link_status/provider/error_code but not raw URLs/tokens
+            if lk in {"provider", "meeting_link_status", "error_code", "failure_type", "meeting_link_status"}:
+                sanitized[k] = v
+                continue
+            continue
+        # Also strip http-like values
+        if isinstance(v, str) and ("http://" in v or "https://" in v):
+            continue
+        sanitized[k] = v
+    return sanitized
+
+
 async def create_system_alert(db: AsyncSession, payload: SystemAlertCreate) -> SystemAlert:
     component = (
         payload.component.value if hasattr(payload.component, "value") else payload.component
     )
     severity = payload.severity.value if hasattr(payload.severity, "value") else payload.severity
+    # PII guardrail: sanitize context before dedupe/save
+    if payload.context is not None:
+        payload.context = _sanitize_alert_context(payload.context)
     dedupe_key = payload.dedupe_key or build_alert_dedupe_key(
         org_id=payload.org_id,
         component=component,

@@ -6,6 +6,55 @@ from typing import Any, Dict, Tuple
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*? response", flags=re.IGNORECASE | re.DOTALL)
 _THINK_TAG_RE = re.compile(r"</?think\b[^>]*>", flags=re.IGNORECASE)
 
+# Structural keys of our LLM contract. Their presence means "this was meant
+# to be a machine payload" — never business content, safe to key on.
+_RESPONSE_KEYS = (
+    "response_text",
+    "response_message",
+    "message",
+    "text",
+    "assistant_response",
+)
+_CONTRACT_KEYS = ("response_text", "extracted_fields", "user_intent")
+
+_RESPONSE_VALUE_RE = re.compile(
+    r'"(response_text|response_message|message|text|assistant_response)"'
+    r'\s*:\s*"((?:[^"\\]|\\.)*)"',
+    flags=re.DOTALL,
+)
+
+
+def looks_like_json_debris(text: Any) -> bool:
+    """True when text carries our LLM-contract keys but is not valid JSON.
+
+    Rendered verbatim this leaks internals ("response_text": ... bubbles),
+    so callers must substitute a safe fallback instead.
+    """
+    lowered = str(text or "").lower()
+    return any(f'"{key}"' in lowered for key in _CONTRACT_KEYS)
+
+
+def _repair_response_text(text: str) -> str:
+    """Salvage the human reply from malformed model JSON (missing braces,
+    leading/trailing prose the balanced-span parser missed)."""
+    stripped = str(text or "").strip()
+    if not stripped or '"' not in stripped:
+        return ""
+    match = _RESPONSE_VALUE_RE.search(stripped)
+    if not match:
+        return ""
+    raw_value = match.group(2)
+    try:
+        decoded = json.loads(f'"{raw_value}"')
+        if isinstance(decoded, str) and decoded.strip():
+            return decoded
+    except Exception:
+        pass
+    fallback = (
+        raw_value.replace('\\"', '"').replace("\\n", "\n").replace("\\\\", "\\").strip()
+    )
+    return fallback
+
 
 CONFIRMATION_CLAIM_PATTERN = re.compile(
     r"\b("
@@ -160,6 +209,19 @@ def extract_user_visible_text(raw_message: Any) -> Tuple[str, Dict[str, Any]]:
                 return sanitize_user_visible_text(value), parsed_payload
         if looked_like_json_object:
             return sanitize_user_visible_text(raw_message), parsed_payload
+
+    # Malformed payload (e.g. missing opening brace): salvage the reply.
+    if not parsed_payload and isinstance(raw_message, str):
+        repaired = _repair_response_text(raw_message)
+        if repaired:
+            return (
+                sanitize_user_visible_text(repaired),
+                {"response_text": repaired, "_repaired": True},
+            )
+
+    # Unrecoverable machine debris must never render verbatim.
+    if looks_like_json_debris(raw_message):
+        return sanitize_user_visible_text(""), {}
 
     if looked_like_json_object:
         return sanitize_user_visible_text(raw_message), parsed_payload
