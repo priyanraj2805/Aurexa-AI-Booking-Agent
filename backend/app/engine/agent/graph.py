@@ -894,6 +894,11 @@ async def call_model(
         # in them. Otherwise the model completed from training knowledge
         # (e.g. inventing leadership names) — swap in an honest decline
         # while keeping any extracted booking fields intact.
+        # Skip when OTP is pending — the reply is OTP-related, not knowledge,
+        # and the decline ghost ("Sorry I don't have...") must never replace it.
+        _otp_pending_now = bool(state.get("otp_required") and not state.get("otp_verified"))
+        if _otp_pending_now:
+            _injected_chunks = []
         try:
             from app.engine.user_visible_text import (
                 extract_user_visible_text as _extract_visible,
@@ -904,7 +909,7 @@ async def call_model(
             )
 
             _injected_chunks = locals().get("rag_chunks") or []
-            if _injected_chunks:
+            if _injected_chunks and not _otp_pending_now:
                 _visible_now, _ = _extract_visible(str(response.content))
                 _chunk_texts = [
                     str((c or {}).get("content") or "")

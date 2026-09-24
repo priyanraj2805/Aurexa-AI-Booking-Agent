@@ -1012,6 +1012,15 @@ async def process_message_with_graph(
         _is_bare_edit = user_msg_lower in {"change", "edit", "modify", "update", "change details", "edit details"}
         _has_edit_signal = any(kw in user_msg_lower for kw in ("change", "edit", "modify", "update"))
         if _graph_undecided and (message_processor._is_edit_details_request(user_msg_lower) or _is_bare_edit):
+            # Bare "change" without a field: ask which field with a picker,
+            # don't fall through to an assumed "name" ask.
+            if _is_bare_edit and not message_processor._is_edit_details_request(user_msg_lower):
+                from app.schemas.agent import ActionPayload as _AP
+                from app.crud import chat as _crud_chat_graph
+                _msg_pick = "Sure, which field would you like to change? You can say name, email, phone, date, or time."
+                _ap_pick = _AP(message=_msg_pick, widget_directive="TEXT_INPUT", field_meta={"name": "edit_choice", "type": "text", "label": "Field to change"})
+                await _crud_chat_graph.save_message(db, chat_session.session_id, message_text, _msg_pick, metadata={"directive": "TEXT_INPUT", "intent": "EDIT_DATA"})
+                return _ap_pick
             current_intent = "EDIT_DATA"
         else:
             # CONFIRM must always work on finish screen — even when graph was

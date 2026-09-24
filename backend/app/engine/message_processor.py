@@ -1373,6 +1373,17 @@ async def process_message(
     # "yes, all good") is never flipped by an "edit" substring.
     _is_bare_edit = user_msg_lower.strip() in {"change", "edit", "modify", "update", "change details", "edit details"}
     if not chat_session.missing_fields and _llm_undecided and (_is_edit_details_request(user_msg_lower) or _is_bare_edit):
+        # Bare "change" without a field: ask which field with a picker,
+        # don't assume "name" and don't fall through to deterministic name ask.
+        if _is_bare_edit and not _is_edit_details_request(user_msg_lower):
+            msg = "Sure, which field would you like to change? You can say name, email, phone, date, or time."
+            action = ActionPayload(
+                message=msg,
+                widget_directive="TEXT_INPUT",
+                field_meta={"name": "edit_choice", "type": "text", "label": "Field to change"},
+            )
+            await _save_transcript(db, chat_session.session_id, message_text, msg, "TEXT_INPUT", intent="EDIT_DATA")
+            return action
         intent = "EDIT_DATA"
         chat_session.current_intent = intent
 
@@ -2164,16 +2175,25 @@ async def _handle_otp_resend(
                 )
                 await _save_transcript(db, chat_session.session_id, message_text, action.message, action.widget_directive)
                 return action
-            # For Firebase, we don't send SMS here — widget handles it via Firebase
-            # Just generate OTP record for rate limiting
             code = await generate_otp(db, chat_session.session_id, channel="phone", resend=True)
             policy_meta = await get_otp_policy_metadata(db, chat_session.session_id, channel="phone")
             policy_meta["channel"] = "phone"
+            # Respect the configured phone OTP channel (WhatsApp vs SMS) for the user-facing copy
+            from app.core.config import settings as _cfg_otp_resend
+            _via_resend = "WhatsApp" if (getattr(_cfg_otp_resend, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else "SMS"
             resend_attempt = OTP_RESEND_CAP - int(policy_meta.get("resends_left", 0))
             otp_send_key = f"otp_phone:{chat_session.session_id}:resend:{resend_attempt}"
-            # No SMS sent here — widget handles Firebase SMS
+            # Phone OTP via Zavu/WhatsApp is sent by the caller (_handle_booking_flow) or by whatsapp_provider;
+            # for resend we still need to actually send the code (background_tasks path handles it for email, but phone needs explicit send here)
+            try:
+                from app.core.otp_delivery.whatsapp_provider import WhatsAppProvider as _WPPResend
+                from app.core.otp_delivery.sms_provider import SMSProvider as _SPResend
+                _prov_resend = _WPPResend() if _via_resend == "WhatsApp" else _SPResend()
+                await _prov_resend.send_otp(phone, code, str(chat_session.session_id))
+            except Exception as _send_resend_err:
+                logger.warning(f"Phone OTP resend send failed ({_via_resend}): {_send_resend_err}")
             action = ActionPayload(
-                message=f"I've sent a new verification code to {phone} via SMS. Please enter it here.",
+                message=f"I've sent a new verification code to {phone} via {_via_resend}. Please enter it here.",
                 widget_directive="REQUIRE_OTP_MODAL",
                 field_meta=policy_meta,
             )
