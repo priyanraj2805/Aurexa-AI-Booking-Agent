@@ -260,8 +260,28 @@ class DataValidator:
             return None, "This field cannot be empty."
         return value, None
 
+    # Social chitchat is never a name ("thanks" was once saved as the
+    # customer's name). Same sanitation concept as NULL_VALUES below:
+    # greetings / thanks / farewells / bare acknowledgments carry no
+    # identity, in any path (LLM extraction, offline fallback, graph).
+    CHITCHAT_VALUES = frozenset({
+        "hi", "hii", "hiii", "hello", "hey", "yo", "sup",
+        "thanks", "thank you", "thankyou", "thx", "ty",
+        "bye", "goodbye", "good morning", "good evening", "good afternoon",
+        "good night", "morning", "evening",
+        "ok", "okay", "sure", "yes", "no", "yep", "yup",
+        "please", "sorry", "welcome", "great", "nice", "cool", "awesome",
+        "how are you", "how r u", "whats up", "what's up",
+    })
+
     @staticmethod
     def _validate_name(value: str) -> Tuple[Optional[str], Optional[str]]:
+        cleaned_early = " ".join(str(value or "").split()).lower()
+        if cleaned_early in DataValidator.CHITCHAT_VALUES:
+            return (
+                None,
+                "That looks like a greeting, not a name. Please share your real name.",
+            )
         if len(value) > 100:
             return None, "Name is too long (max 100 chars)."
         if len(value) < 2:
@@ -369,6 +389,12 @@ class DataValidator:
                 )
                 if phone_meta:
                     metadata[field] = phone_meta
+            elif field == "name":
+                # The "name" field has no dedicated fd.type (defaults to
+                # "text", which accepts anything) — route it through the
+                # name validator so chitchat/greetings can never be saved
+                # as the customer's name on any path.
+                result, error = DataValidator._validate_name(value)
             elif fd:
                 validator = DataValidator.TYPE_VALIDATORS.get(
                     fd.type, lambda v, _fd, _tz, _md: DataValidator._validate_text(v)

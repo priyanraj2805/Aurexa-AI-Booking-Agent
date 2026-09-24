@@ -332,14 +332,16 @@ export const MAX_DOCS_PER_ORG = 10;
 
 // ── Generic fetch hook ───────────────────────────
 
-function useApi<T>(path: string, deps: unknown[] = []) {
+function useApi<T>(path: string, deps: unknown[] = [], pollMs?: number) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const refetch = useCallback(async () => {
+  const refetch = useCallback(async (silent = false) => {
     if (!path) { setLoading(false); return; }
-    setLoading(true);
+    // Silent background refreshes (polling) must not flash the loading
+    // skeleton when data is already on screen.
+    if (!silent) setLoading(true);
     setError(null);
     try {
       const result = await api.get<T>(path);
@@ -355,6 +357,17 @@ function useApi<T>(path: string, deps: unknown[] = []) {
   useEffect(() => {
     refetch();
   }, [refetch]);
+
+  // Live polling: silent background refresh so new user messages appear
+  // without a full page refresh. Paused when the tab is hidden.
+  useEffect(() => {
+    if (!pollMs || pollMs <= 0 || !path) return;
+    const id = setInterval(() => {
+      if (document.hidden) return;
+      refetch(true);
+    }, pollMs);
+    return () => clearInterval(id);
+  }, [refetch, pollMs, path]);
 
   return { data, loading, error, refetch, setData };
 }
@@ -422,7 +435,8 @@ export function useConversations(
     toDate?: string;
     sortBy?: string;
     sortOrder?: "asc" | "desc";
-  }
+  },
+  pollMs = 5000
 ) {
   const rangeOk = isDateRangeValid(filters?.fromDate || "", filters?.toDate || "");
   const qs = new URLSearchParams({
@@ -450,7 +464,8 @@ export function useConversations(
       filters?.sortBy,
       filters?.sortOrder,
       rangeOk,
-    ]
+    ],
+    pollMs
   );
 }
 
@@ -478,10 +493,11 @@ export function useOnboardingStatus() {
   return useApi<OnboardingStatus>("/dashboard/onboarding-status");
 }
 
-export function useTranscript(sessionId: string | null) {
+export function useTranscript(sessionId: string | null, pollMs = 3000) {
   return useApi<MessageItem[]>(
     sessionId ? `/dashboard/conversations/${sessionId}/messages` : "",
     [sessionId],
+    pollMs,
   );
 }
 

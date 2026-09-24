@@ -317,6 +317,18 @@ async def save_message(
         human_agent_id=uuid.UUID(human_agent_id) if human_agent_id else None,
     )
     db.add(msg)
+    # Bump the parent session so the admin inbox (sorted by updated_at)
+    # reorders live when polling — a message insert alone never touches it.
+    try:
+        from datetime import datetime, timezone
+
+        parent = (
+            await db.execute(select(ChatSession).where(ChatSession.id == uuid.UUID(session_id)))
+        ).scalars().first()
+        if parent is not None:
+            parent.updated_at = datetime.now(timezone.utc)
+    except Exception:
+        pass
     await db.commit()
     await db.refresh(msg)
     return msg

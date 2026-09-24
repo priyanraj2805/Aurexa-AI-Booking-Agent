@@ -220,6 +220,14 @@ def _is_edit_details_request(message_lower: str) -> bool:
     return any(keyword in (message_lower or "") for keyword in EDIT_DATA_KEYWORDS)
 
 
+# Intents where the LLM did NOT make a decision (no decisive classification).
+# Keyword/regex lists below are FALLBACK ONLY — they may override the intent
+# solely when the LLM verdict is one of these (or the LLM was bypassed/down).
+# Decisive LLM intents (CONFIRM_BOOKING, EDIT_DATA, CANCEL_BOOKING,
+# CHECK_BOOKING) are never stomped by substring matching.
+_LLM_INDECISIVE_INTENTS = frozenset({"PROVIDE_DATA", "START_BOOKING", "ASK_QUESTION"})
+
+
 def _ensure_internal_state(chat_session: ChatSessionState) -> Dict[str, Any]:
     if not isinstance(chat_session.collected_data, dict):
         chat_session.collected_data = {}
@@ -1227,10 +1235,14 @@ async def process_message(
         _msg_is_confirm = _is_confirm_msg(message_text)
     except Exception:
         _msg_is_confirm = any(kw in user_msg_lower for kw in CONFIRM_KEYWORDS)
+    # LLM-primary: keyword confirm is fallback only — never stomp a decisive
+    # LLM verdict (e.g. "ok, but change the date" → EDIT_DATA, not CONFIRM).
+    _llm_undecided = intent in _LLM_INDECISIVE_INTENTS or llm_temporary_fallback
     force_confirm_intent = (
         prior_intent == "CONFIRM_BOOKING"
         and not chat_session.missing_fields
         and _msg_is_confirm
+        and _llm_undecided
     )
     if force_confirm_intent:
         intent = "CONFIRM_BOOKING"
@@ -1287,25 +1299,43 @@ async def process_message(
     if _pending_action is not None:
         return _pending_action
 
-    # ── CONFIRM override (deterministic Python-side) ──────────
-    if not chat_session.missing_fields and _msg_is_confirm:
+    # ── CHITCHAT (LLM-decided social talk) ─────────────────────
+    # Greetings/thanks/farewells carry no field value: drop any extraction
+    # so validation can never save "thanks" as a name, and let the LLM's own
+    # warm ack (llm_generated_msg) flow into the normal next-step ask below.
+    # The turn advances nothing and waives nothing.
+    if intent == "CHITCHAT":
+        raw_entities = {}
+        chat_session.current_intent = intent
+
+    # ── CONFIRM override (LLM-primary, keywords as fallback) ──
+    # The LLM's own CONFIRM_BOOKING verdict stands on its own; substring
+    # matching only fills in when the LLM was indecisive or down.
+    if not chat_session.missing_fields and _msg_is_confirm and _llm_undecided:
         intent = "CONFIRM_BOOKING"
         chat_session.current_intent = intent
 
-    # ── Edit-details override (deterministic Python-side) ─────
+    # ── Edit-details override (LLM-primary, keywords as fallback) ──
     # Bare "change"/"edit"/"modify" at confirmation must enter edit flow.
     # _is_edit_details_request only covered "change details" etc, so bare
     # "change" fell through to REQUEST_CONFIRMATION and looped forever.
+    # Still fallback-only: a decisive LLM verdict (e.g. CONFIRM_BOOKING for
+    # "yes, all good") is never flipped by an "edit" substring.
     _is_bare_edit = user_msg_lower.strip() in {"change", "edit", "modify", "update", "change details", "edit details"}
-    if not chat_session.missing_fields and (_is_edit_details_request(user_msg_lower) or _is_bare_edit):
+    if not chat_session.missing_fields and _llm_undecided and (_is_edit_details_request(user_msg_lower) or _is_bare_edit):
         intent = "EDIT_DATA"
         chat_session.current_intent = intent
 
-    # ── Resend OTP override (channel-aware) ───────────────────
+    # ── Resend OTP override (channel-aware, LLM-primary) ──────
+    # Fires only when an OTP is genuinely pending AND the LLM did not
+    # decisively classify the turn as something else (confirm/cancel/edit/
+    # lookup) — so "yes, send it" on the confirm screen confirms instead of
+    # resending, while a bare "resend" (LLM: PROVIDE_DATA) still resends.
     _phone_verified = getattr(chat_session, "phone_otp_verified", False)
     _email_needs_resend = require_otp and not chat_session.otp_verified
     _phone_needs_resend = require_phone_otp and not _phone_verified
-    if (_email_needs_resend or _phone_needs_resend) and any(kw in user_msg_lower for kw in RESEND_KEYWORDS):
+    _llm_claimed_turn = intent not in _LLM_INDECISIVE_INTENTS and not llm_temporary_fallback
+    if (_email_needs_resend or _phone_needs_resend) and not _llm_claimed_turn and any(kw in user_msg_lower for kw in RESEND_KEYWORDS):
         # Determine which channel to resend: email first if pending, else phone
         _resend_channel = "email" if _email_needs_resend else "phone"
         # If message explicitly mentions phone/sms, override to phone
@@ -2138,6 +2168,53 @@ async def _handle_booking_flow(
 
     # ── Email OTP gate ──
     recipient_email = _resolve_session_email(chat_session, fd_map)
+
+    # ── Single active booking per customer ──
+    # One user (same email OR phone) may hold only one upcoming appointment
+    # at a time. Cancel deletes the row and reschedule deletes before
+    # reopening, so any upcoming row found here belongs to an earlier
+    # booking that must be cancelled first. Checked BEFORE any OTP is sent
+    # so we never issue codes for a booking that cannot proceed.
+    # Deterministic (DB truth) — the LLM must never freelance this reply.
+    try:
+        from app.engine.cancel_flow import _find_upcoming_booking as _find_dup_booking
+        from app.engine.cancel_flow import _format_slot_label as _dup_slot_label
+
+        _dup_booking, _dup_start = None, None
+        _dup_phone = str((chat_session.collected_data or {}).get("phone") or "").strip()
+        if recipient_email:
+            _dup_booking, _dup_start = await _find_dup_booking(db, org, "email", recipient_email)
+        if _dup_booking is None and _dup_phone:
+            _dup_booking, _dup_start = await _find_dup_booking(db, org, "phone", _dup_phone)
+        if _dup_booking is not None:
+            _dup_slot = _dup_slot_label(_dup_start, org_config) if _dup_start else ""
+            _dup_date = ""
+            if _dup_start:
+                try:
+                    from app.engine.cancel_flow import _org_timezone as _dup_tz
+
+                    _dup_date = _dup_start.astimezone(_dup_tz(org_config)).strftime("%d %b %Y")
+                except Exception:
+                    _dup_date = ""
+            _dup_when = f"{_dup_date} at {_dup_slot}".strip() if _dup_date or _dup_slot else "upcoming"
+            _dup_msg = (
+                f"You already have an appointment booked ({_dup_when}).\n\n"
+                f"Name: {_dup_booking.customer_name}\n"
+                f"Email: {_dup_booking.customer_email}\n"
+                f"{'Phone: ' + str(_dup_booking.customer_phone) + chr(10) if _dup_booking.customer_phone else ''}"
+                f"We allow only one active booking at a time. "
+                f"To book a new slot, please cancel the existing one first — "
+                f"just say 'cancel my booking'."
+            )
+            # NOTE: no transcript write here — every _handle_booking_flow
+            # caller persists (user_msg, agent_msg) after return.
+            return (
+                _dup_msg,
+                "TEXT_INPUT",
+                {"duplicate_booking": True, "booking_id": str(_dup_booking.id)},
+            )
+    except Exception as _dup_err:
+        logger.warning("duplicate booking guard failed open: %s", _dup_err)
 
     if require_otp:
         otp_context_key = _build_otp_context_key(chat_session, fd_map)

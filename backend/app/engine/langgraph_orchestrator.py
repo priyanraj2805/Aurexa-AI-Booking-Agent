@@ -663,6 +663,17 @@ async def process_message_with_graph(
     if cancel_action is not None:
         return cancel_action
 
+    # Post-booking gate FIRST (before decline/refusal/lookup/OTP fast-paths):
+    # on a finished session (CONFIRMED / CANCELLED / EXPIRED) a 6-digit code
+    # is never a booking OTP — it is chatter (or a re-sent old code) and must
+    # reach the status-aware post-booking handler, never verify-and-continue
+    # into a fresh booking. Cancel-flow OTP keeps working because the active
+    # cancel gate above already returned for it.
+    if chat_session.session_status in ("CONFIRMED", "CANCELLED", "EXPIRED"):
+        return await _handle_post_booking_session(
+            db, org, org_config, chat_session, message_text, background_tasks
+        )
+
     # Booking decline: an explicit "don't want to book" exits gracefully
     # instead of being interrogated for fields. (Cancel turns already
     # returned above, so this never swallows a cancellation.)
@@ -836,15 +847,9 @@ async def process_message_with_graph(
                 await _persist_transcript_best_effort(db, session_id=session_id, user_message=message_text, assistant_message=_msg, directive="REQUIRE_OTP_MODAL", intent=chat_session.current_intent)
                 return _action
 
-    # Post-booking gate: a finished session (CONFIRMED / CANCELLED / EXPIRED)
-    # must NEVER re-enter the booking flow. The graph has no status awareness
-    # and would happily re-collect fields (e.g. "sure" after a confirmed
-    # booking surfaced a date picker + no-slot fallback). Route post-booking
-    # messages deterministically instead.
-    if chat_session.session_status in ("CONFIRMED", "CANCELLED", "EXPIRED"):
-        return await _handle_post_booking_session(
-            db, org, org_config, chat_session, message_text, background_tasks
-        )
+    # NOTE: post-booking gate lives at the top of this function (before the
+    # OTP fast-paths) so re-sent codes on finished sessions can never fork a
+    # fresh booking. See above.
 
     # Convert org_config to a clean dictionary removing SQLAlchemy's internal state
     org_config_dict = {k: v for k, v in org_config.__dict__.items() if not k.startswith('_')}
@@ -987,15 +992,22 @@ async def process_message_with_graph(
             dict(chat_session.collected_data or {}),
             org_config_dict,
         )
+    _graph_verdict = result.get("current_intent")
     current_intent = str(
-        result.get("current_intent") or chat_session.current_intent or "START_BOOKING"
+        _graph_verdict or chat_session.current_intent or "START_BOOKING"
     )
     if isinstance(follow_up_fields, list) and not follow_up_fields:
+        # LLM-primary: the graph already classified this turn (current_intent).
+        # Keyword fallbacks below fire ONLY when the graph was indecisive —
+        # a decisive graph verdict (CONFIRM/EDIT/CANCEL/CHECK) always stands.
+        # No verdict at all (silent/partial result) keeps the legacy keyword
+        # behavior — the carried-over session intent is stale, not a decision.
+        _graph_undecided = (not _graph_verdict) or current_intent in ("PROVIDE_DATA", "START_BOOKING", "ASK_QUESTION")
         user_msg_lower = message_text.lower().strip()
         _is_bare_edit = user_msg_lower in {"change", "edit", "modify", "update", "change details", "edit details"}
-        if message_processor._is_edit_details_request(user_msg_lower) or _is_bare_edit:
+        if _graph_undecided and (message_processor._is_edit_details_request(user_msg_lower) or _is_bare_edit):
             current_intent = "EDIT_DATA"
-        elif current_intent != "CONFIRM_BOOKING":
+        elif current_intent != "CONFIRM_BOOKING" and _graph_undecided:
             try:
                 from app.engine.time_flex import is_confirm_message as _is_confirm_msg
 
