@@ -1233,6 +1233,34 @@ async def process_message(
             if not llm_temporary_fallback:
                 llm_temporary_fallback = True
 
+    # ── Structural fallback for email/phone when LLM skipped extraction ──
+    # Fixes loop: user at email prompt enters same email → LLM thinks "already
+    # collected" and returns empty → should_fallback was False because response
+    # wasn't short/generic → raw stays empty → bot re-asks email forever.
+    # If primary_missing looks like email/phone and message contains structural
+    # token, force a direct validator extraction even when LLM was "decisive".
+    _early_primary = chat_session.missing_fields[0] if chat_session.missing_fields else None
+    if _early_primary and _early_primary not in (raw_entities or {}):
+        _direct = None
+        if _early_primary == "email" and "@" in message_text:
+            try:
+                cand, err = DataValidator._validate_email(message_text.strip())
+                if cand and not err:
+                    _direct = cand
+            except Exception:
+                pass
+        elif _early_primary == "phone" and any(c.isdigit() for c in message_text):
+            _fb = _extract_entities_without_llm(
+                message_text, [_early_primary], field_definitions, org_timezone, max_booking_days
+            )
+            if _fb.get(_early_primary):
+                _direct = _fb[_early_primary]
+        if _direct is not None:
+            raw_entities = dict(raw_entities or {})
+            raw_entities[_early_primary] = _direct
+            llm_temporary_fallback = True
+            logger.info(f"structural fallback recovered {_early_primary}: {_direct[:20] if isinstance(_direct, str) else _direct}")
+
     user_msg_lower = message_text.lower().strip()
     try:
         from app.engine.time_flex import is_confirm_message as _is_confirm_msg
@@ -1313,12 +1341,29 @@ async def process_message(
         raw_entities = {}
         chat_session.current_intent = intent
 
-    # ── CONFIRM override (LLM-primary, keywords as fallback) ──
-    # The LLM's own CONFIRM_BOOKING verdict stands on its own; substring
-    # matching only fills in when the LLM was indecisive or down.
-    if not chat_session.missing_fields and _msg_is_confirm and _llm_undecided:
-        intent = "CONFIRM_BOOKING"
-        chat_session.current_intent = intent
+    # ── CONFIRM override (LLM-primary, but pure CONFIRM always wins) ──
+    # "confirm" must always work on the finish screen. LLM stumbles on
+    # short tokens (ASK_QUESTION / CHITCHAT) and would leave the user
+    # looping. Pure confirm tokens force CONFIRM unless the turn is
+    # explicitly an edit (e.g. "ok, but change date" → EDIT).
+    _has_edit_signal = any(kw in user_msg_lower for kw in ("change", "edit", "modify", "update"))
+    _is_edit_mixed = _has_edit_signal and intent == "EDIT_DATA"
+    _is_pure_confirm = user_msg_lower.strip() in {
+        "confirm", "yes", "yep", "yup", "ok", "okay", "sure", "proceed",
+        "book it", "go ahead", "done", "confirmed", "confirm booking",
+        "please confirm", "confirm it",
+    } or _msg_is_confirm and len(user_msg_lower.strip().split()) <= 2
+    if not chat_session.missing_fields and _msg_is_confirm:
+        if _llm_undecided or _is_pure_confirm:
+            if not _is_edit_mixed:
+                intent = "CONFIRM_BOOKING"
+                chat_session.current_intent = intent
+        elif _is_pure_confirm and intent not in ("CANCEL_BOOKING", "CHITCHAT"):
+            # Even when LLM was "decisive" but message is unambiguous confirm,
+            # honor it — decisive EDIT with edit words stays EDIT (handled above).
+            if not _is_edit_mixed:
+                intent = "CONFIRM_BOOKING"
+                chat_session.current_intent = intent
 
     # ── Edit-details override (LLM-primary, keywords as fallback) ──
     # Bare "change"/"edit"/"modify" at confirmation must enter edit flow.
@@ -1599,8 +1644,10 @@ async def process_message(
         raw_entities = {k: v for k, v in raw_entities.items() if k != "name"}
     if raw_entities and primary_missing:
         filtered_entities = {}
+        _missing_set = set(chat_session.missing_fields or [])
         for field, value in raw_entities.items():
-            if field == primary_missing:
+            if field in _missing_set:
+                # Any still-missing field can be auto-picked in one turn
                 filtered_entities[field] = value
             elif field in chat_session.collected_data:
                 # User is updating an already-collected field — allow it
@@ -1703,6 +1750,43 @@ async def process_message(
         next_step = StateEvaluator.determine_next_action(
             chat_session.missing_fields, chat_session.current_intent, field_definitions
         )
+
+    # ── Ghost suppression during OTP pending ────────────────
+    # When OTP is pending (require_otp & not verified), the LLM's RAG fallback
+    # "Sorry, I don't have that information in our records..." is never
+    # appropriate — it creates a ghost second bubble after the OTP SMS.
+    # Suppress it and keep the OTP prompt visible.
+    _needs_otp_now = (require_otp and not chat_session.otp_verified) or (require_phone_otp and not getattr(chat_session, "phone_otp_verified", False))
+    if _needs_otp_now and isinstance(llm_generated_msg, str) and "don't have that information in our records" in llm_generated_msg.lower():
+        _channel = "phone" if (require_phone_otp and not getattr(chat_session, "phone_otp_verified", False)) else "email"
+        _dest = str(chat_session.collected_data.get("phone") or _resolve_session_email(chat_session, fd_map) or "your contact").strip()
+        llm_generated_msg = f"Please enter the verification code sent to {_dest}."
+        if next_step.get("directive") == "TEXT_INPUT":
+            next_step = {"directive": "REQUIRE_OTP_MODAL", "field_meta": {"channel": _channel}}
+
+    # ── Hallucinated slot timings guard ───────────────
+    # LLM sometimes invents times like "9am, 10am" not in the real inventory
+    # (end-of-conversation hallucination). If directive is slot-related and
+    # field_meta has deterministic options, ensure msg doesn't list invented times.
+    _directive_now = str(next_step.get("directive") or "")
+    if _directive_now in ("REQUIRE_TIME_SLOT_GRID", "REQUIRE_DATE_PICKER"):
+        _opts = (next_step.get("field_meta") or {}).get("options") or []
+        if _opts and isinstance(llm_generated_msg, str):
+            import re as _re_slot
+            _msg_times = _re_slot.findall(r"\b\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)\b|\b\d{1,2}\s*(?:AM|PM|am|pm)\b", llm_generated_msg)
+            if _msg_times:
+                _opt_set = {str(o).lower().strip() for o in _opts}
+                # Normalize msg times for comparison (e.g. "9am" → "9:00 AM" not exact, so use substring check)
+                _hallucinated = False
+                for _t in _msg_times:
+                    _tl = _t.lower().strip()
+                    if not any(_tl in _o or _o in _tl for _o in _opt_set):
+                        _hallucinated = True
+                        break
+                if _hallucinated:
+                    _slot_list = ", ".join(str(o) for o in _opts[:6])
+                    llm_generated_msg = f"Here are the available slots: {_slot_list}. Please choose one."
+                    logger.warning(f"slot hallucination sanitized: invented times stripped, replaced with real slots")
 
     if errors:
         # Only show validation errors when the user actually tried to provide
@@ -2122,14 +2206,22 @@ async def _handle_otp_resend(
                 field_meta=policy_meta,
             )
     except ValueError as otp_err:
-        from app.crud.otp import get_otp_policy_metadata as _gm
+        from app.crud.otp import get_otp_policy_metadata as _gm, OTP_COOLDOWN_SECONDS
         try:
             _meta = await _gm(db, chat_session.session_id, channel=channel)
             _meta["channel"] = channel
         except Exception:
-            _meta = {"channel": channel}
+            _meta = {"channel": channel, "cooldown_remaining_seconds": OTP_COOLDOWN_SECONDS}
+        # Preserve specific cooldown text + surface remaining wait for UX
+        raw = str(otp_err)
+        if "cooldown" in raw.lower() and "wait" in raw.lower():
+            # keep the remaining-seconds wording from crud
+            pass
+        else:
+            # normalize generic cap message
+            raw = raw.strip() or "Please wait before retrying."
         action = ActionPayload(
-            message=str(otp_err),
+            message=raw,
             widget_directive="REQUIRE_OTP_MODAL",
             field_meta=_meta,
         )

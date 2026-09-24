@@ -1010,20 +1010,29 @@ async def process_message_with_graph(
         _graph_undecided = (not _graph_verdict) or current_intent in ("PROVIDE_DATA", "START_BOOKING", "ASK_QUESTION")
         user_msg_lower = message_text.lower().strip()
         _is_bare_edit = user_msg_lower in {"change", "edit", "modify", "update", "change details", "edit details"}
+        _has_edit_signal = any(kw in user_msg_lower for kw in ("change", "edit", "modify", "update"))
         if _graph_undecided and (message_processor._is_edit_details_request(user_msg_lower) or _is_bare_edit):
             current_intent = "EDIT_DATA"
-        elif current_intent != "CONFIRM_BOOKING" and _graph_undecided:
+        else:
+            # CONFIRM must always work on finish screen — even when graph was
+            # "decisive" as ASK_QUESTION/CHITCHAT on a short token. Pure
+            # confirm words force CONFIRM unless it's explicitly an edit turn.
             try:
                 from app.engine.time_flex import is_confirm_message as _is_confirm_msg
-
                 _confirmed = _is_confirm_msg(message_text)
             except Exception:
-                _confirmed = any(
-                    keyword in user_msg_lower
-                    for keyword in message_processor.CONFIRM_KEYWORDS
-                )
-            if _confirmed:
-                current_intent = "CONFIRM_BOOKING"
+                _confirmed = any(kw in user_msg_lower for kw in message_processor.CONFIRM_KEYWORDS)
+            _is_pure_confirm = user_msg_lower.strip() in {
+                "confirm", "yes", "yep", "yup", "ok", "okay", "sure", "proceed",
+                "book it", "go ahead", "done", "confirmed",
+            } or (_confirmed and len(user_msg_lower.strip().split()) <= 2)
+            _is_edit_mixed = _has_edit_signal and current_intent == "EDIT_DATA"
+            if not follow_up_fields and _confirmed:
+                if _graph_undecided or _is_pure_confirm:
+                    if not _is_edit_mixed and current_intent not in ("CANCEL_BOOKING", "CHITCHAT"):
+                        current_intent = "CONFIRM_BOOKING"
+                elif _is_pure_confirm and current_intent not in ("CANCEL_BOOKING", "CHITCHAT", "EDIT_DATA"):
+                    current_intent = "CONFIRM_BOOKING"
     chat_session.current_intent = current_intent
 
     if isinstance(follow_up_fields, list):

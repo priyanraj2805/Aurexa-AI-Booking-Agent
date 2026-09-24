@@ -203,7 +203,10 @@ async def generate_otp(
     if resend and last_sent_at:
         elapsed = (now - last_sent_at).total_seconds()
         if elapsed < OTP_COOLDOWN_SECONDS:
-            raise ValueError("OTP resend cooldown active. Please wait before retrying.")
+            remaining = max(1, int(OTP_COOLDOWN_SECONDS - elapsed))
+            raise ValueError(
+                f"OTP resend cooldown active. Please wait {remaining}s before retrying."
+            )
     if resend and resend_count >= OTP_RESEND_CAP:
         raise ValueError("Maximum resend attempts reached. Please try again later.")
 

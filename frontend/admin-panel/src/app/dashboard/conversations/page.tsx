@@ -134,6 +134,9 @@ function TranscriptPanel({
   const [pendingMessage, setPendingMessage] = useState("");
   const [sendingMessage, setSendingMessage] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const prevMessageCountRef = useRef(0);
+  const forceScrollRef = useRef(false);
   const orgId = user?.org_id ?? "";
   const searchParams = useSearchParams();
   const highlightMessageId = searchParams.get("highlight");
@@ -157,9 +160,47 @@ function TranscriptPanel({
     return () => clearTimeout(t);
   }, [highlightedMessageId, messages]);
 
-  // Auto-scroll to bottom when messages change
+  // Auto-scroll to bottom only when appropriate (don't yank user reading history)
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!messages || messages.length === 0) {
+      prevMessageCountRef.current = 0;
+      return;
+    }
+    const isInitial = prevMessageCountRef.current === 0;
+    const hasNewMessages = messages.length > prevMessageCountRef.current;
+    const prevCount = prevMessageCountRef.current;
+    prevMessageCountRef.current = messages.length;
+
+    if (!hasNewMessages && !isInitial) return;
+
+    // On initial load or when admin just sent a message, always scroll
+    if (forceScrollRef.current) {
+      forceScrollRef.current = false;
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      return;
+    }
+
+    if (isInitial) {
+      // Initial render: jump without animation so history is visible at bottom
+      messagesEndRef.current?.scrollIntoView({ behavior: "auto" as ScrollBehavior });
+      return;
+    }
+
+    // Subsequent polling updates: only scroll if user is already near bottom
+    const container = scrollContainerRef.current;
+    if (container) {
+      const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      const isNearBottom = distanceFromBottom < 120;
+      if (isNearBottom) {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }
+      // else: user is reading history — leave position alone
+    } else {
+      // Fallback if ref not attached yet (should not happen)
+      if (hasNewMessages && prevCount > 0) {
+        // Check via anchor position as fallback — do nothing to avoid yank
+      }
+    }
   }, [messages]);
 
   // Detect if human is currently active by scanning ALL messages for the
@@ -236,6 +277,7 @@ function TranscriptPanel({
       });
       setPendingMessage("");
       toast.success("Message sent");
+      forceScrollRef.current = true;
       await refetch();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to send message");
@@ -322,7 +364,7 @@ function TranscriptPanel({
         ) : (
           <>
             <style>{`@keyframes highlight { 0% { background-color: hsl(var(--primary) / 0.25); transform: scale(1.01); } 50% { background-color: hsl(var(--primary) / 0.15); } 100% { background-color: transparent; transform: scale(1); } }`}</style>
-            <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-2">
+            <div ref={scrollContainerRef} className="space-y-3 max-h-[60vh] overflow-y-auto pr-2">
             {messages.map((m) => {
               const isHumanMessage = m.sender_type === "human";
               const isSystemMessage = m.sender_type === "system" || (m.metadata && typeof m.metadata === "object" && ("human_joined" in m.metadata || "human_left" in m.metadata));

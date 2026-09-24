@@ -2665,8 +2665,12 @@
       return text;
     }
 
-    _scrollToBottom() {
+    _scrollToBottom(force = false) {
       requestAnimationFrame(() => {
+        if (!force) {
+          const distanceFromBottom = this._msgList.scrollHeight - this._msgList.scrollTop - this._msgList.clientHeight;
+          if (distanceFromBottom > 120) return;
+        }
         this._msgList.scrollTo({
           top: this._msgList.scrollHeight,
           behavior: "smooth",

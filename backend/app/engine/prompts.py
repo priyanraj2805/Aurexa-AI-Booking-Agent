@@ -242,14 +242,13 @@ Output:"""
     - CHITCHAT means pure social talk with no booking content: greetings ("hi", "hello", "good morning"), thanks ("thanks!", "thank you"), farewells ("bye"), praise, or bare acknowledgments ("ok cool", "nice"). It carries NO field value, NO question, and NO action. Set extracted_entities EMPTY and reply warmly in one short line; the system will re-ask the pending booking step after your reply. NEVER put chitchat words into extracted_entities (a "thanks" is not a name).
    - CHECK_BOOKING means the user wants to view, confirm, or ask about the status/details of an EXISTING booking/appointment/reservation they believe they already have — as opposed to creating a new one, cancelling, or providing a field value. When in doubt between a field value and a lookup request, prefer the lookup meaning if the message asks about what already exists.
    - When intent is CHECK_BOOKING, leave extracted_entities EMPTY (the message is not a field value) and keep response_message brief — the system will fetch live booking details deterministically.
-2. EXTRACT ONLY THE NEXT MISSING FIELD from the message ({next_field_label}). 
-   - ONLY extract a value if it is ACTUALLY PRESENT in the user's message.
-   - DO NOT extract values for other missing fields - even if they are missing.
-   - DO NOT extract values from previously collected data - those are already known.
-   - DO NOT extract staff names (doctors) as the 'name' field.
-   - If they provide new info for an existing field, extract it as an update.
-   - For "select" type fields, the value MUST be one of the defined options.
-   - If the user's message does NOT contain a value for the next missing field, leave extracted_entities EMPTY.
+  2. EXTRACT ANY MISSING FIELDS that are clearly present in the message — prioritize {next_field_label} but also extract other missing fields if the user provided them together (e.g. "name + email + phone in one message"). Auto-pick everything you can in one turn so the user isn't asked repeatedly.
+    - ONLY extract a value if it is ACTUALLY PRESENT in the user's message.
+    - DO NOT extract values from previously collected data - those are already known.
+    - DO NOT extract staff names (doctors) as the 'name' field.
+    - If they provide new info for an existing field, extract it as an update.
+    - For "select" type fields, the value MUST be one of the defined options.
+    - If the user's message does NOT contain a value for any missing field, leave extracted_entities EMPTY.
   3. GENERATE a polite, humble, and conversational RESPONSE to the user.
     - Write like a human texting: short plain sentences, no em dashes (use commas/periods), no AI boilerplate ("As an AI", "Great question", "I hope this helps", "delve", "furthermore"). Answer directly.
     - If the user asked a question or expressed concern (e.g. "why do I need this?", "what is this for?"), answer naturally and helpfully. Then gently guide them back to the booking. Do NOT force the next field if they're asking questions.
@@ -269,8 +268,8 @@ Output:"""
 ### OUTPUT FORMAT:
 You MUST return ONLY a valid JSON object with these keys:
 - "intent": (string)
-- "extracted_entities": (object - MUST contain ONLY the next field: {next_field_label})
-- "response_message": (string - your polite reply asking ONLY for: {next_field_label})
+- "extracted_entities": (object — any of: {extraction_keys}; include every missing field you could confidently extract, not just {next_field_label})
+- "response_message": (string - your polite reply asking ONLY for the next still-missing field after your extractions)
 
 Output ONLY valid JSON. Do not include explanations, greetings, markdown fences, or any text outside the single JSON object. Your ENTIRE response must be exactly one parseable JSON object, with the conversational reply confined to the response_message string value. No other text is allowed before or after the JSON object."""
         return prompt
