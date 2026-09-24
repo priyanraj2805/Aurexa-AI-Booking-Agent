@@ -1041,8 +1041,9 @@ async def qr_inbound(    payload: QrInboundPayload,
             logger.exception("qr inbound engine raised")
             raise
         _dt = _time.monotonic() - _t0
-        # Human handover won the race after the early check: stay silent.
-        if str(getattr(action, "widget_directive", "") or "") == "HUMAN_ACTIVE":
+        # Human handover won the race after the early check, or the engine
+        # stayed silent on empty input: send nothing back.
+        if str(getattr(action, "widget_directive", "") or "") in ("HUMAN_ACTIVE", "SILENT_NO_REPLY"):
             return {"status": "ok", "session_id": str(chat_session.session_id), "reply": None}
         # If a BookingDirective was just created for this turn, render it via the
         # dedicated WhatsAppDirectiveRenderer (stable IDs) instead of the generic
@@ -1228,6 +1229,18 @@ async def qr_inbound(    payload: QrInboundPayload,
                     logger.info("booking-template welcome to=%s*** sent=%s wamid=%s", str(_cloud_to)[:6], _tres.get("success"), _tres.get("wamid"))
         except Exception as _e:
             logger.warning(f"booking-template cloud send failed, Baileys fallback kept: {_e}")
+        # Repeat circuit breaker: identical consecutive replies get a
+        # one-time escape hatch instead of looping forever.
+        try:
+            _body = str((wa_msg or {}).get("body") or "")
+            if _body.strip():
+                _broken = await whatsapp_client.break_identical_repeat(
+                    db, chat_session, _body)
+                if _broken != _body:
+                    wa_msg = dict(wa_msg or {})
+                    wa_msg["body"] = _broken[:4096]
+        except Exception as _brk_e:
+            logger.warning(f"repeat breaker failed open: {_brk_e}")
         logger.info(
             "qr inbound engine done in %.1fs reply_type=%s reply_len=%s",
             _dt,

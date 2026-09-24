@@ -30,6 +30,59 @@ def attach_knowledge_answer(action_message: str, directive_body: str) -> str:
     return f"{answer}\n\n{body}"[:4096]
 
 
+async def break_identical_repeat(db, chat_session, body: str) -> str:
+    """Circuit breaker for constant-answer loops.
+
+    Tracks the last reply body in session state. When the engine produces
+    the byte-identical reply on consecutive turns (no progress), the second
+    repeat gets a one-time escape hatch appended so the user can reach a
+    human or rephrase — instead of reading the same message forever.
+    Nudges once per session to avoid nagging; different replies reset it.
+    Fail-open: any error returns the body untouched.
+    """
+    try:
+        if not (body or "").strip():
+            return body
+        from app.crud import chat as crud_chat
+
+        data = dict(getattr(chat_session, "collected_data", None) or {})
+        last = str(data.get("_last_reply_body") or "")
+        if (body or "").strip() == last.strip() and last.strip():
+            count = int(data.get("_repeat_count") or 0) + 1
+            data["_repeat_count"] = count
+            chat_session.collected_data = data
+            if count >= 1 and not data.get("_repeat_nudged"):
+                data["_repeat_nudged"] = True
+                chat_session.collected_data = data
+                try:
+                    await crud_chat.update_chat_session(
+                        db, str(chat_session.session_id), chat_session)
+                except Exception:
+                    pass
+                return (
+                    body
+                    + "\n\nIf I'm repeating myself, sorry — reply HUMAN to reach "
+                      "a person, or ask me anything in your own words."
+                )
+            try:
+                await crud_chat.update_chat_session(
+                    db, str(chat_session.session_id), chat_session)
+            except Exception:
+                pass
+            return body
+        data["_last_reply_body"] = body
+        data["_repeat_count"] = 0
+        chat_session.collected_data = data
+        try:
+            await crud_chat.update_chat_session(
+                db, str(chat_session.session_id), chat_session)
+        except Exception:
+            pass
+        return body
+    except Exception:
+        return body
+
+
 def format_action_for_whatsapp(action_payload) -> dict:
     """
     Convert an ActionPayload into a WhatsApp-friendly message dict.

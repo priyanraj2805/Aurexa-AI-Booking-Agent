@@ -44,6 +44,25 @@ _REENGAGE_PATTERNS = (
     r"\bstart\s+(?:a\s+)?new\s+(?:booking|appointment)\b",
 )
 
+# Standalone "no" variants ("Nopee", "nahhh", "no thanks"): the whole message
+# is just a refusal with nothing else attached. Longer messages fall through
+# to normal refusal/question handling so "no, is parking free?" still works.
+# Elongated runs (3+) are squashed first so chat spellings match.
+_STANDALONE_NO = frozenset({"no", "nope", "nah", "no thanks", "no thank you"})
+
+
+def _squash_elongation(text: str) -> str:
+    # Collapse ALL letter runs ("Nopeee"->"Nope", "Nahh"->"Nah"). Only used
+    # for standalone-token comparison below, never for display or storage.
+    return re.sub(r"(.)\1+", r"\1", str(text or ""))
+
+
+def is_standalone_no(message_text: str) -> bool:
+    """True for a bare refusal word and nothing else (see _STANDALONE_NO)."""
+    norm = _squash_elongation(str(message_text or "").strip().lower())
+    norm = " ".join(norm.split())
+    return norm in _STANDALONE_NO
+
 
 def is_no_booking_request(message_text: str) -> bool:
     """True when the user declines a NEW booking (not a cancellation).
@@ -62,6 +81,8 @@ def is_no_booking_request(message_text: str) -> bool:
             return False
     except Exception:
         pass
+    if is_standalone_no(text):
+        return True
     return any(re.search(p, text, re.IGNORECASE) for p in _NO_BOOKING_PATTERNS)
 
 
@@ -92,6 +113,7 @@ async def start_decline(
     db: AsyncSession,
     org: Optional[Organization],
     chat_session: ChatSessionState,
+    message_text: str = "",
 ) -> ActionPayload:
     """Record the decline and answer gracefully — no field interrogation."""
     collected = dict(chat_session.collected_data or {})
@@ -110,7 +132,9 @@ async def start_decline(
     )
     action = ActionPayload(message=msg, widget_directive="TEXT_INPUT", field_meta=None)
     try:
-        await crud_chat.save_message(db, chat_session.session_id, "user", "")
+        # Persist the user's ACTUAL words — an empty row destroys the inbox
+        # transcript (ghost empty bubble + identical repeat on next turn).
+        await crud_chat.save_message(db, chat_session.session_id, "user", message_text or "")
     except Exception:
         pass
     try:

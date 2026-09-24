@@ -968,6 +968,11 @@ async def process_message(
     This function is CHANNEL-AGNOSTIC — it doesn't know or care whether
     the message came from the web widget, WhatsApp, or SMS.
     """
+    # Empty input carries no intent: stay silent (no reply, no transcript,
+    # no state change). Inbounds translate SILENT_NO_REPLY to reply=None.
+    if not str(message_text or "").strip():
+        return ActionPayload(message="", widget_directive="SILENT_NO_REPLY",
+                             field_meta={"silent": True})
 
     # Recover deterministic stuck state: OTP verified but still marked CONFIRMING.
     if (
@@ -1275,7 +1280,7 @@ async def process_message(
     from app.engine import decline_flow as _decline_flow_gate
 
     if _decline_flow_gate.is_no_booking_request(message_text):
-        return await _decline_flow_gate.start_decline(db, org, chat_session)
+        return await _decline_flow_gate.start_decline(db, org, chat_session, message_text)
     await _decline_flow_gate.maybe_reengage(db, chat_session, message_text)
 
     # ── CHECK override (LLM-driven, no keywords) ─────────────

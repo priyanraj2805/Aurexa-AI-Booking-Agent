@@ -57,12 +57,24 @@ def test_decline_negative():
     for text in [
         "I want to book an appointment",
         "my name is Priyanshu",
-        "Nooo",
         "tell me about dotstark",
         "yes book it",
         "",
+        # NOTE: bare "Nooo" USED to be here (field-refusal only), but live
+        # WhatsApp transcripts showed users stuck in a name-ask loop replying
+        # "Nopee"/"Nopeee". A standalone refusal word is now a graceful
+        # decline (re-engage still works via booking words).
+        "Nooo tell me about dotstark",
+        "No, I love it",
+        "note this down",
     ]:
         assert flow.is_no_booking_request(text) is False, text
+
+
+def test_decline_standalone_no_variants():
+    for text in ["no", "No", "NO", "noo", "Nooo", "nope", "Nopee", "NOPEEE",
+                 "nah", "Nahh", "NAHHH", "no thanks", "No Thanks"]:
+        assert flow.is_no_booking_request(text) is True, text
 
 
 def test_cancel_phrase_not_decline():

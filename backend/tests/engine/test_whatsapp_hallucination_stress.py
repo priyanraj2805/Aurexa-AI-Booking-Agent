@@ -370,6 +370,89 @@ class TestFinishedSessionsStayFinished:
         assert await _booking_count(db_session, org.id) == 0
 
 
+# ── J. constant-answer loops ───────────────────────────────────────
+
+class TestLoopBusting:
+    @pytest.mark.parametrize("word", [
+        "no", "No", "NO", "noo", "nope", "Nopee", "NOPEEE",
+        "nah", "Nahh", "NAHHH", "no thanks", "No Thanks",
+    ])
+    def test_standalone_no_is_decline(self, word):
+        from app.engine.decline_flow import is_no_booking_request
+        assert is_no_booking_request(word) is True
+
+    @pytest.mark.parametrize("text", [
+        "nope, tell me your timings",
+        "no, is parking free?",
+        "don't want to cancel",
+        "do not cancel my booking",
+        "note this down",
+        "number please",
+    ])
+    def test_standalone_no_does_not_overreach(self, text):
+        from app.engine.decline_flow import is_no_booking_request
+        assert is_no_booking_request(text) is False
+
+    async def test_decline_transcript_keeps_user_words(self, db_session):
+        from app.engine import decline_flow
+        org = await _make_org(db_session)
+        sess = await _make_session(db_session, org, user="wa_9100000091")
+        action = await decline_flow.start_decline(
+            db_session, org, sess, "Nopee")
+        assert "no problem" in (action.message or "").lower()
+        msgs = await crud_chat.get_session_messages(db_session, sess.session_id)
+        user_rows = [m for m in msgs if m.role == "user"]
+        assert user_rows and user_rows[-1].content == "Nopee"
+
+    async def test_empty_input_stays_silent(self, db_session):
+        from app.engine import langgraph_orchestrator
+        org = await _make_org(db_session)
+        cfg = (await db_session.execute(
+            _sel(OrgConfig).where(
+                OrgConfig.org_id == org.id))).scalars().first()
+        sess = await _make_session(db_session, org, user="wa_9100000092")
+        for empty in ["", "   ", "\n\t "]:
+            for fn in (message_processor.process_message,
+                       langgraph_orchestrator.process_message_with_graph):
+                action = await fn(db_session, org, cfg, sess, empty)
+                assert action.widget_directive == "SILENT_NO_REPLY"
+        msgs = await crud_chat.get_session_messages(db_session, sess.session_id)
+        assert msgs == []
+
+    async def test_identical_repeat_gets_one_time_hatch(self, db_session):
+        from app.core import whatsapp_client
+        org = await _make_org(db_session)
+        sess = await _make_session(db_session, org, user="wa_9100000093")
+        body = "Please share your full name."
+        first = await whatsapp_client.break_identical_repeat(db_session, sess, body)
+        assert first == body  # first delivery untouched
+        second = await whatsapp_client.break_identical_repeat(db_session, sess, body)
+        assert second != body and "HUMAN" in second  # escape hatch once
+        third = await whatsapp_client.break_identical_repeat(db_session, sess, second)
+        assert "HUMAN" in third and third.count("HUMAN") == 1  # never nagged twice
+        fresh = await whatsapp_client.break_identical_repeat(
+            db_session, sess, "What date works for you?")
+        assert fresh == "What date works for you?"  # progress resets
+
+    async def test_nopee_exits_name_interrogation(self, db_session, monkeypatch):
+        """The exact live loop: name-missing + 'Nopee' must decline, not
+        re-ask for the name."""
+        org = await _make_org(db_session)
+        cfg = (await db_session.execute(
+            _sel(OrgConfig).where(
+                OrgConfig.org_id == org.id))).scalars().first()
+        sess = await _make_session(
+            db_session, org, missing=["name", "email", "phone", "date", "time"],
+            intent="PROVIDE_DATA", collected={}, user="wa_9100000094")
+        _mock_llm_intent(monkeypatch, "PROVIDE_DATA")
+        action = await message_processor.process_message(
+            db_session, org, cfg, sess, "Nopee")
+        assert "no problem" in (action.message or "").lower()
+        refetched = await crud_chat.get_chat_session(db_session, sess.session_id)
+        assert refetched is not None
+        assert (refetched.collected_data or {}).get("_booking_declined") is True
+
+
 # ── H. conversational brain (chitchat) ─────────────────────────────
 
 class TestChitchatBrain:

@@ -651,6 +651,11 @@ async def process_message_with_graph(
     Entry point for the LangGraph-based AI agent.
     Replaces the legacy process_message state machine.
     """
+    # Empty input carries no intent: stay silent (no reply, no transcript,
+    # no state change). Inbounds translate SILENT_NO_REPLY to reply=None.
+    if not str(message_text or "").strip():
+        return ActionPayload(message="", widget_directive="SILENT_NO_REPLY",
+                             field_meta={"silent": True})
     session_id = chat_session.session_id
     existing_summary, existing_window = _load_runtime_context(chat_session)
 
@@ -678,7 +683,7 @@ async def process_message_with_graph(
     # instead of being interrogated for fields. (Cancel turns already
     # returned above, so this never swallows a cancellation.)
     if decline_flow.is_no_booking_request(message_text):
-        action = await decline_flow.start_decline(db, org, chat_session)
+        action = await decline_flow.start_decline(db, org, chat_session, message_text)
         await _persist_transcript_best_effort(
             db,
             session_id=session_id,

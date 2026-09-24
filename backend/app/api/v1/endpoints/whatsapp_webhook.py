@@ -804,9 +804,22 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                         await crud_chat.update_chat_session(db, str(chat_session.session_id), chat_session)
             except Exception as _e:
                 logger.warning(f"booking-template cloud send failed: {_e}")
-            # Human handover won the race after the early check: stay silent.
-            if str(getattr(action, "widget_directive", "") or "") == "HUMAN_ACTIVE":
+            # Human handover won the race after the early check, or the engine
+            # stayed silent on empty input: send nothing back.
+            if str(getattr(action, "widget_directive", "") or "") in ("HUMAN_ACTIVE", "SILENT_NO_REPLY"):
                 return True
+            # Repeat circuit breaker: identical consecutive replies get a
+            # one-time escape hatch instead of looping forever.
+            try:
+                _body_c = str((wa_msg or {}).get("body") or "")
+                if _body_c.strip():
+                    _broken_c = await whatsapp_client.break_identical_repeat(
+                        db, chat_session, _body_c)
+                    if _broken_c != _body_c:
+                        wa_msg = dict(wa_msg or {})
+                        wa_msg["body"] = _broken_c[:4096]
+            except Exception as _brk_c:
+                logger.warning(f"repeat breaker failed open (cloud): {_brk_c}")
             sent = await whatsapp_cloud.send_booking_reply(from_phone, wa_msg)
             logger.info(
                 "meta webhook booking turn done in %.1fs reply_type=%s cloud_sent=%s",
