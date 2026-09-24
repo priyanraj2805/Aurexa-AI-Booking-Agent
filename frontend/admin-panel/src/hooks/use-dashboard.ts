@@ -478,10 +478,6 @@ export function useOnboardingStatus() {
   return useApi<OnboardingStatus>("/dashboard/onboarding-status");
 }
 
-export function useDependencyHealth() {
-  return useApi<DependencyHealth>("/dashboard/dependency-health");
-}
-
 export function useTranscript(sessionId: string | null) {
   return useApi<MessageItem[]>(
     sessionId ? `/dashboard/conversations/${sessionId}/messages` : "",
