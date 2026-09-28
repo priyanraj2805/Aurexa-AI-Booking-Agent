@@ -1191,7 +1191,46 @@ async def qr_inbound(    payload: QrInboundPayload,
             # canonical string missed most of them, so no strike was ever
             # recorded and the cooldown never opened.
             _reply_text = str(getattr(action, "message", "") or "")
-            if _cd.looks_like_decline(_reply_text):
+            # A session that just booked (or just verified) is never punished:
+            # its confirmation and OTP replies must reach the customer
+            # untouched. This is the second half of the fix for confirmations
+            # being overwritten by the cooldown notice while the booking
+            # itself succeeded. The classifier also excludes these shapes, so
+            # this is defence in depth, not the primary guard.
+            try:
+                from app.engine.user_visible_text import (
+                    looks_like_confirmation_claim as _is_claim,
+                )
+                from app.engine.knowledge_guards import (
+                    is_transactional_reply as _is_txn,
+                )
+
+                _just_booked = str(
+                    getattr(chat_session, "session_status", "") or ""
+                ).upper() in ("CONFIRMING", "CONFIRMED") or bool(
+                    getattr(chat_session, "phone_otp_verified", False)
+                )
+                # A turn that IS booking/business progress is never a strike,
+                # even when the reply looks decline-shaped. The engine knew
+                # the turn-3 booking request was START_BOOKING, yet its
+                # clarification reply ("I didn't quite catch that... share
+                # your full name") was judged a decline and locked the
+                # customer out for trying to book.
+                _on_topic_turn = _cd.is_on_topic_turn(
+                    text, getattr(chat_session, "current_intent", None)
+                ) or bool(getattr(chat_session, "missing_fields", None))
+            except Exception:
+                _just_booked = False
+                _on_topic_turn = False
+                _is_claim = None
+                _is_txn = None
+            if _just_booked or _on_topic_turn or (
+                _is_claim is not None and _is_claim(_reply_text)
+            ) or (
+                _is_txn is not None and _is_txn(_reply_text)
+            ):
+                _cd.clear(chat_session.collected_data)
+            elif _cd.looks_like_decline(_reply_text):
                 if not _cd.looks_like_asking_about_us(text):
                     # If the window was not open before this turn, this strike
                     # just opened it: the customer hears the plain opening

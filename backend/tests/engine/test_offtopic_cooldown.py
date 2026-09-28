@@ -143,6 +143,28 @@ def test_cooldown_is_fifteen_minutes() -> None:
     assert COOLDOWN_SECONDS == 900
 
 
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Your booking is confirmed for October 5th at 3 PM. We look forward to seeing you.",
+        "All set! Your appointment for September 30 at 10:30 AM is confirmed. We will see you then!",
+        "I have sent a verification code to +916350063338 via WhatsApp. Please enter it here to continue.",
+        "Please enter the verification code sent to your contact.",
+        "Your code expires in 10 minutes. Say 'resend' for a new code.",
+        "123456",
+    ],
+)
+def test_booking_success_and_otp_replies_are_never_declines(reply: str) -> None:
+    """Regression: the confirmation "Your booking is confirmed for October
+    5th" contains the word "booking" and was judged a decline. On the code
+    turn that recorded the 3rd strike, opened the cooldown, and overwrote
+    the confirmation with the cooldown notice — while the booking itself
+    succeeded and appeared in the dashboard. The customer never saw it."""
+    from app.engine.offtopic_cooldown import looks_like_decline
+
+    assert looks_like_decline(reply) is False
+
+
 def test_opening_and_ongoing_messages_are_distinct() -> None:
     """The turn that OPENS the cooldown says it plainly, with no "still".
     Every later turn says "still", so the customer can tell new from ongoing."""
@@ -156,6 +178,44 @@ def test_opening_and_ongoing_messages_are_distinct() -> None:
     ongoing = cooldown_message(899)
     assert "still" in ongoing.lower()
     assert "cooldown" in ongoing.lower()
+
+
+@pytest.mark.parametrize(
+    ("user_text", "turn_intent"),
+    [
+        ("I want to book a physiotherapy session", "START_BOOKING"),
+        ("I want to book a physiotherapy session", "ASK_QUESTION"),
+        ("My name is Priyank Test", "PROVIDE_DATA"),
+        ("tomorrow", "PROVIDE_DATA"),
+        ("3:00 PM", "PROVIDE_DATA"),
+        ("yes", "CONFIRM_BOOKING"),
+        ("123456", "PROVIDE_DATA"),
+    ],
+)
+def test_booking_turns_are_never_strikes(user_text: str, turn_intent: str) -> None:
+    """Regression: with two strikes banked, "I want to book..." got a
+    clarification reply that was judged decline-shaped, recorded strike 3,
+    and locked the customer out for trying to book. Either a booking-flow
+    turn intent OR booking behaviour in the input text exempts the turn."""
+    from app.engine.offtopic_cooldown import is_on_topic_turn
+
+    assert is_on_topic_turn(user_text, turn_intent) is True
+
+
+@pytest.mark.parametrize(
+    ("user_text", "turn_intent"),
+    [
+        ("who is the prime minister of pakistan", "ASK_QUESTION"),
+        ("what is the capital of Japan", "ASK_QUESTION"),
+        ("who won the 1998 world cup", None),
+    ],
+)
+def test_trivia_turns_still_count(user_text: str, turn_intent: str | None) -> None:
+    """The exemption must not swallow real off-topic loops: trivia carries
+    no booking intent and a question intent, so strikes still fire."""
+    from app.engine.offtopic_cooldown import is_on_topic_turn
+
+    assert is_on_topic_turn(user_text, turn_intent) is False
 
 
 def test_cooldown_message_states_the_wait_in_minutes() -> None:

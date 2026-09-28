@@ -262,6 +262,26 @@ def looks_like_decline(reply: str) -> bool:
         return False
     lowered = text.lower()
     # Order matters, and it is the order that makes each check correct:
+    #   0. a completed booking or an OTP step is NEVER a refusal. This guard
+    #      exists because the confirmation "Your booking is confirmed for
+    #      October 5th" contains the word "booking" and was judged a decline:
+    #      the 3rd strike fired on the code turn and overwrote the
+    #      confirmation with the cooldown notice, while the booking itself
+    #      succeeded and appeared in the dashboard.
+    try:
+        from app.engine.knowledge_guards import is_transactional_reply
+
+        if is_transactional_reply(text):
+            return False
+    except Exception:
+        pass
+    try:
+        from app.engine.user_visible_text import looks_like_confirmation_claim
+
+        if looks_like_confirmation_claim(text):
+            return False
+    except Exception:
+        pass
     #   1. an explicit "I didn't catch that" is a refusal, full stop
     #   2. an ANSWER is not a refusal, even when it trails "would you like to
     #      book?" — a correct Kentico answer was being discarded
@@ -311,3 +331,48 @@ def cooldown_opening_message() -> str:
     minutes = max(1, int(COOLDOWN_SECONDS // _SECONDS_PER_MINUTE))
     unit = "minute" if minutes == 1 else "minutes"
     return f"You are in cooldown. You can continue after {minutes} {unit}."
+
+
+# Turn intents that mean booking/business progress. A strike must only ever
+# be recorded for a genuinely off-topic turn, and the reply shape alone
+# cannot prove that: booking-progress replies also mention booking words,
+# and a clarification ("I didn't quite catch that... share your full
+# name") is judged decline-shaped. Without this gate, a customer with two
+# strikes who then says "I want to book..." gets locked out for trying to
+# book. The engine sets current_intent before the endpoint accounting runs,
+# so it is available exactly when needed.
+_BOOKING_FLOW_INTENTS = frozenset(
+    {
+        "START_BOOKING",
+        "PROVIDE_DATA",
+        "CONFIRM_BOOKING",
+        "CANCEL_BOOKING",
+        "CHECK_BOOKING",
+        "EDIT_DATA",
+    }
+)
+
+
+def is_on_topic_turn(user_text: str | None, turn_intent: str | None) -> bool:
+    """True when this turn is booking/business progress, never a strike.
+
+    Two independent signals, either one suffices:
+      - the engine's turn intent is a booking-flow intent, or
+      - the input text itself carries booking intent.
+    Trivia ("who is the prime minister...") yields a question intent and no
+    booking behaviour, so strikes still fire for real off-topic loops.
+    """
+    intent = str(turn_intent or "").upper().strip()
+    if intent in _BOOKING_FLOW_INTENTS:
+        return True
+    try:
+        from app.engine.user_behavior import analyze_user_behavior
+
+        behaviour = analyze_user_behavior(user_text or "") or {}
+        if behaviour.get("primary_intent") == "book":
+            return True
+        if bool(behaviour.get("should_start_booking")):
+            return True
+    except Exception:
+        pass
+    return False
