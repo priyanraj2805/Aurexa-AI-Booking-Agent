@@ -176,6 +176,50 @@ async def _persist_transcript_best_effort(
 _TERMINAL_SESSION_STATUSES = frozenset({"CONFIRMED", "CANCELLED", "EXPIRED"})
 
 
+# Signs that the model is declining rather than answering from the knowledge
+# base. Any of these means "we don't have this", whatever words it used.
+_OFFTOPIC_DECLINE_RE = re.compile(
+    # "I don't have / don't know / can't find ...", "I couldn't find ..."
+    r"(?:don'?t|do\s+not|can'?t|cannot|couldn'?t|won'?t)\s+"
+    r"(?:have|know|find|be\s+able|answer|help|provide|see|contain)"
+    r"|no\s+(?:information|details?|record|mention|data)\s+(?:about|on|of|for)"
+    r"|not\s+(?:available|found|mentioned|include|includes|included|cover|covers|"
+    r"covered|contain|contains|listed|documented|specified)"
+    r"|(?:is|are|was|were)\s+not\s+(?:in|covered|listed|documented|part\s+of|mentioned)"
+    r"|(?:isn'?t|aren'?t|wasn'?t|weren'?t)\s+"
+    r"(?:in|covered|listed|documented|mentioned|part\s+of|available|true)\b"
+    r"|unable\s+to\s+(?:find|answer|help|provide)"
+    r"|outside\s+(?:my|our|the)\s+(?:scope|knowledge|remit)"
+    r"|i'?m\s+(?:just\s+)?a\s+booking\s+assistant"
+    r"|no\s+et\s+information|knowledge\s+(?:materials|base|documents)\s+don'?t"
+    r"|not\s+something\s+i\s+(?:can|have|know)",
+    flags=re.IGNORECASE,
+)
+
+_OFFTOPIC_REPLY = (
+    "I'm a booking assistant, so I can only help with appointments — "
+    "I don't have information about that.\n\n"
+    "Is there anything I can help you book, check or reschedule?"
+)
+
+
+def _normalise_offtopic_decline(reply: str) -> str:
+    """Return one consistent, warm decline for every off-topic question.
+
+    The model invents a new cold phrasing on nearly every call ("...in our
+    knowledge materials", "the company knowledge materials don't include...").
+    Those mention internal machinery the customer has never heard of and read
+    as a brush-off. A genuine knowledge ANSWER is left untouched — only a
+    decline is rewritten, so nothing that was actually looked up is lost.
+    """
+    text = str(reply or "").strip()
+    if not text:
+        return _OFFTOPIC_REPLY
+    if not _OFFTOPIC_DECLINE_RE.search(text):
+        return text  # a real answer, leave it exactly as it is
+    return _OFFTOPIC_REPLY
+
+
 def _unmatched_time_choice(message_text: str, offered_labels) -> str:
     """Return the customer's rejected time wording, or "" if this is not a time.
 
@@ -2792,15 +2836,29 @@ async def process_message_with_graph(
         field_meta["otp_required"] = True
         field_meta["channel"] = "phone"
         field_meta["knowledge_answer"] = True
-        # Append OTP reminder to knowledge answer so user knows next step
-        _k_phone_raw = str(chat_session.collected_data.get("phone") or "").strip()
-        _mask = _k_phone_raw[:4] + "***" + _k_phone_raw[-2:] if len(_k_phone_raw) > 6 else _k_phone_raw[:3] + "***" if _k_phone_raw else "+916***38"
-        _via = "WhatsApp"
-        _reminder = f"\n\nYour verification code is still waiting at {_mask} via {_via} — please enter it to confirm, or say 'resend' for a new code."
-        if _reminder not in _knowledge_reply:
-            _knowledge_reply = f"{_knowledge_reply}{_reminder}" if _knowledge_reply else _reminder.strip()
-        # Return early, bypassing OTP generation for this knowledge turn
-        _action = ActionPayload(message=_knowledge_reply, widget_directive="TEXT_INPUT", field_meta=field_meta)
+        # Normalise the decline so the customer gets one consistent, warm
+        # answer. The model reaches for several different cold phrasings
+        # ("...in our knowledge materials", "the company knowledge
+        # materials don't include...", "I don't have information about
+        # that") which read as a brush-off and mention internal machinery the
+        # customer has never heard of.
+        _knowledge_reply = _normalise_offtopic_decline(_knowledge_reply)
+        # Return early, bypassing OTP generation for this knowledge turn.
+        #
+        # The OTP reminder is deliberately NOT appended. A customer asking an
+        # unrelated question mid-booking got a clean decline with a
+        # "your verification code is still waiting" line stapled underneath,
+        # which reads as a payment demand bolted onto a refusal and makes the
+        # bot look like it is nagging rather than helping. The code is not
+        # lost: once a code is actually pending, the next turn prompts for it,
+        # and 'resend' always works. Keep the reply to the question asked.
+        _action = ActionPayload(
+            message=_knowledge_reply or
+            "I'm a booking assistant, so I can only help with appointments — "
+            "I don't have information about that.",
+            widget_directive="TEXT_INPUT",
+            field_meta=field_meta,
+        )
         await _persist_transcript_best_effort(
             db,
             session_id=session_id,
