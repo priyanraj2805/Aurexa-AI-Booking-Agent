@@ -52,7 +52,8 @@ _FALLBACK_TONE = "friendly"
 # kept receiving in the middle of a booking. This one is honest about the
 # limit and hands the customer a concrete next step.
 _NO_KNOWLEDGE_REPLY = (
-    "I'd rather give you an accurate answer than guess at one.\n\n"
+    "I'm a booking assistant, so I can only help with appointments — "
+    "I don't have information about that.\n\n"
     "Here's what I can do for you right now:\n"
     "• Book a new appointment\n"
     "• Check, reschedule or cancel an existing one\n\n"
@@ -452,8 +453,8 @@ class WhatsAppPresenter:
             "- Answer using ONLY the retrieved organization knowledge provided (PDFs/website) and live org data.\n"
             "- Do NOT invent doctors, departments, services, prices, hours, availability, policies, or contact info.\n"
             "- If the question is about the organisation (services, doctors, prices, hours, policies, locations) and the retrieved knowledge does not support it, say you don't have that information and offer booking/contact.\n"
-            "- If the question is completely unrelated (general trivia, news, geography, coding questions), answer it in ONE short sentence from general knowledge, then move on: do NOT say it's not in the knowledgebase and do NOT tell the user to search elsewhere. Only frame something as organisation information when the knowledgebase actually supports it.\n"
-            "- Never invent organisation facts: no made-up services, staff, prices, hours or policies.\n"
+            "- If the question is completely unrelated (general trivia, news, geography, politics, coding questions), do NOT answer it. You have no reliable source for it and you WILL get it wrong, which is worse than saying nothing. Say warmly and briefly that you are a booking assistant and can only help with appointments, then offer booking/contact. Do not tell the user to search elsewhere.\n"
+            "- Never invent facts of any kind: no made-up services, staff, prices, hours or policies, and no made-up general-knowledge answers.\n"
             "- Respect the requested tone for wording/emoji/length, but not facts.\n"
             "- WhatsApp-friendly, concise (2-6 sentences).\n"
         )
