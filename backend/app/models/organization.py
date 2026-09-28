@@ -26,6 +26,6 @@ class Organization(Base):
     old_key_expires_at = Column(DateTime(timezone=True), nullable=True)
 
     # Onboarding
-    onboarding_completed = Column(Boolean, default=False, server_default=sa.false())
+    onboarding_completed = Column(Boolean, default=False, server_default=sa.false(), nullable=False)
     industry_type = Column(String(100), nullable=True)
     custom_prompts = Column(sa.JSON, nullable=True)

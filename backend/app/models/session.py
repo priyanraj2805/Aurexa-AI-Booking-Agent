@@ -30,6 +30,9 @@ class ChatSession(Base):
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+    last_activity_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
 
     # Human handoff fields
     human_agent_id = Column(

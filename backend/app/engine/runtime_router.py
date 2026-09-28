@@ -75,6 +75,7 @@ async def recover_session_state(
 
 
 async def process_message_with_graph(**kwargs) -> ActionPayload:
+    kwargs.setdefault("raise_on_timeout", True)
     return await langgraph_orchestrator.process_message_with_graph(**kwargs)
 
 
@@ -161,6 +162,8 @@ async def route_whatsapp_message(
     chat_session: ChatSessionState,
     message_text: str,
     background_tasks: Optional[BackgroundTasks] = None,
+    transcript_user_text: Optional[str] = None,
+    inbound_message_id: Optional[str] = None,
 ) -> ActionPayload:
     """WhatsApp uses the same LangGraph runtime as the web widget, so both
     channels share booking flow, RAG grounding, validators, and OTP handling.
@@ -168,14 +171,27 @@ async def route_whatsapp_message(
     The legacy pipeline remains as a loud fallback: WhatsApp has no error UI,
     so a graph failure must never silently kill customer replies. Fallback
     activations are logged with full tracebacks for ops visibility.
+
+    transcript_user_text / inbound_message_id describe the ORIGINAL inbound
+    message when message_text was rewritten (directive-tap option values), so
+    the transcript stays faithful and traceable to the provider message.
     """
+    _transcript_user_text = (
+        transcript_user_text if transcript_user_text is not None else message_text
+    )
     # Human handover: when an admin owns the conversation the AI must stay
     # silent on WhatsApp exactly like it does on web (ConversationManager).
     # The flag is re-read from the DB so a mid-typing takeover applies now.
     try:
         if await crud_chat.is_human_takeover_active(db, str(getattr(chat_session, "session_id", "") or "")):
             try:
-                await crud_chat.save_message(db, str(chat_session.session_id), "user", message_text)
+                await crud_chat.save_message(
+                    db,
+                    str(chat_session.session_id),
+                    "user",
+                    _transcript_user_text,
+                    external_message_id=inbound_message_id,
+                )
                 await db.commit()
             except Exception:
                 pass
@@ -192,9 +208,17 @@ async def route_whatsapp_message(
             chat_session=chat_session,
             message_text=message_text,
             background_tasks=background_tasks,
+            transcript_user_text=_transcript_user_text,
+            inbound_message_id=inbound_message_id,
         )
     except Exception as error:
-        logger.exception("route_whatsapp_message graph failed; falling back to legacy")
+        if not is_retryable_runtime_failure(error):
+            raise
+        if not getattr(settings, "WHATSAPP_RUNTIME_FALLBACK_ENABLED", True):
+            raise
+        if getattr(settings, "WHATSAPP_RUNTIME_FALLBACK_SUNSET_ENFORCED", False):
+            raise FallbackSunsetError("WhatsApp automatic fallback is disabled")
+        logger.exception("route_whatsapp_message retryable graph failure; falling back to legacy")
         emit_fallback_event(_build_fallback_event("whatsapp", chat_session, error))
         return await process_message(
             db=db,
@@ -203,4 +227,6 @@ async def route_whatsapp_message(
             chat_session=chat_session,
             message_text=message_text,
             background_tasks=background_tasks,
+            transcript_user_text=_transcript_user_text,
+            inbound_message_id=inbound_message_id,
         )

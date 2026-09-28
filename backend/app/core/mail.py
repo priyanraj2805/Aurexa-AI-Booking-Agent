@@ -64,7 +64,7 @@ async def send_otp_email(
 ):
     """Sends a 6-digit OTP code to the user (booking flow)."""
     subject, body_html = render_otp_email(code)
-    await send_email_with_failover(
+    delivery = await send_email_with_failover(
         org_id=org_id,
         channel="otp",
         to_email=to_email,
@@ -80,6 +80,10 @@ async def send_otp_email(
         },
         attempt_count=attempt_count,
     )
+    return {"success": True, "status": "sent", "delivery_id": str(delivery)}
+
+
+
 
 
 async def send_auth_otp_email(to_email: str, code: str, purpose: str):
@@ -110,8 +114,9 @@ async def send_confirmation_emails(
     """Sends confirmation emails to both customer and organization admin."""
     safe_details = {k: str(v) if v else "" for k, v in booking_details.items()}
     frontend_url = settings.FRONTEND_URL
+    customer_email = str(customer_email or "").strip()
+    admin_email = str(admin_email or "").strip()
 
-    # Customer Email
     customer_subject, customer_body = render_booking_confirmation_customer(safe_details)
     booking_id = str(safe_details.get("booking_id") or "")
     confirmation_channel = "booking_confirmation"
@@ -123,7 +128,9 @@ async def send_confirmation_emails(
         idempotency_cache = {}
         booking_details["_delivery_idempotency_cache"] = idempotency_cache
 
-    if not customer_idempotency_key or not idempotency_cache.get(customer_idempotency_key):
+    if customer_email and (
+        not customer_idempotency_key or not idempotency_cache.get(customer_idempotency_key)
+    ):
         await send_email_with_failover(
             org_id=org_id,
             channel="booking_confirmation",
@@ -143,8 +150,9 @@ async def send_confirmation_emails(
         if customer_idempotency_key:
             idempotency_cache[customer_idempotency_key] = True
 
-    # Admin/Org Email
-    admin_subject, admin_body = render_booking_confirmation_admin(safe_details, frontend_url=frontend_url)
+    admin_subject, admin_body = render_booking_confirmation_admin(
+        safe_details, frontend_url=frontend_url
+    )
     admin_idempotency_key = (
         f"{booking_id}:admin:{confirmation_channel}" if booking_id else None
     )
@@ -182,8 +190,22 @@ async def send_cancellation_email(
     attempt_count: int = 1,
 ):
     """Sends a cancellation confirmation email to the customer."""
+    customer_email = str(customer_email or "").strip()
+    if not customer_email:
+        raise ValueError("Email recipient is required")
     safe_details = {k: str(v) if v else "" for k, v in booking_details.items()}
     subject, body_html = render_booking_cancellation(customer_name, safe_details)
+    booking_id = str(safe_details.get("booking_id") or "")
+    cancellation_channel = "booking_cancellation"
+    idempotency_key = (
+        f"{booking_id}:customer:{cancellation_channel}" if booking_id else None
+    )
+    idempotency_cache = booking_details.get("_delivery_idempotency_cache")
+    if not isinstance(idempotency_cache, dict):
+        idempotency_cache = {}
+        booking_details["_delivery_idempotency_cache"] = idempotency_cache
+    if idempotency_key and idempotency_cache.get(idempotency_key):
+        return
     await send_email_with_failover(
         org_id=org_id,
         channel="booking_cancellation",
@@ -196,6 +218,9 @@ async def send_cancellation_email(
             "booking_details": booking_details,
             "subject": subject,
             "body_html": body_html,
+            "idempotency_key": idempotency_key,
         },
         attempt_count=attempt_count,
     )
+    if idempotency_key:
+        idempotency_cache[idempotency_key] = True

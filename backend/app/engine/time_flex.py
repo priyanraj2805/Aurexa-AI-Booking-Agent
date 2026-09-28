@@ -75,23 +75,66 @@ _CONFIRM_TYPO_TOKENS = {
 }
 
 _SIMPLE_CONFIRMS = {
-    "yes", "yep", "yup", "yeah", "sure", "ok", "okay", "k",
+    "yes", "yep", "yup", "yeah", "sure", "ok", "okay",
     "alright", "allright", "absolutely", "proceed", "book it",
     "go ahead", "please do", "done", "approved", "finalize",
     "finalise", "lock it", "schedule it", "that's it", "thats it",
 }
 
 
+_PURE_CONFIRM_MESSAGES = frozenset({
+    "confirm", "confirmed", "confirmation", "yes", "yep", "yup", "yeah",
+    "sure", "ok", "okay", "proceed", "book it", "go ahead", "done",
+    "confirm booking", "please confirm", "confirm it", "yes please",
+})
+
+
+# Words that leave an utterance visibly unfinished ("okay then", "yes but").
+# A confirm keyword followed by one of these is a sentence in progress, not a
+# confirmation, so it must not short-circuit the flow.
+_UNFINISHED_CONFIRM_TAIL = frozenset({
+    "then", "but", "and", "so", "because", "if", "when", "while", "though",
+    "however", "also", "next", "first", "second", "plus", "unless", "until",
+    "what", "when", "how", "why", "where", "who", "which",
+})
+
+
+def _is_unfinished_utterance(msg: str) -> bool:
+    """True when the message trails off or asks a question instead of confirming."""
+    if msg.rstrip().endswith("?"):
+        return True
+    tokens = re.findall(r"[a-z']+", msg)
+    return bool(tokens) and tokens[-1] in _UNFINISHED_CONFIRM_TAIL
+
+
+def is_pure_confirm_message(text: str) -> bool:
+    """True only when the WHOLE message is an unambiguous confirmation.
+
+    Unlike is_confirm_message (which tolerates a confirm keyword inside a
+    longer sentence), this is an exact allow-list — it never fires on
+    cancel/reschedule sentences and deliberately rejects typos. Safe for
+    deterministic short-circuits.
+    """
+    msg = (text or "").strip().lower().rstrip(".!,;:")
+    return msg in _PURE_CONFIRM_MESSAGES
+
+
 def is_confirm_message(text: str) -> bool:
     msg = (text or "").strip().lower()
     if not msg:
         return False
-    # Exact / substring match first (covers "ok" in "okay", "yes please", ...).
+    # A question or a trailed-off sentence is not a confirmation, even when it
+    # contains "okay"/"yes" ("okay then...", "yes but what about tomorrow?").
+    if _is_unfinished_utterance(msg):
+        return False
+    # Whole-word match only. Substring matching caused false positives
+    # ("ok" inside "broken"/"booking", single letters matching almost every
+    # message), which misrouted unrelated turns into confirm handling.
     for kw in _SIMPLE_CONFIRMS:
-        if kw in msg:
+        if re.search(r"\b" + re.escape(kw) + r"\b", msg):
             return True
     for tok in _CONFIRM_TYPO_TOKENS:
-        if tok in msg:
+        if re.search(r"\b" + re.escape(tok) + r"\b", msg):
             return True
     # Fuzzy token-level match for other 1-2 char typos ("confim", "confrim").
     tokens = re.findall(r"[a-z]+", msg)

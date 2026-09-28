@@ -26,13 +26,17 @@ BOOKING_DECLINED_KEY = "_booking_declined"
 _NO_BOOKING_PATTERNS = (
     r"\bdon'?t\s+want\s+to\s+bo+k\b",
     r"\bdo\s+not\s+want\s+to\s+bo+k\b",
-    r"\bdon'?t\s+want\b.{0,40}\b(?:booking|appointment|reservation|slot|meeting)\b",
-    r"\bdo\s+not\s+want\b.{0,40}\b(?:booking|appointment|reservation|slot|meeting)\b",
+    r"\bdon'?t\s+want\b.{0,40}\b(?:booking|appointment|reservation|slot|meeting|project)\b",
+    r"\bdo\s+not\s+want\b.{0,40}\b(?:booking|appointment|reservation|slot|meeting|project)\b",
     r"\bnot\s+interested\b",
     r"\bno\s+need\s+(?:to\s+book|for\s+(?:a\s+)?(?:booking|appointment))\b",
     r"\bno\s+(?:booking|appointment)\s+for\s+me\b",
     r"\bjust\s+(?:looking|browsing|checking)(?:\s+around)?\b",
     r"\bchanged\s+my\s+mind\b",
+    r"\bjust\s+kidding\b",
+    r"\bwas\s+just\s+kidding\b",
+    r"\bkidding\b.{0,20}\b(?:don'?t\s+want|no\s+booking)\b",
+    r"\bi\s+was\s+just\s+kidding\b",
 )
 
 _REENGAGE_PATTERNS = (
@@ -114,6 +118,7 @@ async def start_decline(
     org: Optional[Organization],
     chat_session: ChatSessionState,
     message_text: str = "",
+    inbound_message_id: Optional[str] = None,
 ) -> ActionPayload:
     """Record the decline and answer gracefully — no field interrogation."""
     collected = dict(chat_session.collected_data or {})
@@ -123,18 +128,24 @@ async def start_decline(
         await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
     except Exception:
         pass
-    name = _business_name(org)
-    business_bit = f" about {name}" if name else ""
+    # Formal decline — trained via system prompt (prompts.py 9c), not example lists.
+    # Keep fallback concise and formal, no service examples.
     msg = (
-        "No problem at all! If there's anything else I can help with"
-        f"{business_bit} — our services, timings, or questions — just ask. "
-        "And whenever you'd like to book, just say the word."
+        "No problem. That's completely okay. If you'd like to book in the future, "
+        "feel free to reach out anytime."
     )
     action = ActionPayload(message=msg, widget_directive="TEXT_INPUT", field_meta=None)
     try:
         # Persist the user's ACTUAL words — an empty row destroys the inbox
         # transcript (ghost empty bubble + identical repeat on next turn).
-        await crud_chat.save_message(db, chat_session.session_id, "user", message_text or "")
+        # The provider id keeps this row traceable to the exact inbound message.
+        await crud_chat.save_message(
+            db,
+            chat_session.session_id,
+            "user",
+            message_text or "",
+            external_message_id=inbound_message_id,
+        )
     except Exception:
         pass
     try:
@@ -257,6 +268,7 @@ async def maybe_handle_field_refusal(
     org: Optional[Organization],
     chat_session: ChatSessionState,
     message_text: str,
+    inbound_message_id: Optional[str] = None,
 ) -> Optional[ActionPayload]:
     """Soft-handle refusal of the current missing field.
 
@@ -303,7 +315,13 @@ async def maybe_handle_field_refusal(
     )
     action = ActionPayload(message=msg, widget_directive="TEXT_INPUT", field_meta=None)
     try:
-        await crud_chat.save_message(db, chat_session.session_id, "user", message_text)
+        await crud_chat.save_message(
+            db,
+            chat_session.session_id,
+            "user",
+            message_text,
+            external_message_id=inbound_message_id,
+        )
     except Exception:
         pass
     try:

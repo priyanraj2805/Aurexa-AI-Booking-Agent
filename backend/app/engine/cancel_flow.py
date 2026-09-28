@@ -55,11 +55,7 @@ def _resolve_cancel_otp_channel(
 def _otp_channel_label(otp_channel: str, org_config: OrgConfig) -> str:
     """Human-friendly label for the OTP delivery channel."""
     if otp_channel == "phone":
-        try:
-            from app.core.config import settings as _cfg
-            return "WhatsApp" if (getattr(_cfg, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else "SMS"
-        except Exception:
-            return "WhatsApp"
+        return "WhatsApp"
     return "email"
 
 # Booking-field keys (plus the stale runtime checkpoint) that must be pruned
@@ -80,6 +76,12 @@ SESSION_RESET_REMOVE_KEYS = (
     "phone_country_code",
     "phone_raw_input",
     crud_chat.RUNTIME_CHECKPOINT_KEY,
+    "active_directive_id",
+    "_active_path_effects",
+    "_otp_policy",
+    "_otp_phone_policy",
+    "_internal",
+    CANCEL_FLOW_KEY,
 )
 
 _CANCEL_INTENT_PATTERNS = (
@@ -92,7 +94,7 @@ _CANCEL_INTENT_PATTERNS = (
 )
 
 _RESEND_RE = re.compile(
-    r"\b(resend|re-?send|send\s+(?:it|the\s+code|again)|new\s+code|didn'?t\s+(?:get|receive))\b",
+    r"\b(resend|re-?send|recend|resent|recend otp|resent otp|send\s+(?:it|the\s+code|again)|new\s+code|didn'?t\s+(?:get|receiv(?:e|ed))|did\s+not\s+(?:get|receiv(?:e|ed))|haven'?t\s+(?:receiv(?:e|ed)|got|get)|hasn'?t\s+(?:receiv(?:e|ed)|got)|not\s+(?:receiv(?:e|ed)|got|getting)|never\s+(?:receiv(?:e|ed)|got|receive)|no\s+(?:otp|code)|not\s+received|waiting\s+for\s+(?:otp|code)|where.*otp|otp\s+not\s+received)\b",
     re.IGNORECASE,
 )
 _DIFFERENT_CONTACT_RE = re.compile(
@@ -130,6 +132,28 @@ _EMAIL_IN_TEXT_RE = re.compile(
     r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
 )
 
+# Clear "we are talking about something else now" signals that must release a
+# stuck cancel lookup. Wording that means "keep going" is handled separately so
+# a half-typed contact value never gets released.
+_CANCEL_RESUME_RE = re.compile(
+    r"\b(?:continue|proceed|keep\s+going|go\s+on|carry\s+on|resume|as\s+i\s+said|"
+    r"like\s+i\s+said|tell\s+you|that\s+is|its\s+my\s+email|my\s+(?:email|phone|mobile|number)\s+is)\b",
+    re.IGNORECASE,
+)
+
+_CANCEL_TOPIC_CHANGE_PATTERNS = (
+    # New booking intent (broadened beyond _CANCEL_EXIT_PATTERNS: those require
+    # an explicit booking noun, which misses "i want an appointment tomorrow").
+    r"\b(?:book|schedule|reserve|arrange)\b",
+    r"\b(?:reschedule|move|change|shift)\b.{0,30}\b(?:booking|appointment|meeting|slot|time)\b",
+    # Other transactional intents that are not this cancel lookup.
+    r"\b(?:available|availability|slots?|timings?)\b.{0,30}\b(?:today|tomorrow|available|free|slots?)\b",
+    r"\bwhat\s+(?:time|slot|day|days)\b",
+    r"\bhow\s+(?:much|price|cost|long)\b",
+    # A greeting/acknowledgement storm means the user is not entering a contact.
+    r"^\s*(?:hi|hey|hello|yo|thanks|thank\s+you|ok|okay|k|cool|nice|great|awesome|got\s+it|alright)\b",
+)
+
 _CANCEL_LLM_ANALYSIS_TIMEOUT_SECONDS = 10.0
 
 _CANCEL_LOOKUP_META = {
@@ -164,6 +188,41 @@ def is_cancel_exit_request(message_text: str) -> bool:
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in _CANCEL_EXIT_PATTERNS)
 
 
+def is_cancel_topic_change(message_text: str) -> bool:
+    """True when a turn inside the cancel lookup is clearly a different topic.
+
+    The lookup stage is waiting for an email or phone number. If the user sends
+    a knowledge question ("do you offer hair cuts?") or restarts another
+    booking concern, the cancel flow must stand down instead of answering
+    inside the flow and re-asking for the contact.
+
+    Deliberately conservative: only fires on strong, unambiguous signals so a
+    genuine "my email is ..." answer never gets released mid-lookup.
+    """
+    text = str(message_text or "").strip()
+    if not text:
+        return False
+    # A contact value, cancel intent, or resume wording always stays in flow.
+    if parse_lookup_value(text) or extract_contact_from_text(text):
+        return False
+    if is_cancel_intent(text) or is_cancel_exit_request(text) or _FIND_BOOKING_RE.search(text):
+        return False
+    if _CANCEL_RESUME_RE.search(text):
+        return False
+
+    try:
+        from app.engine.agent.graph import _is_potential_knowledge_question
+
+        if _is_potential_knowledge_question(text):
+            return True
+    except Exception:
+        pass
+
+    return any(
+        re.search(pattern, text, re.IGNORECASE) for pattern in _CANCEL_TOPIC_CHANGE_PATTERNS
+    )
+
+
 def reset_for_new_booking(chat_session: ChatSessionState) -> None:
     """Exit the cancel flow and restore a clean START_BOOKING session.
 
@@ -184,6 +243,7 @@ def reset_for_new_booking(chat_session: ChatSessionState) -> None:
     chat_session.current_intent = "START_BOOKING"
     chat_session.session_status = "ACTIVE"
     chat_session.otp_verified = False
+    chat_session.phone_otp_verified = False
     chat_session.pending_cancel = False
 
 
@@ -356,7 +416,31 @@ def _is_resend_request(message_text: str) -> bool:
     text = str(message_text or "").strip()
     if not text:
         return False
-    return bool(_RESEND_RE.search(text))
+    if _RESEND_RE.search(text):
+        return True
+    low = text.lower()
+    has_otp = ("otp" in low or "code" in low or "whatsapp" in low)
+    has_neg = any(
+        kw in low
+        for kw in (
+            "didn't",
+            "didnt",
+            "did not",
+            "haven't",
+            "havent",
+            "hasn't",
+            "hasnt",
+            "not received",
+            "not got",
+            "never",
+            "no otp",
+            "no code",
+            "not getting",
+            "waiting",
+            "where",
+        )
+    )
+    return bool(has_otp and has_neg)
 
 
 def _is_different_contact_request(message_text: str) -> bool:
@@ -442,6 +526,7 @@ async def _persist_session(
     db_session.current_intent = chat_session.current_intent
     db_session.session_status = chat_session.session_status
     db_session.otp_verified = bool(chat_session.otp_verified)
+    db_session.phone_otp_verified = bool(getattr(chat_session, "phone_otp_verified", False))
     db_session.pending_cancel = bool(chat_session.pending_cancel)
     flag_modified(db_session, "state_data")
     await db.commit()
@@ -587,6 +672,24 @@ async def _handle_lookup_stage(
             )
             return action
 
+        # Deterministic topic-change escape. A cancel lookup asks for an email or
+        # phone number, but the user may ignore it and ask something unrelated
+        # (a knowledge question, a new booking, a reschedule). Falling through to
+        # the LLM smalltalk branch answered the question and then KEPT the lookup
+        # prompt, so the conversation looped while _cancel_flow stayed armed and
+        # kept intercepting later turns. Release the flow and return None so the
+        # engine handles the turn normally; the user can re-initiate cancel.
+        if is_cancel_topic_change(message_text):
+            clear_cancel_flow(chat_session)
+            await _persist_session(
+                db, chat_session, remove_keys=(CANCEL_FLOW_KEY,)
+            )
+            logger.info(
+                "Cancel flow released by topic change",
+                extra={"session_id": session_id, "message": message_text[:120]},
+            )
+            return None
+
         # Everything else goes to the LLM: it may spot a contact value we
         # missed, detect an exit/resume intent, or answer smalltalk naturally.
         # The flow state (_cancel_flow) is untouched here, so the lookup
@@ -663,6 +766,10 @@ async def _send_cancel_otp(
     background_tasks: Optional[BackgroundTasks],
 ) -> ActionPayload:
     session_id = chat_session.session_id
+    from app.crud.otp import invalidate_otp_delivery
+    from app.core.otp_delivery import delivery_error, delivery_succeeded
+    from app.core.config import settings as _cancel_otp_settings
+
     _channel = _resolve_cancel_otp_channel(
         org_config,
         channel=str(getattr(chat_session, "channel", "") or ""),
@@ -720,39 +827,82 @@ async def _send_cancel_otp(
         or chat_session.collected_data.get("phone")
         or ""
     ).strip()
+    delivery_channel = _channel
+    delivery_result = None
     if _channel == "phone":
-        # WhatsApp OTP via configured provider (WhatsApp/SMS)
         if not _phone:
             _phone = str(getattr(chat_session, "channel_user_id", "") or "").strip()
+        from app.core.otp_delivery.whatsapp_provider import WhatsAppProvider
+        _provider = WhatsAppProvider()
         try:
-            from app.core.config import settings as _cfg
-            from app.core.otp_delivery.whatsapp_provider import WhatsAppProvider
-            from app.core.otp_delivery.sms_provider import SMSProvider
-            _provider = WhatsAppProvider() if (getattr(_cfg, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else SMSProvider()
-            if background_tasks is not None:
-                background_tasks.add_task(_provider.send_otp, _phone, code, str(session_id))
-            else:
-                await _provider.send_otp(_phone, code, str(session_id))
-        except Exception as _e:
-            logger.exception("cancel phone OTP send failed for %s: %s", session_id, _e)
-            # Fallback to email if phone send fails and email is available
-            if getattr(org_config, "require_otp", False) and booking.customer_email:
-                email_kwargs = dict(to_email=booking.customer_email, code=code, org_id=org.id, idempotency_key=idem_key)
-                if background_tasks is not None:
-                    background_tasks.add_task(mailer.send_otp_email, **email_kwargs)
-                else:
-                    await mailer.send_otp_email(**email_kwargs)
+            delivery_result = await _provider.send_otp(_phone, code, str(session_id))
+        except Exception as exc:
+            delivery_result = {"success": False, "error": str(exc)}
+        if not delivery_succeeded(
+            delivery_result,
+            allow_mock=bool(getattr(_cancel_otp_settings, "OTP_ALLOW_MOCK_DELIVERY", False)),
+        ) and getattr(org_config, "require_otp", False) and booking.customer_email:
+            email_kwargs = dict(
+                to_email=booking.customer_email,
+                code=code,
+                org_id=org.id,
+                idempotency_key=idem_key,
+            )
+            try:
+                delivery_result = await mailer.send_otp_email(**email_kwargs)
+            except Exception as exc:
+                delivery_result = {"success": False, "error": str(exc)}
+            if delivery_succeeded(
+                delivery_result,
+                allow_mock=bool(getattr(_cancel_otp_settings, "OTP_ALLOW_MOCK_DELIVERY", False)),
+            ):
+                delivery_channel = "email"
     else:
+        if not booking.customer_email:
+            await invalidate_otp_delivery(db, session_id, "email", context_key=idem_key)
+            clear_cancel_flow(chat_session)
+            chat_session.pending_cancel = False
+            await _persist_session(db, chat_session, remove_keys=(CANCEL_FLOW_KEY,))
+            action = _lookup_action("I couldn't send the verification code because no email is available.")
+            await _save_transcript(db, session_id, "", action.message, action.widget_directive, intent="CANCEL_BOOKING")
+            return action
         email_kwargs = dict(
             to_email=booking.customer_email,
             code=code,
             org_id=org.id,
             idempotency_key=idem_key,
         )
-        if background_tasks is not None:
-            background_tasks.add_task(mailer.send_otp_email, **email_kwargs)
-        else:
-            await mailer.send_otp_email(**email_kwargs)
+        try:
+            delivery_result = await mailer.send_otp_email(**email_kwargs)
+        except Exception as exc:
+            delivery_result = {"success": False, "error": str(exc)}
+
+    if not delivery_succeeded(
+        delivery_result,
+        allow_mock=bool(getattr(_cancel_otp_settings, "OTP_ALLOW_MOCK_DELIVERY", False)),
+    ):
+        await invalidate_otp_delivery(
+            db,
+            session_id,
+            delivery_channel,
+            context_key=idem_key,
+        )
+        clear_cancel_flow(chat_session)
+        chat_session.pending_cancel = False
+        await _persist_session(db, chat_session, remove_keys=(CANCEL_FLOW_KEY,))
+        action = _lookup_action(
+            "I couldn't send the verification code right now. Please try again in a moment."
+        )
+        await _save_transcript(
+            db,
+            session_id,
+            "",
+            action.message,
+            action.widget_directive,
+            intent="CANCEL_BOOKING",
+        )
+        return action
+    _channel = delivery_channel
 
     policy_meta: Dict[str, Any] = {}
     try:
@@ -764,11 +914,7 @@ async def _send_cancel_otp(
     meta["channel"] = _channel
     if _channel == "phone":
         _masked = _phone[:4] + "***" + _phone[-2:] if len(_phone) > 6 else _phone[:3] + "***"
-        try:
-            from app.core.config import settings as _cfg_via2
-            _via = "WhatsApp" if (getattr(_cfg_via2, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else "SMS"
-        except Exception:
-            _via = "WhatsApp"
+        _via = "WhatsApp"
         message = (
             f"I found your appointment — **{slot_label}**. To cancel it, "
             f"I've sent a verification code to **{_masked}** via {_via}. "
@@ -801,7 +947,13 @@ async def _handle_otp_stage(
     flow = get_cancel_flow(chat_session)
     if flow.get("otp_verified"):
         return await _execute_cancellation(
-            db, org, org_config, chat_session, flow, background_tasks
+            db,
+            org,
+            org_config,
+            chat_session,
+            flow,
+            background_tasks,
+            user_message=message_text,
         )
 
     text = str(message_text or "").strip()
@@ -819,7 +971,13 @@ async def _handle_otp_stage(
 
     if _is_resend_request(text):
         return await _handle_cancel_resend(
-            db, org, org_config, chat_session, flow, background_tasks
+            db,
+            org,
+            org_config,
+            chat_session,
+            flow,
+            background_tasks,
+            user_message=message_text,
         )
 
     # User typed the 6-digit code in the chat instead of the code box.
@@ -855,7 +1013,15 @@ async def _handle_otp_stage(
                     flow["otp_verified"] = True
                     set_cancel_flow(chat_session, stage="otp", otp_verified=True, booking_id=str(flow.get("booking_id") or ""), email=str(flow.get("email") or ""))
                     await _persist_session(db, chat_session)
-                    return await _execute_cancellation(db, org, org_config, chat_session, flow, background_tasks)
+                    return await _execute_cancellation(
+                        db,
+                        org,
+                        org_config,
+                        chat_session,
+                        flow,
+                        background_tasks,
+                        user_message=message_text,
+                    )
                 # Invalid code — show error and re-prompt, don't loop silently
                 _dest_label = (
                     str(flow.get("phone") or "your phone")
@@ -995,8 +1161,14 @@ async def _handle_cancel_resend(
     chat_session: ChatSessionState,
     flow: Dict[str, Any],
     background_tasks: Optional[BackgroundTasks],
+    *,
+    user_message: str = "resend",
 ) -> ActionPayload:
     session_id = chat_session.session_id
+    from app.crud.otp import invalidate_otp_delivery
+    from app.core.otp_delivery import delivery_error, delivery_succeeded
+    from app.core.config import settings as _cancel_resend_settings
+
     email = str(flow.get("email") or "")
     booking_id = str(flow.get("booking_id") or "")
     _otp_channel = _resolve_cancel_otp_channel(
@@ -1018,32 +1190,35 @@ async def _handle_cancel_resend(
             or ""
         ).strip()
         if _otp_channel == "phone":
-            try:
-                from app.core.config import settings as _cfg
-                from app.core.otp_delivery.whatsapp_provider import WhatsAppProvider
-                from app.core.otp_delivery.sms_provider import SMSProvider
-                _provider = WhatsAppProvider() if (getattr(_cfg, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else SMSProvider()
-                if background_tasks is not None:
-                    background_tasks.add_task(_provider.send_otp, _phone, code, str(session_id))
-                else:
-                    await _provider.send_otp(_phone, code, str(session_id))
-            except Exception:
-                logger.exception("cancel phone OTP resend failed for session %s", session_id)
-                raise
+            from app.core.otp_delivery.whatsapp_provider import WhatsAppProvider
+            _provider = WhatsAppProvider()
+            _result = await _provider.send_otp(_phone, code, str(session_id))
+            if not delivery_succeeded(
+                _result,
+                allow_mock=bool(getattr(_cancel_resend_settings, "OTP_ALLOW_MOCK_DELIVERY", False)),
+            ):
+                await invalidate_otp_delivery(db, session_id, "phone", context_key=idem_key)
+                raise RuntimeError(delivery_error(_result))
             _dest = _phone or "your phone"
             _via = _otp_channel_label("phone", org_config)
             message = f"I've sent a new verification code to **{_dest}** via {_via}."
         else:
+            if not email:
+                await invalidate_otp_delivery(db, session_id, "email", context_key=idem_key)
+                raise ValueError("Email address is required")
             email_kwargs = dict(
                 to_email=email,
                 code=code,
                 org_id=org.id,
                 idempotency_key=idem_key,
             )
-            if background_tasks is not None:
-                background_tasks.add_task(mailer.send_otp_email, **email_kwargs)
-            else:
-                await mailer.send_otp_email(**email_kwargs)
+            _result = await mailer.send_otp_email(**email_kwargs)
+            if not delivery_succeeded(
+                _result,
+                allow_mock=bool(getattr(_cancel_resend_settings, "OTP_ALLOW_MOCK_DELIVERY", False)),
+            ):
+                await invalidate_otp_delivery(db, session_id, "email", context_key=idem_key)
+                raise RuntimeError(delivery_error(_result))
             message = f"I've sent a new verification code to **{email}**. Please check your inbox."
         meta.update(policy_meta)
         directive = "REQUIRE_OTP_MODAL"
@@ -1064,7 +1239,12 @@ async def _handle_cancel_resend(
         message=message, widget_directive=directive, field_meta=meta
     )
     await _save_transcript(
-        db, session_id, "resend", action.message, directive, intent="CANCEL_BOOKING"
+        db,
+        session_id,
+        user_message,
+        action.message,
+        directive,
+        intent="CANCEL_BOOKING",
     )
     return action
 
@@ -1076,6 +1256,8 @@ async def _execute_cancellation(
     chat_session: ChatSessionState,
     flow: Dict[str, Any],
     background_tasks: Optional[BackgroundTasks],
+    *,
+    user_message: str = "",
 ) -> ActionPayload:
     from app.crud.booking import cancel_booking
     from app.core.audit import log_audit_event, log_audit_event_async
@@ -1144,11 +1326,16 @@ async def _execute_cancellation(
     if start_time:
         local_date = start_time.astimezone(_org_timezone(org_config)).strftime("%Y-%m-%d")
     details: Dict[str, Any] = {
+        "booking_id": str(booking_id),
         "name": customer_name,
         "email": customer_email,
         "phone": booking.customer_phone or "",
         "date": local_date,
         "time": slot_label,
+        "source_channel": "WhatsApp"
+        if str(getattr(chat_session, "channel", "") or "").lower()
+        in {"whatsapp", "whatsapp_cloud"}
+        else "Web Widget",
     }
     if booking.meeting_type_snapshot:
         details["meeting_type_snapshot"] = booking.meeting_type_snapshot
@@ -1305,6 +1492,7 @@ async def _execute_cancellation(
     chat_session.current_intent = "START_BOOKING"
     chat_session.session_status = "CANCELLED"
     chat_session.otp_verified = False
+    chat_session.phone_otp_verified = False
     chat_session.pending_cancel = False
     _cancel_remove_keys = tuple(
         k for k in SESSION_RESET_REMOVE_KEYS if k not in ("name", "email", "phone")
@@ -1336,8 +1524,12 @@ async def _execute_cancellation(
         is_terminal=True,
     )
     await _save_transcript(
-        db, session_id, "I've verified the code. Please proceed.",
-        action.message, CANCELLED_DIRECTIVE, intent="CANCEL_BOOKING",
+        db,
+        session_id,
+        user_message or "[verification code entered]",
+        action.message,
+        CANCELLED_DIRECTIVE,
+        intent="CANCEL_BOOKING",
     )
     logger.info(
         "Booking cancelled via widget flow",

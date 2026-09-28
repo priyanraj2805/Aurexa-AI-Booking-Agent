@@ -17,12 +17,10 @@ class TestCSRF:
         login_resp = await auth_helpers["login"](
             registered_user["email"], registered_user["password"]
         )
-        cookies = login_resp.cookies
-
         # Now make a POST without X-Requested-With but with the cookie
         resp = await client.post(
             "/api/v1/auth/logout",
-            cookies=cookies,
+            headers={"Cookie": f"ds_token={login_resp.json()['access_token']}"},
             # No X-Requested-With header
         )
         assert resp.status_code == 403

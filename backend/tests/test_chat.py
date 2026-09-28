@@ -192,9 +192,17 @@ class TestChatDispatch:
         payload = resp.json()
         assert payload["status"] == "success"
 
-    async def test_confirming_session_requires_fresh_otp_before_confirmation(
+    async def test_unverified_code_claim_does_not_book_and_asks_for_confirmation(
         self, client: AsyncClient, db_session: AsyncSession, monkeypatch
     ):
+        """Claiming "I verified the code" is not a confirmation.
+
+        The required order is details -> summary -> confirm -> OTP -> code ->
+        booking. This message asserts verification but never confirms the
+        booking, so the flow must go back to the summary and must NOT create a
+        booking or mark the session confirmed. (It previously sent a fresh OTP
+        immediately; a code is now only sent after an explicit confirmation.)
+        """
         org = await _create_org_with_config(db_session)
 
         booking_date = datetime.now(timezone.utc) + timedelta(days=2)
@@ -240,7 +248,8 @@ class TestChatDispatch:
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body["action"]["widget_directive"] == "REQUIRE_OTP_MODAL"
+        # Not a confirmation -> back to the review summary, no code sent.
+        assert body["action"]["widget_directive"] == "REQUEST_CONFIRMATION"
 
         booking_result = await db_session.execute(
             select(Booking).where(Booking.session_id == session.id)

@@ -155,9 +155,18 @@ export interface MessageItem {
   id: string;
   role: "user" | "agent";
   content: string;
-  sender_type?: string;
+  sender_type?: string | null;
+  channel?: string | null;
+  direction?: string | null;
+  send_status?: string | null;
+  provider_message_id?: string | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
+  sent_at?: string | null;
+  delivered_at?: string | null;
+  read_at?: string | null;
+  failed_at?: string | null;
+  error_message?: string | null;
 }
 
 export interface PersonaConfig {

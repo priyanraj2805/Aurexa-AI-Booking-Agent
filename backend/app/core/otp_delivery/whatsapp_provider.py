@@ -22,8 +22,8 @@ async def _send_whatsapp_text(to: str, text: str) -> dict:
     version = f"v{version}" if not version.startswith("v") else version
 
     if not phone_id or not token:
-        logger.warning(f"[WHATSAPP OTP MOCK] to={to} text={text!r} (WHATSAPP_OTP_* not configured)")
-        return {"success": True, "mock": True, "reason": "missing_whatsapp_otp_config"}
+        logger.warning(f"[WHATSAPP OTP MOCK] to={to} (WHATSAPP_OTP_* not configured)")
+        return {"success": False, "mock": True, "status": "mock", "reason": "missing_whatsapp_otp_config"}
 
     url = f"https://graph.facebook.com/{version}/{phone_id}/messages"
     headers = {

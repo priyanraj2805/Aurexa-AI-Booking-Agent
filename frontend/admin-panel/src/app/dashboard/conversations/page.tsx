@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import { Loader2, AlertCircle, ArrowLeft, User, Bot, Globe, MessageCircle, Headset, Bot as BotIcon, Send, Search, ChevronDown, ChevronUp, Calendar, ArrowUpDown } from "lucide-react";
 import { useConversations, useTranscript, takeoverConversation, releaseConversation, sendHumanMessage } from "@/hooks/use-dashboard";
@@ -25,7 +25,7 @@ function statusBadge(status: string) {
 }
 
 function ChannelBadge({ channel }: { channel: string }) {
-  const isWhatsApp = channel === "whatsapp";
+  const isWhatsApp = channel === "whatsapp" || channel === "whatsapp_cloud";
   return (
     <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded-full ${
       isWhatsApp 
@@ -77,6 +77,37 @@ function formatDateTime(iso: string): string {
 
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function deliveryLabel(status?: string | null): string | null {
+  switch (status) {
+    case "GENERATED":
+      return "Generated";
+    case "SENT":
+      return "Sent";
+    case "DELIVERED":
+      return "Delivered";
+    case "READ":
+      return "Read";
+    case "FAILED":
+      return "Failed";
+    default:
+      return null;
+  }
+}
+
+function deliveryBadgeClass(status?: string | null): string {
+  switch (status) {
+    case "DELIVERED":
+    case "READ":
+      return "text-green-500";
+    case "FAILED":
+      return "text-red-500";
+    case "SENT":
+      return "text-blue-500";
+    default:
+      return "text-muted-foreground";
+  }
 }
 
 // Build a display identity for a session: prefer collected contact info,
@@ -366,9 +397,10 @@ function TranscriptPanel({
             <style>{`@keyframes highlight { 0% { background-color: hsl(var(--primary) / 0.25); transform: scale(1.01); } 50% { background-color: hsl(var(--primary) / 0.15); } 100% { background-color: transparent; transform: scale(1); } }`}</style>
             <div ref={scrollContainerRef} className="space-y-3 max-h-[60vh] overflow-y-auto pr-2">
             {messages.map((m) => {
-              const isHumanMessage = m.sender_type === "human";
-              const isSystemMessage = m.sender_type === "system" || (m.metadata && typeof m.metadata === "object" && ("human_joined" in m.metadata || "human_left" in m.metadata));
-              const isHighlighted = highlightedMessageId === m.id;
+               const isHumanMessage = m.sender_type === "human";
+               const isSystemMessage = m.sender_type === "system" || (m.metadata && typeof m.metadata === "object" && ("human_joined" in m.metadata || "human_left" in m.metadata));
+               const isHighlighted = highlightedMessageId === m.id;
+               const delivery = m.role === "agent" ? deliveryLabel(m.send_status) : null;
 
               // System notification messages (human joined/left)
               if (isSystemMessage) {
@@ -402,9 +434,14 @@ function TranscriptPanel({
                       <p className="whitespace-pre-wrap">
                         {resolveTranscriptText(m.content) || "—"}
                       </p>
-                      <span className="block text-[10px] mt-1 opacity-60">
-                        {formatTime(m.created_at)}
-                      </span>
+                     <span className="block text-[10px] mt-1 opacity-60">
+                       {formatTime(m.created_at)}
+                       {delivery && (
+                         <span className={`ml-2 font-medium ${deliveryBadgeClass(m.send_status)}`}>
+                           {delivery}
+                         </span>
+                       )}
+                     </span>
                     </div>
                   </div>
                 );
@@ -436,11 +473,16 @@ function TranscriptPanel({
                     <p className="whitespace-pre-wrap">
                       {resolveTranscriptText(m.content) || "—"}
                     </p>
-                    <span className="block text-[10px] mt-1 opacity-60">
-                      {formatTime(m.created_at)}
-                    </span>
-                  </div>
-                  {m.role === "user" && (
+                     <span className="block text-[10px] mt-1 opacity-60">
+                       {formatTime(m.created_at)}
+                       {delivery && (
+                         <span className={`ml-2 font-medium ${deliveryBadgeClass(m.send_status)}`}>
+                           {delivery}
+                         </span>
+                       )}
+                     </span>
+                   </div>
+                   {m.role === "user" && (
                     <div className="flex-shrink-0 mt-1">
                       <div className="size-7 rounded-full bg-muted flex items-center justify-center">
                         <User className="size-3.5 text-muted-foreground" />
@@ -515,7 +557,7 @@ export default function ConversationsPage() {
     sortBy,
     sortOrder,
   });
-  const sessions = data?.items ?? [];
+  const sessions = useMemo(() => data?.items ?? [], [data?.items]);
   const total = data?.total ?? 0;
   const [selectedId, setSelectedId] = useState<string | null>(null);
 

@@ -62,19 +62,8 @@ class Settings(BaseSettings):
 
     
 
-    # Firebase Phone Auth (aurexa / dotstark-833ec)
-    FIREBASE_API_KEY: str = os.getenv("FIREBASE_API_KEY", "AIzaSyC7zH8cEITPDpfyiqhPo7ZlK1-2DViL1BI")
-    FIREBASE_AUTH_DOMAIN: str = os.getenv("FIREBASE_AUTH_DOMAIN", "dotstark-833ec.firebaseapp.com")
-    FIREBASE_PROJECT_ID: str = os.getenv("FIREBASE_PROJECT_ID", "dotstark-833ec")
-    FIREBASE_APP_ID: str = os.getenv("FIREBASE_APP_ID", "1:287417969813:web:7ba50454917fe54d4f3f9c")
-
     # NOTE: Meta Cloud API WhatsApp removed (QR/Baileys transport is the only
     # WhatsApp channel now). OTP delivery keeps its own WHATSAPP_OTP_* settings.
-
-    # Zavu SMS (phone OTP via Zavu shared/one-way sender)
-    ZAVU_API_KEY: str = os.getenv("ZAVU_API_KEY", "")
-    ZAVU_SENDER_ID: str = os.getenv("ZAVU_SENDER_ID", "kd78m7agx48rpyegpfrmhp5rsx8dm8t9")
-    ZAVU_BASE_URL: str = os.getenv("ZAVU_BASE_URL", "https://api.zavu.dev")
 
     # Phase 2 runtime cutover controls (web channel only)
     RUNTIME_CANARY_FALLBACK_ENABLED: bool = (
@@ -83,6 +72,14 @@ class Settings(BaseSettings):
     )
     RUNTIME_FALLBACK_SUNSET_ENFORCED: bool = (
         os.getenv("RUNTIME_FALLBACK_SUNSET_ENFORCED", "false").lower()
+        in ("true", "1", "yes")
+    )
+    WHATSAPP_RUNTIME_FALLBACK_ENABLED: bool = (
+        os.getenv("WHATSAPP_RUNTIME_FALLBACK_ENABLED", "true").lower()
+        in ("true", "1", "yes")
+    )
+    WHATSAPP_RUNTIME_FALLBACK_SUNSET_ENFORCED: bool = (
+        os.getenv("WHATSAPP_RUNTIME_FALLBACK_SUNSET_ENFORCED", "false").lower()
         in ("true", "1", "yes")
     )
 
@@ -146,9 +143,9 @@ class Settings(BaseSettings):
     # Per-transfer value is persisted; this is only the fallback default.
     RAZORPAY_ROUTE_COMMISSION_BPS: int = int(os.getenv("RAZORPAY_ROUTE_COMMISSION_BPS", "1000"))
 
-    # ── OTP Phone Provider (SMS ↔ WhatsApp) ──────────────────────────────
-    # whatsapp = active (Meta Cloud API), sms = Zavu sms_oneway fallback
-    OTP_PHONE_PROVIDER: str = os.getenv("OTP_PHONE_PROVIDER", "whatsapp")  # whatsapp | sms
+    # ── OTP delivery ─────────────────────────────────────────────────────
+    # Phone OTP is always delivered via WhatsApp (Meta Cloud API).
+    OTP_ALLOW_MOCK_DELIVERY: bool = os.getenv("OTP_ALLOW_MOCK_DELIVERY", "false").lower() in ("true", "1", "yes")
     WHATSAPP_OTP_PHONE_NUMBER_ID: str = os.getenv("WHATSAPP_OTP_PHONE_NUMBER_ID", "")
     WHATSAPP_OTP_ACCESS_TOKEN: str = os.getenv("WHATSAPP_OTP_ACCESS_TOKEN", "")
     WHATSAPP_OTP_API_VERSION: str = os.getenv("WHATSAPP_OTP_API_VERSION", "v20.0")

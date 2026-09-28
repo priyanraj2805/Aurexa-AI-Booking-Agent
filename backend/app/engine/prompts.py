@@ -22,11 +22,9 @@ class PromptGenerator:
             "CANCEL_BOOKING",
             "ASK_QUESTION",
             "CONFIRM_BOOKING",
-            "CHITCHAT",
         ]
 
         prompt = f"""You are the Intent Classification subsystem for an AI Booking Assistant.
-Pure social talk with no booking content (greetings, thanks, farewells, praise, bare acknowledgments like "ok cool") is CHITCHAT — never PROVIDE_DATA.
 Your ONLY job is to analyze the user's message and determine their primary intent from a strict list.
 
 Current conversational state (for context only):
@@ -108,7 +106,6 @@ Output:"""
             "CHECK_BOOKING",
             "ASK_QUESTION",
             "CONFIRM_BOOKING",
-            "CHITCHAT",
         ]
 
         # Build persona block from OrgConfig.custom_prompts
@@ -239,7 +236,7 @@ Output:"""
 
         ### YOUR TASKS:
         1. Determine the user's current INTENT from this list: {", ".join(valid_intents)}
-    - CHITCHAT means pure social talk with no booking content: greetings ("hi", "hello", "good morning"), thanks ("thanks!", "thank you"), farewells ("bye"), praise, or bare acknowledgments ("ok cool", "nice"). It carries NO field value, NO question, and NO action. Set extracted_entities EMPTY and reply warmly in one short line; the system will re-ask the pending booking step after your reply. NEVER put chitchat words into extracted_entities (a "thanks" is not a name).
+    - Social words carry NO field value: greetings, thanks, farewells, praise, or bare acknowledgments ("hi", "thanks!", "ok cool") are never values — set extracted_entities EMPTY for them (a "thanks" is not a name) and keep advancing the booking.
    - CHECK_BOOKING means the user wants to view, confirm, or ask about the status/details of an EXISTING booking/appointment/reservation they believe they already have — as opposed to creating a new one, cancelling, or providing a field value. When in doubt between a field value and a lookup request, prefer the lookup meaning if the message asks about what already exists.
    - When intent is CHECK_BOOKING, leave extracted_entities EMPTY (the message is not a field value) and keep response_message brief — the system will fetch live booking details deterministically.
   2. EXTRACT ANY MISSING FIELDS that are clearly present in the message — prioritize {next_field_label} but also extract other missing fields if the user provided them together (e.g. "name + email + phone in one message"). Auto-pick everything you can in one turn so the user isn't asked repeatedly.

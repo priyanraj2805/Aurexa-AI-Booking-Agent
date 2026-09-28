@@ -26,7 +26,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.core.config import settings
-from app.core.whatsapp_debouncer import get_session_lock, is_duplicate
+from app.core.whatsapp_debouncer import (
+    get_session_lock,
+    is_duplicate,
+    release_message,
+    session_lock_key,
+)
+from app.crud import chat as crud_chat
 from app.db.database import get_db
 
 logger = logging.getLogger(__name__)
@@ -159,7 +165,7 @@ async def _resolve_booking_org(db: AsyncSession):
     return None, None
 
 
-async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundTasks, event: dict) -> bool:
+async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundTasks, event: dict) -> Optional[bool]:
     """Run one normalized Cloud event through the live booking pipeline.
 
     Mirrors `whatsapp_qr.qr_inbound` turn-for-turn (tap block -> engine ->
@@ -170,6 +176,18 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
     text = str(event.get("text") or "").strip()
     if len(from_phone) < 7 or not text:
         return False
+    # Exact text the human sent, captured before any directive-tap rewrite.
+    _original_text = text
+    _inbound_message_id = str(event.get("message_id") or "").strip() or None
+    # Ambient provider id: every persistence call made while handling this
+    # message records it, so helper flows cannot persist a user turn with a
+    # NULL id. Isolated per request task by Starlette.
+    try:
+        from app.core.inbound_context import set_inbound_message_id
+
+        set_inbound_message_id(_inbound_message_id)
+    except Exception:
+        pass
 
     try:
         org, _conn = await _resolve_booking_org(db)
@@ -413,6 +431,17 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                     ),
                                 )
                                 if _iso_g:
+                                    _available_g, _availability_correction, _availability_reason = await _guards.validate_typed_date_availability(
+                                        db,
+                                        org.id,
+                                        org_config,
+                                        _iso_g,
+                                    )
+                                    if not _available_g:
+                                        _iso_g = None
+                                        _corr_g = _availability_correction
+                                        _reason_g = _availability_reason
+                                if _iso_g:
                                     _typed_iso = _iso_g
                                     _matched = {
                                         "id": f"date_typed_{_iso_g.replace('-', '')}",
@@ -435,7 +464,12 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                         _cd_bc.pop("active_directive_id", None)
                                         chat_session.collected_data = _cd_bc
                                         try:
-                                            await db.commit()
+                                            await crud_chat.update_chat_session(
+                                                db,
+                                                str(chat_session.session_id),
+                                                chat_session,
+                                                remove_keys=("active_directive_id",),
+                                            )
                                         except Exception:
                                             pass
                                         logger.info(f"Directive {str(_dir.id)[:8]} LLM bypass to engine (cloud): {text[:40]!r}")
@@ -479,7 +513,12 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                     _cd_h.pop("active_directive_id", None)
                                     chat_session.collected_data = _cd_h
                                     try:
-                                        await db.commit()
+                                        await crud_chat.update_chat_session(
+                                            db,
+                                            str(chat_session.session_id),
+                                            chat_session,
+                                            remove_keys=("active_directive_id",),
+                                        )
                                     except Exception:
                                         pass
                                     logger.info(f"Directive {str(_dir.id)[:8]} cancel bypass to engine (cloud): {text[:40]!r}")
@@ -494,7 +533,12 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                         _cd_h.pop("active_directive_id", None)
                                         chat_session.collected_data = _cd_h
                                         try:
-                                            await db.commit()
+                                            await crud_chat.update_chat_session(
+                                                db,
+                                                str(chat_session.session_id),
+                                                chat_session,
+                                                remove_keys=("active_directive_id",),
+                                            )
                                         except Exception:
                                             pass
                                         logger.info(f"Directive {str(_dir.id)[:8]} field-change ({_change_field}) to engine (cloud): {text[:40]!r}")
@@ -515,7 +559,12 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                     _cd_bc2.pop("active_directive_id", None)
                                     chat_session.collected_data = _cd_bc2
                                     try:
-                                        await db.commit()
+                                        await crud_chat.update_chat_session(
+                                            db,
+                                            str(chat_session.session_id),
+                                            chat_session,
+                                            remove_keys=("active_directive_id",),
+                                        )
                                     except Exception:
                                         pass
                                     logger.info(f"Directive {str(_dir.id)[:8]} LLM bypass to engine (cloud slot guard): {text[:40]!r}")
@@ -591,7 +640,12 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                     _fds2 = _ofd2(_pfd2(chat_session.collected_data.get("field_definitions_snapshot") or org_config.field_definitions or org_config.required_fields))
                                     _req2 = [f.name for f in _fds2 if f.required]
                                     chat_session.missing_fields = _SE2.calculate_missing_fields(_req2, _cd2)
-                                    await db.commit()
+                                    await crud_chat.update_chat_session(
+                                        db,
+                                        str(chat_session.session_id),
+                                        chat_session,
+                                        remove_keys=("active_directive_id",),
+                                    )
                                     logger.info(f"Directive {str(_dir.id)[:8]} completed via typed date (cloud): {_typed_iso}")
                                 except Exception as _e2:
                                     logger.warning(f"Directive typed-date completion failed (cloud): {_e2}")
@@ -618,7 +672,12 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                         _fds = order_field_definitions(parse_field_definitions(chat_session.collected_data.get("field_definitions_snapshot") or org_config.field_definitions or org_config.required_fields))
                                         _req = [f.name for f in _fds if f.required]
                                         chat_session.missing_fields = StateEvaluator.calculate_missing_fields(_req, _cd)
-                                        await db.commit()
+                                        await crud_chat.update_chat_session(
+                                            db,
+                                            str(chat_session.session_id),
+                                            chat_session,
+                                            remove_keys=("active_directive_id",),
+                                        )
                                         logger.info(f"Directive {str(_dir.id)[:8]} completed via tap (cloud): {str(_matched.get('label'))[:20]}")
                                 except Exception as _e:
                                     logger.warning(f"Directive tap state update failed (cloud): {_e}")
@@ -630,7 +689,7 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
         except Exception as _e:
             logger.warning(f"Directive tap handling failed (cloud), falling back to LLM: {_e}")
 
-        session_lock = get_session_lock(f"cloud:{str(chat_session.session_id)}")
+        session_lock = get_session_lock(session_lock_key(str(chat_session.session_id)))
         async with session_lock:
             _t0 = _time.monotonic()
             action = await runtime_router.route_whatsapp_message(
@@ -640,6 +699,8 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                 chat_session=chat_session,
                 message_text=text,
                 background_tasks=background_tasks,
+                transcript_user_text=_original_text,
+                inbound_message_id=_inbound_message_id,
             )
             _dt = _time.monotonic() - _t0
             _active_id_after = None
@@ -653,9 +714,19 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
             if _active_id_after:
                 try:
                     from app.engine.booking_directive.service import get_by_id as _get_dir2
+                    from app.engine.booking_directive.service import (
+                        directive_frame_matches_action as _frame_matches,
+                    )
 
                     _dir_after = await _get_dir2(db, _active_id_after)
-                    if _dir_after and _dir_after.status == "PENDING":
+                    if (
+                        _dir_after
+                        and _dir_after.status == "PENDING"
+                        and _frame_matches(
+                            getattr(_dir_after, "type", ""),
+                            getattr(action, "widget_directive", ""),
+                        )
+                    ):
                         _title = str(getattr(_dir_after, "title", "") or "").strip()
                         _desc = str(getattr(_dir_after, "description", "") or "").strip()
                         _opts = list(getattr(_dir_after, "options", None) or [])
@@ -727,49 +798,61 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                 wa_msg = whatsapp_client.format_action_for_whatsapp(action)
                 # Final anti-hallucination gate (same as QR path): block
                 # invented contact/money entities. Fail-open on error.
+                # Skip for deterministic duplicate-booking messages — they
+                # contain the EXISTING booking's email/phone which is not in
+                # the current collected_data, but is DB truth, not hallucination.
+                _skip_gate = False
                 try:
-                    from app.engine import knowledge_guards as _kb_guards
+                    _fm0 = getattr(action, "field_meta", None) or {}
+                    if isinstance(_fm0, dict) and _fm0.get("duplicate_booking"):
+                        _skip_gate = True
+                except Exception:
+                    pass
+                if not _skip_gate:
+                    try:
+                        from app.engine import knowledge_guards as _kb_guards
 
-                    _body0 = str((wa_msg or {}).get("body") or "")
-                    if _body0 and str((wa_msg or {}).get("type") or "") == "text":
-                        _cd0 = dict(chat_session.collected_data or {})
-                        _facts0: list = [str(getattr(org, "name", "") or "")]
-                        try:
-                            from app.engine.knowledge_profile import format_business_profile as _fbp
-
-                            _facts0.append(_fbp(getattr(org_config, "knowledge_context", None)) or "")
-                        except Exception:
-                            pass
-                        try:
-                            from sqlalchemy.future import select as _SelFee
-                            from app.models.service_unit import ProviderFee as _FeeModel
-
-                            _fees = (
-                                await db.execute(
-                                    _SelFee(_FeeModel).where(
-                                        _FeeModel.org_id == org.id,
-                                        _FeeModel.is_active.is_(True),
-                                    )
-                                )
-                            ).scalars().all()
-                            for _f in _fees:
-                                if _f.amount_paise:
-                                    _facts0.append(f"{(_f.currency or 'INR')} {(_f.amount_paise / 100):,.2f}")
-                        except Exception:
-                            pass
-                        _sess0 = [str(_cd0.get(k) or "") for k in ("name", "email", "phone", "date", "time")]
-                        _safe0, _blocked0, _ents0 = _kb_guards.guard_final_text(
-                            _body0, org_facts=_facts0, session_details=_sess0
-                        )
-                        if _blocked0:
-                            logger.warning("whatsapp KB entity gate blocked reply (cloud) with unlisted %s", _ents0)
+                        _body0 = str((wa_msg or {}).get("body") or "")
+                        if _body0 and str((wa_msg or {}).get("type") or "") == "text":
+                            _cd0 = dict(chat_session.collected_data or {})
+                            _facts0: list = [str(getattr(org, "name", "") or "")]
                             try:
-                                await crud_chat.save_message(db, str(chat_session.session_id), "agent", _safe0)
+                                from app.engine.knowledge_profile import format_business_profile as _fbp
+
+                                _facts0.append(_fbp(getattr(org_config, "knowledge_context", None)) or "")
                             except Exception:
                                 pass
-                            wa_msg = {"type": "text", "body": _safe0[:4096]}
-                except Exception as _gate_e:
-                    logger.warning(f"whatsapp KB entity gate failed open (cloud): {_gate_e}")
+                            try:
+                                from sqlalchemy.future import select as _SelFee
+                                from app.models.service_unit import ProviderFee as _FeeModel
+
+                                _fees = (
+                                    await db.execute(
+                                        _SelFee(_FeeModel).where(
+                                            _FeeModel.org_id == org.id,
+                                            _FeeModel.is_active.is_(True),
+                                        )
+                                    )
+                                ).scalars().all()
+                                for _f in _fees:
+                                    if _f.amount_paise:
+                                        _facts0.append(f"{(_f.currency or 'INR')} {(_f.amount_paise / 100):,.2f}")
+                            except Exception:
+                                pass
+                            _sess0 = [str(_cd0.get(k) or "") for k in ("name", "email", "phone", "date", "time")]
+                            _safe0, _blocked0, _ents0 = _kb_guards.guard_final_text(
+                                _body0, org_facts=_facts0, session_details=_sess0
+                            )
+                            if _blocked0:
+                                logger.warning("whatsapp KB entity gate blocked reply (cloud) with unlisted %s", _ents0)
+                                # Do not save a second ghost row here — the
+                                # main transcript is already saved by
+                                # langgraph_orchestrator; saving again would
+                                # create transcript vs WhatsApp divergence
+                                # (Image 2 ghost duplicate). Just replace wa_msg.
+                                wa_msg = {"type": "text", "body": _safe0[:4096]}
+                    except Exception as _gate_e:
+                        logger.warning(f"whatsapp KB entity gate failed open (cloud): {_gate_e}")
             # Approved Marketing templates (language `en`) for the contact
             # steps; the text `wa_msg` below is still sent as the reply.
             # Guard: one send per (template, missing-field set) — a stuck
@@ -821,6 +904,21 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
             except Exception as _brk_c:
                 logger.warning(f"repeat breaker failed open (cloud): {_brk_c}")
             sent = await whatsapp_cloud.send_booking_reply(from_phone, wa_msg)
+            try:
+                if sent.get("success"):
+                    await crud_chat.mark_latest_outbound_sent(
+                        db,
+                        str(chat_session.session_id),
+                        sent.get("wamid"),
+                    )
+                else:
+                    await crud_chat.mark_latest_outbound_failed(
+                        db,
+                        str(chat_session.session_id),
+                        sent.get("error") or "WhatsApp Cloud send failed",
+                    )
+            except Exception as _delivery_state_error:
+                logger.warning("cloud delivery state update failed: %s", _delivery_state_error)
             logger.info(
                 "meta webhook booking turn done in %.1fs reply_type=%s cloud_sent=%s",
                 _dt, (wa_msg or {}).get("type"), sent.get("success"),
@@ -828,7 +926,7 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
             return True
     except Exception:
         logger.exception("meta webhook booking turn failed")
-        return False
+        return None
 
 
 @router.post("/webhook")
@@ -893,6 +991,24 @@ async def inbound(
             for status in value.get("statuses") or []:
                 if isinstance(status, dict):
                     statuses += 1
+                    provider_id = str(status.get("id") or "").strip()
+                    status_name = str(status.get("status") or "").strip()
+                    error_text = ""
+                    errors = status.get("errors") or []
+                    if isinstance(errors, list) and errors:
+                        first_error = errors[0]
+                        if isinstance(first_error, dict):
+                            error_text = str(first_error.get("title") or first_error.get("message") or "")
+                    if provider_id and status_name:
+                        try:
+                            await crud_chat.apply_delivery_status(
+                                db,
+                                provider_id,
+                                status_name,
+                                error_text or None,
+                            )
+                        except Exception as status_error:
+                            logger.warning("whatsapp delivery status update failed: %s", status_error)
 
             messages = value.get("messages")
             if not isinstance(messages, list):
@@ -925,10 +1041,15 @@ async def inbound(
             if event.get("duplicate"):
                 continue
             if event.get("message_type") not in ("text", "interactive"):
+                release_message(f"meta:{event.get('message_id')}")
                 continue
-            if await _process_booking_event(db, background_tasks, event):
+            _processed = await _process_booking_event(db, background_tasks, event)
+            if _processed is True:
                 processed += 1
+            elif _processed is None:
+                release_message(f"meta:{event.get('message_id')}")
         except Exception:
+            release_message(f"meta:{event.get('message_id')}")
             logger.exception("meta webhook event loop failed")
     return {
         "status": "ok",

@@ -20,10 +20,7 @@ from typing import Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crud import chat as crud_chat
-from app.engine.runtime_router import (
-    process_message_with_graph,
-    process_message,
-)
+from app.engine import runtime_router
 from app.models.organization import Organization
 from app.models.config import OrgConfig
 from app.schemas.agent import ActionPayload, ChatSessionState
@@ -152,7 +149,7 @@ class ConversationManager:
     ) -> ActionPayload:
         """Delegate to existing LangGraph path with canary fallback."""
         try:
-            return await process_message_with_graph(
+            return await runtime_router.process_message_with_graph(
                 db=self.db,
                 org=self.org,
                 org_config=self.org_config,
@@ -184,7 +181,7 @@ class ConversationManager:
 
             emit_fallback_event(_build_fallback_event("web", self.chat_session, error))
 
-            return await process_message(
+            return await runtime_router.process_message(
                 db=self.db,
                 org=self.org,
                 org_config=self.org_config,

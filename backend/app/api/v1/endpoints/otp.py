@@ -31,7 +31,10 @@ async def request_otp(
     _: None = Depends(deny_impersonation),
     db: AsyncSession = Depends(get_db)
 ):
-    """Generates an OTP for the given session+channel. Email via SMTP, phone via Zavu SMS (kd78m7agx48rpyegpfrmhp5rsx8dm8t9)."""
+    """Generates an OTP for the given session+channel. Email via SMTP, phone via WhatsApp."""
+    from app.core.otp_delivery import delivery_error, delivery_succeeded
+    from app.crud.otp import invalidate_otp_delivery
+
     channel = (getattr(data, "channel", "email") or "email").lower()
     if channel not in ("email", "phone"):
         channel = "email"
@@ -54,15 +57,18 @@ async def request_otp(
                 if phone:
                     from app.core.config import settings as _cfg
                     from app.core.otp_delivery.whatsapp_provider import WhatsAppProvider
-                    from app.core.otp_delivery.sms_provider import SMSProvider
-                    provider = WhatsAppProvider() if (getattr(_cfg, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else SMSProvider()
-                    try:
-                        await provider.send_otp(phone, code, str(data.session_id))
-                        logger.info(f"Phone OTP ({provider.__class__.__name__}) sent to {phone[:6]}*** for session {data.session_id}")
-                    except Exception as sms_err:
-                        logger.error(f"Phone OTP send failed ({provider.__class__.__name__}) for {data.session_id}: {sms_err}")
+                    provider = WhatsAppProvider()
+                    result = await provider.send_otp(phone, code, str(data.session_id))
+                    if not delivery_succeeded(
+                        result,
+                        allow_mock=bool(getattr(_cfg, "OTP_ALLOW_MOCK_DELIVERY", False)),
+                    ):
+                        await invalidate_otp_delivery(db, str(data.session_id), "phone")
+                        raise RuntimeError(delivery_error(result))
+                    logger.info(f"Phone OTP ({provider.__class__.__name__}) accepted for session {data.session_id}")
                 else:
-                    logger.warning(f"Phone OTP generate: no phone in session {data.session_id}")
+                    await invalidate_otp_delivery(db, str(data.session_id), "phone")
+                    raise ValueError("Phone number is required")
             else:
                 # Email channel — fetch email and send via SMTP
                 from sqlalchemy.future import select as _select
@@ -82,13 +88,25 @@ async def request_otp(
                     from app.core.mail import send_otp_email
                     org_id = getattr(sess2, "org_id", None)
                     if org_id:
-                        await send_otp_email(email, code, org_id=org_id)
+                        result = await send_otp_email(email, code, org_id=org_id)
+                        if not delivery_succeeded(
+                            result,
+                            allow_mock=bool(getattr(settings, "OTP_ALLOW_MOCK_DELIVERY", False)),
+                        ):
+                            await invalidate_otp_delivery(db, str(data.session_id), "email")
+                            raise RuntimeError(delivery_error(result))
+                else:
+                    await invalidate_otp_delivery(db, str(data.session_id), "email")
+                    raise ValueError("Email address is required")
         except Exception as send_err:
             logger.error(f"Failed to deliver OTP ({channel}) for {data.session_id}: {send_err}")
+            raise HTTPException(status_code=502, detail="OTP delivery failed") from send_err
         return OTPGenerateResponse(
             status="sent",
             demo_code=code if settings.DEBUG else None,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error generating OTP: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -100,47 +118,27 @@ async def submit_otp(
     data: OTPVerifyRequest,
     db: AsyncSession = Depends(get_db)
 ):
-    """Verifies OTP. Both email and phone (Zavu SMS) use 6-digit code; phone also accepts legacy Firebase id_token."""
+    """Verifies OTP. Both email and phone (WhatsApp) use a 6-digit code."""
     channel = (getattr(data, "channel", "email") or "email").lower()
     if channel not in ("email", "phone"):
         channel = "email"
-    id_token = getattr(data, "id_token", None)
 
-    # --- Phone channel: Zavu 6-digit code primary, Firebase id_token fallback ---
+    # --- Phone channel: WhatsApp 6-digit code ---
     if channel == "phone":
-        # Prefer Firebase if id_token supplied (legacy widget path)
-        if id_token and str(id_token).strip():
-            try:
-                is_valid = await verify_otp(db, str(data.session_id), code=None, channel="phone", id_token=id_token)
-                if is_valid:
-                    logger.info(f"Phone OTP verified via Firebase for session {data.session_id}")
-                    return OTPVerifyResponse(status="success", message="OTP Verified")
-            except ValueError as e:
-                msg = str(e)
-                low = msg.lower()
-                if any(k in low for k in ("expired", "invalid firebase", "revoked", "missing phone_number", "missing uid", "not configured")):
-                    if "not configured" in low:
-                        msg = msg + " (Check backend logs - FIREBASE_SERVICE_ACCOUNT_JSON missing)"
-                    raise HTTPException(status_code=401, detail=msg)
-                if "too many" in low or "cooldown" in low or "maximum resend" in low:
-                    raise HTTPException(status_code=429, detail=msg)
-                raise HTTPException(status_code=400, detail=msg)
-            # Fall through to code path if token invalid
-        # Zavu 6-digit code path
         if not data.code or not str(data.code).strip():
-            raise HTTPException(status_code=400, detail="6-digit code required for phone verification (or Firebase id_token).")
+            raise HTTPException(status_code=400, detail="6-digit code required for phone verification.")
         try:
-            is_valid = await verify_otp(db, str(data.session_id), str(data.code).strip(), channel="phone", id_token=None)
+            is_valid = await verify_otp(db, str(data.session_id), str(data.code).strip(), channel="phone")
         except ValueError as e:
             raise HTTPException(status_code=429, detail=str(e))
         if is_valid:
-            logger.info(f"Phone OTP verified via Zavu code for session {data.session_id}")
+            logger.info(f"Phone OTP verified via WhatsApp code for session {data.session_id}")
             return OTPVerifyResponse(status="success", message="OTP Verified")
         raise HTTPException(status_code=400, detail="Invalid or expired OTP code")
 
     # --- Email channel: 6-digit code ---
     try:
-        is_valid = await verify_otp(db, str(data.session_id), data.code, channel="email", id_token=None)
+        is_valid = await verify_otp(db, str(data.session_id), data.code, channel="email")
     except ValueError as e:
         raise HTTPException(status_code=429, detail=str(e))
     if is_valid:

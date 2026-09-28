@@ -7,8 +7,16 @@ from app.schemas.agent import ActionPayload
 
 
 def _tool_context(session_id: str = "session-1") -> dict:
+    config_result = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(
+            first=lambda: SimpleNamespace(
+                require_otp=False,
+                require_phone_otp=False,
+            )
+        )
+    )
     return {
-        "db": SimpleNamespace(),
+        "db": SimpleNamespace(execute=AsyncMock(return_value=config_result)),
         "session_id": session_id,
         "org_id": "00000000-0000-0000-0000-000000000001",
     }

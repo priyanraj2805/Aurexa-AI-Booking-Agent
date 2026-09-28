@@ -93,7 +93,7 @@ class DataValidator:
         except ValueError:
             return (
                 None,
-                "Invalid date format. Please use YYYY-MM-DD or say something like 'next Tuesday'.",
+                "Invalid date format. Please use YYYY-MM-DD .",
             )
 
     @staticmethod
@@ -154,12 +154,12 @@ class DataValidator:
             try:
                 result = validate_email(value, check_deliverability=False)
                 return result.normalized, None
-            except EmailNotValidError as e:
-                return None, f"Invalid email: {str(e)}"
+            except EmailNotValidError:
+                return None, "Please enter a valid email address, like name@example.com."
         # Fallback regex (stronger than before)
         if re.match(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$", value):
             return value, None
-        return None, "Invalid email format. Please provide a valid email address."
+        return None, "Please enter a valid email address, like name@example.com."
 
     @staticmethod
     def _validate_phone(
@@ -182,7 +182,7 @@ class DataValidator:
                     # Even structurally valid ranges contain famous test
                     # sequences (9876543210). Screen those generically.
                     if _looks_like_fake_number(re.sub(r"\D", "", canonical)):
-                        return None, "Please provide a valid phone number.", metadata
+                        return None, "Please enter a valid phone number.", metadata
                     region = phonenumbers.region_code_for_number(parsed) or normalized_country
                     metadata["country_code"] = region or normalized_country
                     return canonical, None, metadata
@@ -201,7 +201,7 @@ class DataValidator:
                             if _looks_like_fake_number(_digits_only):
                                 return (
                                     None,
-                                    "Please provide a valid phone number.",
+                                    "Please enter a valid phone number.",
                                     metadata,
                                 )
                             metadata["country_code"] = "IN"
@@ -220,14 +220,14 @@ class DataValidator:
 
         digits = re.sub(r"\D", "", value)
         if len(digits) < 10:
-            return None, "Phone number must have at least 10 digits.", metadata
+            return None, "Please enter a valid phone number with at least 10 digits.", metadata
         if len(digits) > 15:
-            return None, "Phone number is too long.", metadata
+            return None, "Please enter a valid phone number — it looks too long.", metadata
         # Reject obviously fake patterns (all same digit or sequential)
         if len(set(digits)) == 1:
-            return None, "Please provide a valid phone number.", metadata
+            return None, "Please enter a valid phone number.", metadata
         if _looks_like_fake_number(digits):
-            return None, "Please provide a valid phone number.", metadata
+            return None, "Please enter a valid phone number.", metadata
         return f"+{digits}", None, metadata
 
     @staticmethod

@@ -476,6 +476,48 @@ def validate_typed_date(
     )
 
 
+async def validate_typed_date_availability(
+    db,
+    org_id,
+    org_config,
+    iso_date: str,
+) -> Tuple[bool, Optional[str], str]:
+    try:
+        from datetime import date
+        from app.engine.slot_engine import compute_slot_inventory
+
+        inventory, status = await compute_slot_inventory(
+            db,
+            org_id,
+            date.fromisoformat(iso_date),
+            org_config=org_config,
+        )
+    except Exception:
+        return True, None, "ok"
+    if status in {"closed_day", "exception_closed"}:
+        parsed = date.fromisoformat(iso_date)
+        return (
+            False,
+            f"We are closed on {parsed.strftime('%A, %B %d')}. Please choose another date.",
+            "closed_day",
+        )
+    if status in {"no_schedule", "no_slots_in_window", "fully_booked"}:
+        parsed = date.fromisoformat(iso_date)
+        return (
+            False,
+            f"There are no available times on {parsed.strftime('%A, %B %d')}. Please choose another date.",
+            "no_slots",
+        )
+    if not any(bool(item.get("available")) for item in inventory):
+        parsed = date.fromisoformat(iso_date)
+        return (
+            False,
+            f"There are no available times on {parsed.strftime('%A, %B %d')}. Please choose another date.",
+            "no_slots",
+        )
+    return True, None, "ok"
+
+
 def date_correction(raw: str, correction: str, horizon_text: str = "") -> str:
     """Full correction body for a rejected date (never a numbered list)."""
     body = correction

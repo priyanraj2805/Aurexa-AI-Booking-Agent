@@ -8,6 +8,8 @@ from app.models.whatsapp_connection import (
     WhatsAppConnection,
     WhatsAppConnectionStatus,
 )
+from app.models.session import ChatSession
+from app.models.message import ChatMessage
 
 
 class FakeGateway:
@@ -311,9 +313,13 @@ class TestQrInbound:
 
         seen = {}
 
-        async def fake_route(*, db, org, org_config, chat_session, message_text, background_tasks=None):
+        async def fake_route(*, db, org, org_config, chat_session, message_text,
+                             background_tasks=None, transcript_user_text=None,
+                             inbound_message_id=None):
             seen["org_id"] = str(org.id)
             seen["text"] = message_text
+            seen["transcript_text"] = transcript_user_text
+            seen["inbound_id"] = inbound_message_id
             seen["session_channel"] = chat_session.channel
             assert org_config is not None  # real OrgConfig, never None
             return SimpleNamespace(widget_directive="TEXT_INPUT", message="Hello!", field_meta=None)
@@ -350,6 +356,10 @@ class TestQrInbound:
         assert seen["org_id"] == str(org_id)
         assert seen["text"] == "Hi, I need an appointment"
         assert seen["session_channel"] == "whatsapp"
+        # The inbound handler must hand the engine both the untouched text and
+        # the provider id, so the transcript can be traced back to this message.
+        assert seen["transcript_text"] == "Hi, I need an appointment"
+        assert seen["inbound_id"] == self._payload(row.id)["messageId"]
 
         # Same message id again -> duplicate (engine runs once).
         r2 = await client.post(
@@ -358,6 +368,161 @@ class TestQrInbound:
             headers=self._headers(monkeypatch),
         )
         assert r2.json()["status"] == "duplicate"
+
+    async def test_pending_confirm_does_not_frame_unrelated_reply(
+        self, client, registered_user, monkeypatch, db_session
+    ):
+        """A stale PENDING CONFIRM_BOOKING directive must not staple
+        "Please confirm your booking … Reply CONFIRM" onto an unrelated
+        engine reply (edit prompt, lookup answer, greeting)."""
+        from types import SimpleNamespace
+        from sqlalchemy.future import select
+        from app.crud import chat as crud_chat
+        from app.engine import runtime_router
+        from app.engine.booking_directive.service import (
+            create_directive as _create_dir,
+        )
+        from app.models.config import OrgConfig
+
+        async def fake_route(*, db, org, org_config, chat_session, message_text,
+                             background_tasks=None, transcript_user_text=None,
+                             inbound_message_id=None):
+            return SimpleNamespace(
+                widget_directive="TEXT_INPUT",
+                message="Our team can help with bookings.",
+                field_meta={},
+            )
+
+        monkeypatch.setattr(runtime_router, "route_whatsapp_message", fake_route)
+        org_id = registered_user["user"]["org_id"]
+        cfg = (
+            await db_session.execute(select(OrgConfig).where(OrgConfig.org_id == org_id))
+        ).scalars().first()
+        assert cfg is not None
+        from app.models.config import MeetingMode
+
+        cfg.meeting_mode = MeetingMode.HYBRID
+        row = WhatsAppConnection(
+            org_id=org_id,
+            status="CONNECTED",
+            phone_number="919521433306",
+            whatsapp_booking_enabled=True,
+        )
+        db_session.add(row)
+        await db_session.commit()
+        await db_session.refresh(row)
+
+        session = await crud_chat.get_or_create_channel_session(
+            db_session, str(org_id), "whatsapp", "919521433306"
+        )
+        created = await _create_dir(
+            db_session,
+            org_id=org_id,
+            customer_id="919521433306",
+            session_id=session.session_id,
+            type="CONFIRM_BOOKING",
+            title="Please confirm your booking",
+            description="",
+            options=[
+                {"id": "confirm_booking", "label": "CONFIRM", "value": "confirm"},
+                {"id": "change_booking", "label": "CHANGE", "value": "change"},
+            ],
+            required=True,
+            expires_in_seconds=600,
+            meta={},
+        )
+        collected = dict(session.collected_data or {})
+        collected["active_directive_id"] = str(created.id)
+        session.collected_data = collected
+        await crud_chat.update_chat_session(db_session, str(session.session_id), session)
+
+        r = await client.post(
+            "/api/v1/internal/whatsapp-qr/inbound",
+            json=self._payload(row.id, messageId="wamid.FRAME1", text="What are your hours?"),
+            headers=self._headers(monkeypatch),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()["reply"]["body"]
+        assert body == "Our team can help with bookings."
+        assert "Please confirm your booking" not in body
+        assert "Reply CONFIRM" not in body
+
+    async def test_confirm_step_keeps_directive_framing(
+        self, client, registered_user, monkeypatch, db_session
+    ):
+        """When the engine really returns the confirmation step, the
+        pending CONFIRM_BOOKING directive still frames the reply."""
+        from types import SimpleNamespace
+        from sqlalchemy.future import select
+        from app.crud import chat as crud_chat
+        from app.engine import runtime_router
+        from app.engine.booking_directive.service import (
+            create_directive as _create_dir,
+        )
+        from app.models.config import OrgConfig
+
+        async def fake_route(*, db, org, org_config, chat_session, message_text,
+                             background_tasks=None, transcript_user_text=None,
+                             inbound_message_id=None):
+            return SimpleNamespace(
+                widget_directive="REQUEST_CONFIRMATION",
+                message="Here is your booking summary.",
+                field_meta={},
+            )
+
+        monkeypatch.setattr(runtime_router, "route_whatsapp_message", fake_route)
+        org_id = registered_user["user"]["org_id"]
+        cfg = (
+            await db_session.execute(select(OrgConfig).where(OrgConfig.org_id == org_id))
+        ).scalars().first()
+        assert cfg is not None
+        from app.models.config import MeetingMode
+
+        cfg.meeting_mode = MeetingMode.HYBRID
+        row = WhatsAppConnection(
+            org_id=org_id,
+            status="CONNECTED",
+            phone_number="919521433306",
+            whatsapp_booking_enabled=True,
+        )
+        db_session.add(row)
+        await db_session.commit()
+        await db_session.refresh(row)
+
+        session = await crud_chat.get_or_create_channel_session(
+            db_session, str(org_id), "whatsapp", "919521433306"
+        )
+        created = await _create_dir(
+            db_session,
+            org_id=org_id,
+            customer_id="919521433306",
+            session_id=session.session_id,
+            type="CONFIRM_BOOKING",
+            title="Please confirm your booking",
+            description="",
+            options=[
+                {"id": "confirm_booking", "label": "CONFIRM", "value": "confirm"},
+                {"id": "change_booking", "label": "CHANGE", "value": "change"},
+            ],
+            required=True,
+            expires_in_seconds=600,
+            meta={},
+        )
+        collected = dict(session.collected_data or {})
+        collected["active_directive_id"] = str(created.id)
+        session.collected_data = collected
+        await crud_chat.update_chat_session(db_session, str(session.session_id), session)
+
+        r = await client.post(
+            "/api/v1/internal/whatsapp-qr/inbound",
+            json=self._payload(row.id, messageId="wamid.FRAME2", text="I see"),
+            headers=self._headers(monkeypatch),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()["reply"]["body"]
+        assert "Please confirm your booking" in body
+        assert "Here is your booking summary." in body
+        assert "Reply CONFIRM to confirm or CHANGE to modify." in body
 
     async def test_inactive_org_ignored(self, client, registered_user, monkeypatch, db_session):
         from app.models.organization import Organization
@@ -393,7 +558,9 @@ class TestQrInbound:
         from app.models.config import OrgConfig
         from app.models.whatsapp_connection import WhatsAppConnection
 
-        async def fake_route(*, db, org, org_config, chat_session, message_text, background_tasks=None):
+        async def fake_route(*, db, org, org_config, chat_session, message_text,
+                             background_tasks=None, transcript_user_text=None,
+                             inbound_message_id=None):
             return SimpleNamespace(
                 widget_directive="REQUIRE_PAYMENT",
                 message="Your appointment total is ₹500.00. Please pay to confirm your booking.",
@@ -546,6 +713,50 @@ class TestQrEvents:
         assert r.json()["status"] == "ignored"
         await db_session.refresh(row)
         assert row.status == "CONNECTED"
+    async def test_message_sent_marks_latest_outbound(
+        self, client, registered_user, monkeypatch, db_session
+    ):
+        org_id = registered_user["user"]["org_id"]
+        row = await self._row_with_status(
+            db_session, org_id, WhatsAppConnectionStatus.CONNECTED
+        )
+        session = ChatSession(
+            org_id=org_id,
+            channel="whatsapp",
+            channel_user_id="919521433306",
+            state_data={},
+            missing_fields=[],
+            session_status="ACTIVE",
+        )
+        db_session.add(session)
+        await db_session.flush()
+        message = ChatMessage(
+            session_id=session.id,
+            role="agent",
+            content="Reply",
+            sender_type="ai",
+            direction="outbound",
+            send_status="GENERATED",
+        )
+        db_session.add(message)
+        await db_session.commit()
+
+        response = await client.post(
+            "/api/v1/internal/whatsapp-qr/events",
+            json={
+                "connectionId": str(row.id),
+                "event": "message_sent",
+                "sessionId": str(session.id),
+                "fromNumber": "919521433306",
+                "providerMessageId": "BAILEYS-SENT-1",
+            },
+            headers=self._headers(monkeypatch),
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+        await db_session.refresh(message)
+        assert message.send_status == "SENT"
+        assert message.provider_message_id == "BAILEYS-SENT-1"
 
 
 # ── Booking toggle gate ──────────────────────────────────────────────────
@@ -649,7 +860,9 @@ class TestBookingToggle:
 
         calls = []
 
-        async def fake_route(*, db, org, org_config, chat_session, message_text, background_tasks=None):
+        async def fake_route(*, db, org, org_config, chat_session, message_text,
+                             background_tasks=None, transcript_user_text=None,
+                             inbound_message_id=None):
             calls.append(message_text)
             return SimpleNamespace(widget_directive="TEXT_INPUT", message="Hi!", field_meta=None)
 
@@ -681,7 +894,9 @@ class TestBookingToggle:
 
         calls = []
 
-        async def fake_route(*, db, org, org_config, chat_session, message_text, background_tasks=None):
+        async def fake_route(*, db, org, org_config, chat_session, message_text,
+                             background_tasks=None, transcript_user_text=None,
+                             inbound_message_id=None):
             calls.append(message_text)
             return SimpleNamespace(widget_directive="TEXT_INPUT", message="Hi!", field_meta=None)
 
@@ -714,7 +929,9 @@ class TestBookingToggle:
 
         calls = []
 
-        async def fake_route(*, db, org, org_config, chat_session, message_text, background_tasks=None):
+        async def fake_route(*, db, org, org_config, chat_session, message_text,
+                             background_tasks=None, transcript_user_text=None,
+                             inbound_message_id=None):
             calls.append(message_text)
             return SimpleNamespace(widget_directive="TEXT_INPUT", message="Hi!", field_meta=None)
 

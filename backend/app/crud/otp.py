@@ -1,6 +1,7 @@
 import hashlib
 import re
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Literal
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,30 +21,6 @@ _OTP_POLICY_KEY = "_otp_policy"
 _OTP_PHONE_POLICY_KEY = "_otp_phone_policy"
 
 OTP_CHANNEL = Literal["email", "phone"]
-
-async def verify_firebase_id_token(id_token: str, expected_phone: str) -> bool:
-    """Legacy REST verifier - DEPRECATED. Kept for backward compat, delegates to Admin SDK.
-
-    New code should use app.core.firebase.verify_firebase_id_token_admin.
-    """
-    from app.core.firebase import verify_firebase_id_token_admin
-
-    try:
-        decoded = await verify_firebase_id_token_admin(id_token)
-        token_phone = decoded.get("phone_number", "")
-        import phonenumbers
-
-        def norm(p):
-            try:
-                pn = phonenumbers.parse(p, None)
-                return phonenumbers.format_number(pn, phonenumbers.PhoneNumberFormat.E164)
-            except Exception:
-                return p.replace(" ", "").replace("-", "")
-
-        return norm(token_phone) == norm(expected_phone)
-    except Exception:
-        return False
-
 
 def _normalize_phone(p: str) -> str:
     """Normalize phone to E.164 where possible, fallback to stripped."""
@@ -74,7 +51,16 @@ def _build_otp_context_key(session: ChatSession) -> str:
 
 def _build_phone_otp_context_key(session: ChatSession) -> str:
     state_data = session.state_data if isinstance(session.state_data, dict) else {}
-    phone = str(state_data.get("phone") or "").strip()
+    raw_phone = str(state_data.get("phone") or "").strip()
+    try:
+        import phonenumbers
+
+        pn = phonenumbers.parse(raw_phone, "IN" if len(raw_phone.replace(" ", "").replace("-", "").lstrip("+")) <= 11 else None)
+        phone = phonenumbers.format_number(pn, phonenumbers.PhoneNumberFormat.E164) if phonenumbers.is_possible_number(pn) else re.sub(r"\D", "", raw_phone)
+    except Exception:
+        import re as _re
+
+        phone = _re.sub(r"\D", "", raw_phone)
     date_value = _normalize_date_component(state_data.get("date"))
     time_value = _normalize_time_component(state_data.get("time"))
     return f"otp_phone:{session.id}:{phone}:{date_value}:{time_value}"
@@ -112,7 +98,6 @@ class OTPVerifyRequest(BaseModel):
     session_id: UUID4
     code: Optional[str] = None
     channel: OTP_CHANNEL = "email"
-    id_token: Optional[str] = None  # Firebase ID token for phone channel
 
 def _hash_code(code: str) -> str:
     """Simple SHA256 hash for the OTP code."""
@@ -181,8 +166,8 @@ async def generate_otp(
 ) -> str:
     """Generates a 6-digit OTP for given session+channel, stores its hash, returns raw code.
 
-    For channel=phone (Firebase), no OTPRecord is created - Firebase handles SMS.
-    Rate limiting / cooldown / resend cap are still enforced via session state.
+    Both email and phone (WhatsApp) channels persist an OTPRecord (BYO-OTP).
+    Rate limiting / cooldown / resend cap are enforced via session state.
     """
     import uuid as _uuid
     channel = (channel or "email").lower().strip()
@@ -210,9 +195,7 @@ async def generate_otp(
     if resend and resend_count >= OTP_RESEND_CAP:
         raise ValueError("Maximum resend attempts reached. Please try again later.")
 
-    # --- Zavu phone channel: create OTPRecord like email (BYO-OTP) ---
-    # Firebase path deprecated — Zavu sms_oneway (kd78m7agx48rpyegpfrmhp5rsx8dm8t9) now delivers code
-    # Fall through to shared 6-digit generation below for channel=="phone" as well
+    # --- Phone channel (WhatsApp): create OTPRecord like email (BYO-OTP) ---
 
     code = f"{secrets.randbelow(1000000):06d}"
     code_hash = _hash_code(code)
@@ -283,52 +266,79 @@ async def generate_otp(
     await db.commit()
     return code
 
-async def verify_otp(db: AsyncSession, session_id: str, code: Optional[str] = None, channel: str = "email", id_token: Optional[str] = None) -> bool:
-    """Verifies OTP. Email and Phone (Zavu SMS) both use 6-digit OTPRecord.
+async def invalidate_otp_delivery(
+    db: AsyncSession,
+    session_id: str,
+    channel: str,
+    *,
+    context_key: Optional[str] = None,
+) -> None:
+    channel = (channel or "email").lower().strip()
+    if channel not in ("email", "phone"):
+        channel = "email"
+    try:
+        sid = uuid.UUID(str(session_id))
+        result = await db.execute(
+            select(OTPRecord).where(
+                OTPRecord.session_id == sid,
+                OTPRecord.channel == channel,
+            )
+        )
+        for record in result.scalars().all():
+            await db.delete(record)
+        session_result = await db.execute(select(ChatSession).where(ChatSession.id == sid))
+        session = session_result.scalars().first()
+        if session is not None:
+            state = dict(session.state_data) if isinstance(session.state_data, dict) else {}
+            state.pop(_channel_policy_key(channel), None)
+            internal = state.get("_internal")
+            if isinstance(internal, dict):
+                if channel == "email":
+                    internal.pop("otp_send_key", None)
+                else:
+                    internal.pop("phone_otp_send_key", None)
+                state["_internal"] = internal
+            effects = state.get("_active_path_effects")
+            if isinstance(effects, dict):
+                if context_key:
+                    effects.pop(context_key, None)
+                if channel == "email":
+                    keys = effects.get("otp_sent_keys")
+                    if isinstance(keys, list):
+                        keys = [key for key in keys if not str(key).startswith("otp:")]
+                        if keys:
+                            effects["otp_sent_keys"] = keys
+                        else:
+                            effects.pop("otp_sent_keys", None)
+                    effects.pop("otp_keys", None)
+                else:
+                    keys = effects.get("otp_sent_keys")
+                    if isinstance(keys, list):
+                        keys = [key for key in keys if not str(key).startswith("otp_phone:")]
+                        if keys:
+                            effects["otp_sent_keys"] = keys
+                        else:
+                            effects.pop("otp_sent_keys", None)
+                    effects.pop("phone_otp_sent_keys", None)
+                    effects.pop("phone_otp_keys", None)
+                state["_active_path_effects"] = effects
+            session.state_data = state
+        await db.commit()
+    except Exception:
+        return
 
-    Phone channel now uses Zavu sms_oneway (kd78m7agx48rpyegpfrmhp5rsx8dm8t9) BYO-OTP:
+
+async def verify_otp(db: AsyncSession, session_id: str, code: Optional[str] = None, channel: str = "email") -> bool:
+    """Verifies OTP. Email and phone (WhatsApp) both use 6-digit OTPRecord.
+
+    Phone channel uses WhatsApp BYO-OTP:
     - Generate: 6-digit code stored hashed, expires 900s
     - Verify: hash compare, then phone_otp_verified=True
-    Firebase id_token path kept as fallback if caller supplies it (legacy).
     """
     channel = (channel or "email").lower().strip()
     if channel not in ("email", "phone"):
         channel = "email"
-
-    # --- Firebase fallback: if phone channel called with id_token, keep legacy verify (exclusive) ---
-    if channel == "phone" and id_token and str(id_token).strip():
-        # Legacy Firebase path — exclusive when id_token supplied (no fallback to code)
-        import uuid as _uuid2
-
-        sid2 = _uuid2.UUID(session_id)
-        res2 = await db.execute(select(ChatSession).where(ChatSession.id == sid2))
-        sess2 = res2.scalars().first()
-        if not sess2:
-            return False
-        expected_phone = str(sess2.state_data.get("phone") or "").strip() if isinstance(sess2.state_data, dict) else ""
-        from app.core.firebase import verify_firebase_id_token_admin
-
-        decoded = await verify_firebase_id_token_admin(id_token)  # may raise ValueError -> caller maps to 401
-        token_phone = decoded.get("phone_number") or ""
-        norm_expected = _normalize_phone(expected_phone)
-        norm_token = _normalize_phone(token_phone)
-        if norm_token != norm_expected:
-            return False  # mismatch -> endpoint returns 400 mismatch
-        sess2.phone_otp_verified = True
-        state2 = dict(sess2.state_data) if isinstance(sess2.state_data, dict) else {}
-        state2.pop(_channel_policy_key("phone"), None)
-        internal2 = state2.get("_internal")
-        if not isinstance(internal2, dict):
-            internal2 = {}
-        internal2["phone_otp_verified_key"] = _build_phone_otp_context_key(sess2)
-        state2["_internal"] = internal2
-        sess2.state_data = state2
-        await db.commit()
-        return True
     import uuid as _uuid
-    channel = (channel or "email").lower().strip()
-    if channel not in ("email", "phone"):
-        channel = "email"
     sid = _uuid.UUID(session_id)
 
     stmt = select(OTPRecord).where(OTPRecord.session_id == sid, OTPRecord.channel == channel)

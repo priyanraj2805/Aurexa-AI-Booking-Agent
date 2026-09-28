@@ -1,5 +1,8 @@
+import asyncio
 import logging
 import re
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from fastapi import BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +37,107 @@ MAX_RUNTIME_CONTEXT_MESSAGES = 6
 OTP_COOLDOWN_SECONDS = 30
 OTP_RESEND_CAP = 3
 OTP_VALID_FOR_SECONDS = 300
+GRAPH_TIMEOUT_SECONDS = 60
+
+
+async def _whatsapp_hours_prefix(db: AsyncSession, org: Organization) -> str:
+    try:
+        from app.engine.scheduling_policy import load_weekly_hours_block
+
+        _full = await load_weekly_hours_block(db, str(org.id))
+        if not _full or "Monday" not in _full:
+            return ""
+        _first = _full.split("\n")[0].replace("## ", "").replace(" (authoritative — answer timing questions from this)", "")
+        _first = _first.strip()
+        if not _first or len(_first) >= 120:
+            return ""
+        return _first
+    except Exception:
+        logger.warning("whatsapp hours prefix failed", exc_info=True)
+        return ""
+
+
+def _slot_policy_kwargs(org_config) -> dict:
+    return {
+        "allow_same_day_booking": bool(getattr(org_config, "allow_same_day_booking", False)),
+        "slot_cutoff_minutes": getattr(org_config, "slot_cutoff_minutes", 5),
+    }
+
+
+async def _has_available_persisted_slot(
+    db: AsyncSession,
+    org_id: Any,
+    target_date: Any,
+    requested_time: Any,
+    timezone_name: str,
+    allowed_slot_id: Optional[str] = None,
+) -> bool:
+    try:
+        from datetime import datetime, timezone
+        from dateutil.parser import parse as date_parse
+        from app.models.booking import TimeSlot
+        from zoneinfo import ZoneInfo
+
+        parsed_date = date_parse(str(target_date)).date()
+        parsed_time = (
+            date_parse(str(requested_time)).time()
+            if requested_time
+            else None
+        )
+        try:
+            business_zone = ZoneInfo(str(timezone_name or "UTC"))
+        except Exception:
+            business_zone = ZoneInfo("UTC")
+        start_utc = (
+            datetime.combine(
+                parsed_date, parsed_time, tzinfo=business_zone
+            ).astimezone(timezone.utc)
+            if parsed_time
+            else None
+        )
+        if allowed_slot_id and not requested_time:
+            try:
+                import uuid as _uuid_slot
+
+                slot_id = _uuid_slot.UUID(str(allowed_slot_id))
+                locked_result = await db.execute(
+                    select(TimeSlot).where(
+                        TimeSlot.id == slot_id,
+                        TimeSlot.org_id == org_id,
+                        TimeSlot.is_booked.is_(False),
+                    )
+                )
+                locked_slot = locked_result.scalars().first()
+                if locked_slot is not None:
+                    locked_start = locked_slot.start_time
+                    if locked_start.tzinfo is None:
+                        locked_start = locked_start.replace(tzinfo=timezone.utc)
+                    if locked_start.astimezone(business_zone).date() == parsed_date:
+                        return True
+            except Exception:
+                pass
+        if not requested_time:
+            return False
+        result = await db.execute(
+            select(TimeSlot).where(
+                TimeSlot.org_id == org_id,
+                TimeSlot.start_time == start_utc,
+                TimeSlot.is_booked.is_(False),
+            )
+        )
+        slot = result.scalars().first()
+        if slot is None:
+            return False
+        if slot.locked_until:
+            locked_until = slot.locked_until
+            if locked_until.tzinfo is None:
+                locked_until = locked_until.replace(tzinfo=timezone.utc)
+            if locked_until > datetime.now(timezone.utc):
+                if not allowed_slot_id or str(slot.id) != str(allowed_slot_id):
+                    return False
+        return True
+    except Exception:
+        return False
 
 
 def _extract_user_visible_message(raw_message: Any) -> tuple[str, Dict[str, Any]]:
@@ -48,11 +152,14 @@ async def _persist_transcript_best_effort(
     assistant_message: str,
     directive: str,
     intent: Optional[str],
+    user_external_id: Optional[str] = None,
 ) -> None:
     if not hasattr(db, "add") or not hasattr(db, "commit"):
         return
     try:
-        await crud_chat.save_message(db, session_id, "user", user_message)
+        await crud_chat.save_message(
+            db, session_id, "user", user_message, external_message_id=user_external_id
+        )
         metadata: Dict[str, Any] = {"directive": directive}
         if intent:
             metadata["intent"] = intent
@@ -61,6 +168,12 @@ async def _persist_transcript_best_effort(
         )
     except Exception as exc:  # pragma: no cover - best effort parity with legacy path
         logger.warning("Failed to persist graph transcript: %s", exc)
+
+
+# Session states a booking can never return from. Once one of these is on
+# disk, a later turn holding a stale in-memory copy must not write a
+# non-terminal status over it, or the customer is pushed into booking again.
+_TERMINAL_SESSION_STATUSES = frozenset({"CONFIRMED", "CANCELLED", "EXPIRED"})
 
 
 def _active_effect_state(chat_session: ChatSessionState) -> Dict[str, Any]:
@@ -74,7 +187,7 @@ def _active_effect_state(chat_session: ChatSessionState) -> Dict[str, Any]:
 
 
 _RESEND_PATTERN = re.compile(
-    r"\b(resend|re-?send|send\s+(?:it|the\s+code|again)|new\s+code|didn'?t\s+(?:get|receive))\b",
+    r"\b(resend|re-?send|recend|resent|resent otp|recend otp|send\s+(?:it|the\s+code|again)|new\s+code|didn'?t\s+(?:get|receiv(?:e|ed))|did\s+not\s+(?:get|receiv(?:e|ed))|haven'?t\s+(?:receiv(?:e|ed)|got|get)|hasn'?t\s+(?:receiv(?:e|ed)|got)|not\s+(?:receiv(?:e|ed)|got|getting)|never\s+(?:receiv(?:e|ed)|got|receive)|no\s+(?:otp|code)|not\s+received|waiting\s+for\s+(?:otp|code)|where.*otp|otp\s+not\s+received)\b",
     re.IGNORECASE,
 )
 
@@ -83,7 +196,37 @@ def _is_resend_request(message_text: str) -> bool:
     text = str(message_text or "").strip()
     if not text:
         return False
-    return bool(_RESEND_PATTERN.search(text))
+    if _RESEND_PATTERN.search(text):
+        return True
+    # Heuristic: message mentions otp/code AND a negation / waiting intent
+    # e.g. "I didn't received any otp" -> contains otp + didn't + received
+    low = text.lower()
+    has_otp = ("otp" in low or "code" in low or "whatsapp" in low)
+    has_neg = any(
+        kw in low
+        for kw in (
+            "didn't",
+            "didnt",
+            "did not",
+            "haven't",
+            "havent",
+            "hasn't",
+            "hasnt",
+            "not received",
+            "not got",
+            "never",
+            "no otp",
+            "no code",
+            "not getting",
+            "waiting",
+            "where",
+            "didn't receive",
+            "didnt receive",
+            "didn't received",
+            "didnt received",
+        )
+    )
+    return bool(has_otp and has_neg)
 
 
 def _is_awaiting_otp(chat_session: ChatSessionState) -> bool:
@@ -92,11 +235,28 @@ def _is_awaiting_otp(chat_session: ChatSessionState) -> bool:
         return False
     # If either email or phone OTP is pending, consider awaiting
     # For phone-only orgs (Priyanshu), phone_otp_verified is the gate
+    # NOTE: ChatSessionState stores everything in collected_data (alias for state_data).
+    # _get_policy_state expects .state_data, so we try both attributes.
     try:
         from app.crud.otp import _get_policy_state as _get_ps
-        # If any OTP policy state has been set, we are awaiting
+
         for ch in ("email", "phone"):
-            ps = _get_ps(chat_session, ch) if hasattr(chat_session, "state_data") else {}
+            ps = {}
+            if hasattr(chat_session, "state_data"):
+                try:
+                    ps = _get_ps(chat_session, ch)
+                except Exception:
+                    ps = {}
+            if not ps or not ps.get("last_sent_at"):
+                # Fallback: ChatSessionState uses collected_data
+                sd = getattr(chat_session, "collected_data", None) or getattr(
+                    chat_session, "state_data", None
+                )
+                if isinstance(sd, dict):
+                    key = "_otp_phone_policy" if ch == "phone" else "_otp_policy"
+                    cand = sd.get(key)
+                    if isinstance(cand, dict):
+                        ps = cand
             if isinstance(ps, dict) and ps.get("last_sent_at"):
                 return True
     except Exception:
@@ -129,25 +289,23 @@ async def _handle_graph_otp_resend(
     chat_session: ChatSessionState,
     message_text: str,
     background_tasks: Optional[BackgroundTasks] = None,
+    org_config: Optional[OrgConfig] = None,
 ) -> ActionPayload:
     # Determine pending channel from org config + verification state — never fallback to disabled channel
     # WhatsApp-only: phone if pending, else email if pending, else error
+    _pending: Optional[str] = None
     try:
-        from app.models.config import OrgConfig as _OC
-        # org_config may be passed via chat_session? Try to get from org
-        # Use get_otp_policy_metadata to infer, but simpler: read org_config if available via db
-        # For whatsapp, phone is preferred when both pending; for web, email first (handled in message_processor)
-        # Here we need org_config — try to fetch if not in closure
         _is_whatsapp = str(getattr(chat_session, "channel", "")).lower() in ("whatsapp", "whatsapp_cloud")
-        # Attempt to get org_config from DB if not provided
-        _org_config = None
-        try:
-            from sqlalchemy.future import select as _sel
-            from app.models.config import OrgConfig
-            _res = await db.execute(_sel(OrgConfig).where(OrgConfig.org_id == org.id))
-            _org_config = _res.scalars().first()
-        except Exception:
-            _org_config = None
+        _org_config = org_config
+        if _org_config is None:
+            try:
+                from sqlalchemy.future import select as _sel
+                from app.models.config import OrgConfig
+
+                _res = await db.execute(_sel(OrgConfig).where(OrgConfig.org_id == org.id))
+                _org_config = _res.scalars().first()
+            except Exception:
+                _org_config = None
         if _org_config is not None:
             # NULL flag = schema default (email ON, phone OFF).
             _raw_e = getattr(_org_config, "require_otp", True)
@@ -178,11 +336,12 @@ async def _handle_graph_otp_resend(
                     message="Phone OTP is disabled for this organization.",
                     widget_directive="TEXT_INPUT",
                 )
-            return await message_processor._handle_otp_resend(
-                db, org, chat_session, message_text, background_tasks, channel=_pending
-            )
     except Exception:
-        pass
+        logger.warning("graph resend channel resolution failed", exc_info=True)
+    if _pending is not None:
+        return await message_processor._handle_otp_resend(
+            db, org, chat_session, message_text, background_tasks, channel=_pending
+        )
     # Fallback: let message_processor decide (defaults to email, but will now respect pending)
     return await message_processor._handle_otp_resend(
         db, org, chat_session, message_text, background_tasks
@@ -238,8 +397,9 @@ def _window_item_to_message(item: dict[str, str]) -> HumanMessage | AIMessage:
 
 def _load_runtime_context(chat_session: ChatSessionState) -> tuple[str, list[dict[str, str]]]:
     raw_state = {}
-    if isinstance(chat_session.collected_data, dict):
-        checkpoint = chat_session.collected_data.get(crud_chat.RUNTIME_CHECKPOINT_KEY, {})
+    collected_data = getattr(chat_session, "collected_data", None)
+    if isinstance(collected_data, dict):
+        checkpoint = collected_data.get(crud_chat.RUNTIME_CHECKPOINT_KEY, {})
         if isinstance(checkpoint, dict):
             raw_state = checkpoint.get("state", {}) or {}
     summary = str(raw_state.get("summary", "") or "")
@@ -290,13 +450,15 @@ def _enforce_runtime_contact_requirements(
         for field_definition in configured_field_definitions
         if field_definition.required and field_definition.name in {"email", "phone"}
     }
+    missing_contacts: list[str] = []
     for field in ("email", "phone"):
         if field not in required_contacts:
             continue
         value = collected_data.get(field)
         has_value = bool(str(value).strip()) if isinstance(value, str) else value is not None
         if not has_value and field not in required:
-            required.insert(0, field)
+            missing_contacts.append(field)
+    required = missing_contacts + required
     return required
 
 
@@ -469,6 +631,7 @@ Return ONLY valid JSON:
             "reply": reply,
         }
     except Exception:
+        logger.warning("post_booking LLM analysis failed", exc_info=True)
         return {
             "classification": "NEUTRAL",
             "action": "NONE",
@@ -492,6 +655,33 @@ async def _handle_post_booking_session(
     and the booking flow is never re-entered.
     """
     status = chat_session.session_status
+
+    # Deterministic confirm short-circuit: on a finished CONFIRMED booking a
+    # confirm word is never a new request — answer from stored state without
+    # spending an LLM call (whose free-form reply caused the "different
+    # confirmation every time" loop). Cancel-flow confirmations are excluded:
+    # a "yes" while cancellation is pending must enter the cancel flow.
+    if status == "CONFIRMED" and not chat_session.pending_cancel:
+        try:
+            from app.engine.time_flex import is_pure_confirm_message as _is_confirm_msg
+
+            _looks_confirm = bool(_is_confirm_msg(message_text))
+        except Exception:
+            _looks_confirm = False
+        if _looks_confirm:
+            reply = message_processor.build_finished_session_reply(chat_session, status)
+            action_payload = ActionPayload(
+                message=reply, widget_directive="TEXT_INPUT", is_terminal=False
+            )
+            await _persist_transcript_best_effort(
+                db,
+                session_id=chat_session.session_id,
+                user_message=message_text,
+                assistant_message=reply,
+                directive="TEXT_INPUT",
+                intent=chat_session.current_intent,
+            )
+            return action_payload
 
     # LLM analysis of the user's actual message.
     analysis = await _llm_post_booking_analysis(
@@ -527,7 +717,11 @@ async def _handle_post_booking_session(
     #    reopen flow, keeping name/email/phone (date/time re-collected).
     if status == "CONFIRMED" and is_action_request and action == "RESCHEDULE":
         return await message_processor._reschedule_booking(
-            db, org, chat_session, background_tasks
+            db,
+            org,
+            chat_session,
+            background_tasks,
+            user_message=message_text,
         )
 
     # 3. Confirmation / denial of a previously asked cancellation.
@@ -600,9 +794,18 @@ async def _handle_post_booking_session(
         )
         return action_payload
 
-    # 5. Everything else → the LLM's own status-aware reply. Always TEXT_INPUT;
-    #    never a booking-collection widget.
-    if not reply:
+    # 5. Everything else → deterministic status reply, except genuine
+    #    questions which keep the LLM's answer. Echoing free-form LLM text
+    #    here produced a different "confirmation" on every repeat and let
+    #    misclassified words ("Human") invent new confirmations.
+    #    Always TEXT_INPUT; never a booking-collection widget.
+    if classification == "INFO_QUESTION" and reply:
+        pass
+    elif (status == "CONFIRMED" and classification == "CONFIRM") or (
+        reply and looks_like_confirmation_claim(reply)
+    ):
+        reply = message_processor.build_finished_session_reply(chat_session, status)
+    elif not reply:
         reply = {
             "CONFIRMED": "Your booking is confirmed! You can say 'cancel my booking' or 'reschedule' anytime.",
             "CANCELLED": "Your previous booking was cancelled. Just say 'I want to book' to start a new one!",
@@ -638,6 +841,245 @@ def apply_verified_phone(collected, verified_phone):
     return _apply(collected, verified_phone)
 
 
+_CONFIRM_TOKENS_FOR_BOOKING = frozenset({
+    "yes", "yep", "yup", "yeah", "yup", "ok", "okay", "okey", "sure", "confirm",
+    "confirmed", "book", "booked", "proceed", "go", "ahead", "done", "affirmative",
+    "correct", "right", "fine", "alright", "allright", "absolutely", "definitely",
+    "lock", "finalise", "finalize", "schedule",
+})
+
+
+_CONFIRM_FILLER_WORDS = frozenset({
+    "it", "in", "on", "my", "the", "a", "an", "please", "is", "are", "be",
+    "up", "out", "for", "me", "us", "that", "this", "i", "we", "and", "to",
+    "do", "did", "would", "like", "want", "ok", "okay",
+    # The object being confirmed: "confirm booking", "book my appointment".
+    # Harmless on their own because every OTHER token must still read as a
+    # confirmation, so "cancel booking" / "delete my appointment" stay false.
+    "booking", "appointment", "reservation", "order", "slot", "session",
+    "meeting", "details", "detail", "info", "information",
+})
+
+
+def _is_user_confirmation(message_text: str) -> bool:
+    """True when the customer's own words confirm the booking.
+
+    This is the authorisation signal for creating a booking, so it is derived
+    only from the inbound text and never from the model's intent label. When
+    the model returned an unexpected intent on the confirmation turn the
+    booking was silently skipped while the customer was still told "confirmed".
+
+    Real customers type "Okayy", "yess", "okk" or "comfirm". Those must count
+    as a confirmation here, otherwise the flow stalls at the final step. The
+    fuzzy allowance is deliberately narrow to avoid reopening the original
+    defect, where substring matching treated any sentence containing the letter
+    k ("I want to know about dotstark") as a confirmation:
+      * at most three words, so a full sentence can never match
+      * no question mark, so a question is never a confirmation
+      * every alphabetic token must be a known confirm token or within one
+        edit of one
+    """
+    text = str(message_text or "").strip()
+    if not text or "?" in text:
+        return False
+    # A bare six-digit code is verified by the OTP branch, not a confirmation.
+    if re.fullmatch(r"\d{6}", text):
+        return False
+
+    import difflib as _difflib
+
+    tokens = re.findall(r"[a-z']+", text.lower())
+    if not tokens or len(tokens) > 3:
+        return False
+
+    # Interactive buttons arrive as their ID, not as prose: tapping "Confirm"
+    # on WhatsApp sends "btn_confirm" (see whatsapp_client.format_action_for_
+    # whatsapp). A natural-language-only check rejected those, so clicking
+    # Confirm re-displayed the summary forever instead of moving on to
+    # verification. Underscores and emoji are stripped before matching, and a
+    # cancel/edit tap is explicitly excluded.
+    _norm = re.sub(r"[^a-z]+", " ", text.lower())
+    if "confirm" in _norm.split():
+        if not re.search(r"\b(?:cancel|edit|change|modify|back)\b", _norm):
+            return True
+
+    for token in tokens:
+        if token in _CONFIRM_TOKENS_FOR_BOOKING or token in _CONFIRM_FILLER_WORDS:
+            continue
+        if any(
+            _difflib.SequenceMatcher(None, token, known).ratio() >= 0.8
+            for known in _CONFIRM_TOKENS_FOR_BOOKING
+            if abs(len(known) - len(token)) <= 2
+        ):
+            continue
+        return False
+    return True
+
+
+def should_run_booking_gate(
+    *,
+    directive: str,
+    missing_fields,
+    require_otp: bool,
+    require_phone_otp: bool,
+    otp_verified: bool,
+    phone_otp_verified: bool,
+    user_confirmed: Optional[bool] = None,
+) -> bool:
+    """Whether the booking/OTP gate must run for this turn.
+
+    ``require_otp`` / ``require_phone_otp`` MUST be the admin's configuration
+    values, not the derived "still pending" flags. The derived flags fold in
+    ``not verified``, so they flip to False the moment a code is accepted — and
+    an earlier version of this gate used them to decide whether to run at all.
+    That disabled the gate on exactly the turn the booking was supposed to
+    happen: the customer verified, the booking was silently skipped, and the
+    model's "your booking is confirmed" text was the only thing left.
+
+    ``user_confirmed`` preserves the required order: details -> summary ->
+    confirm -> OTP -> code -> booking. Until the customer has actually
+    confirmed, the gate must not run, because running it would send the OTP
+    before the customer has agreed to the booking. With None (callers that
+    cannot report a confirmation) the previous behaviour is kept.
+    """
+    if not (require_otp or require_phone_otp):
+        return False
+    _otp_satisfied = bool(
+        (require_otp and otp_verified) or (require_phone_otp and phone_otp_verified)
+    )
+    if user_confirmed is False and not missing_fields and not _otp_satisfied:
+        # Details complete, customer has NOT confirmed, and no code has been
+        # accepted yet: show the summary and wait. Do not send a code.
+        #
+        # Once the code IS accepted the customer has already confirmed (the
+        # code is only ever sent after an explicit confirmation), so the gate
+        # must run and create the booking. Blocking here on the code turn would
+        # re-show the summary forever and nothing would ever be booked.
+        return False
+    if directive == "PROCESS_BOOKING":
+        return True
+    otp_pending = bool(
+        (require_otp and not otp_verified)
+        or (require_phone_otp and not phone_otp_verified)
+    )
+    if not otp_pending:
+        # Every required code has been accepted. This is the turn the booking
+        # must actually be written, so the gate MUST run and hand off to
+        # _handle_booking_flow -> _execute_booking.
+        #
+        # Returning False here meant the code was accepted, the flag was
+        # persisted, the gate declined to run, the graph answered instead, and
+        # the customer got "your appointment is confirmed" with no Booking
+        # row, no email and no notification behind it.
+        logger.info(
+            "BOOKING GATE: OTP satisfied -> run gate (missing=%s)",
+            list(missing_fields or []),
+        )
+        return not missing_fields
+    if missing_fields:
+        return False
+    return directive in (
+        "PROCESS_BOOKING",
+        "REQUEST_CONFIRMATION",
+        "BOOKING_SUMMARY_CARD",
+        "TEXT_INPUT",
+    )
+
+
+async def _session_has_persisted_booking(
+    db: AsyncSession,
+    session_id: str,
+    *,
+    org_id=None,
+    collected_data: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True when a Booking row exists for this booking attempt.
+
+    Used to make "you are booked" a verifiable claim rather than a generated
+    sentence.
+
+    Matching deliberately does NOT rely on ``bookings.session_id`` alone. That
+    column is nullable and in practice is NULL for most WhatsApp bookings
+    (only 9 of 48 rows carry it), so a session-only lookup fails to find
+    genuine bookings and would wrongly suppress every real confirmation.
+    Three strategies are tried in order:
+      1. an explicit booking id already resolved by the caller
+      2. session id, when one was recorded
+      3. org + customer identity within a short recent window
+
+    Fails closed: on error it returns False, so a confirmation is withheld
+    rather than risk telling a customer they have an appointment that does
+    not exist.
+    """
+    collected = collected_data or {}
+    from sqlalchemy import or_ as _or_
+    from sqlalchemy.future import select as _sel
+    from app.models.booking import Booking as _Booking
+
+    def _one(stmt):
+        return stmt.limit(1)
+
+    # 1. Explicit booking id resolved earlier in this turn.
+    explicit_id = str(collected.get("booking_id") or "").strip()
+    if explicit_id:
+        try:
+            row = (
+                await db.execute(
+                    _one(_sel(_Booking.id).where(_Booking.id == uuid.UUID(explicit_id)))
+                )
+            ).first()
+            if row:
+                return True
+        except Exception:
+            pass
+
+    # 2. Session id, when the booking recorded one.
+    if session_id:
+        try:
+            row = (
+                await db.execute(
+                    _one(
+                        _sel(_Booking.id).where(
+                            _Booking.session_id == uuid.UUID(str(session_id))
+                        )
+                    )
+                )
+            ).first()
+            if row:
+                return True
+        except Exception:
+            pass
+
+    # 3. Identity match inside a recent window, so an old booking for the same
+    #    person cannot justify a fresh confirmation claim.
+    email = str(collected.get("email") or "").strip().lower()
+    phone = str(collected.get("phone") or "").strip()
+    identity = []
+    if email:
+        identity.append(_Booking.customer_email == email)
+    if phone:
+        identity.append(_Booking.customer_phone == phone)
+    if identity and org_id is not None:
+        try:
+            row = (
+                await db.execute(
+                    _one(
+                        _sel(_Booking.id).where(
+                            _Booking.org_id == org_id,
+                            _or_(*identity),
+                            _Booking.created_at
+                            >= datetime.now(timezone.utc) - timedelta(minutes=30),
+                        )
+                    )
+                )
+            ).first()
+            if row:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 async def process_message_with_graph(
     db: AsyncSession,
     org: Organization,
@@ -646,17 +1088,30 @@ async def process_message_with_graph(
     message_text: str,
     background_tasks: Optional[BackgroundTasks] = None,
     recovery_metadata: Optional[Dict[str, Any]] = None,
+    raise_on_timeout: bool = False,
+    transcript_user_text: Optional[str] = None,
+    inbound_message_id: Optional[str] = None,
 ) -> ActionPayload:
     """
     Entry point for the LangGraph-based AI agent.
     Replaces the legacy process_message state machine.
+
+    transcript_user_text: original user text for the transcript when callers
+    rewrote message_text (e.g. directive-tap option values). The rewritten
+    text still drives booking logic; the transcript keeps what the human
+    actually sent. inbound_message_id: provider message id stored alongside.
     """
     # Empty input carries no intent: stay silent (no reply, no transcript,
     # no state change). Inbounds translate SILENT_NO_REPLY to reply=None.
     if not str(message_text or "").strip():
         return ActionPayload(message="", widget_directive="SILENT_NO_REPLY",
                              field_meta={"silent": True})
+    graph_message_text = message_text
     session_id = chat_session.session_id
+    _transcript_user_text = (
+        transcript_user_text if transcript_user_text is not None else graph_message_text
+    )
+    _inbound_id = inbound_message_id
     existing_summary, existing_window = _load_runtime_context(chat_session)
 
     # Cancellation gate: deterministic pre-graph handling while a cancel flow is
@@ -683,16 +1138,9 @@ async def process_message_with_graph(
     # instead of being interrogated for fields. (Cancel turns already
     # returned above, so this never swallows a cancellation.)
     if decline_flow.is_no_booking_request(message_text):
-        action = await decline_flow.start_decline(db, org, chat_session, message_text)
-        await _persist_transcript_best_effort(
-            db,
-            session_id=session_id,
-            user_message=message_text,
-            assistant_message=action.message,
-            directive=action.widget_directive or "TEXT_INPUT",
-            intent="DECLINED_BOOKING",
+        return await decline_flow.start_decline(
+            db, org, chat_session, message_text, inbound_message_id=_inbound_id
         )
-        return action
     # Re-engagement clears a recorded decline (values or book-words).
     await decline_flow.maybe_reengage(db, chat_session, message_text)
 
@@ -700,7 +1148,7 @@ async def process_message_with_graph(
     # missing field gets a soft re-ask of the SAME field — never a jump
     # ahead, never interrogation for something else.
     refusal_action = await decline_flow.maybe_handle_field_refusal(
-        db, org, chat_session, message_text
+        db, org, chat_session, message_text, inbound_message_id=_inbound_id
     )
     if refusal_action is not None:
         return refusal_action
@@ -717,7 +1165,7 @@ async def process_message_with_graph(
     # The LLM is unreliable at routing a bare "resend", so handle it directly.
     if _is_resend_request(message_text) and _is_awaiting_otp(chat_session):
         return await _handle_graph_otp_resend(
-            db, org, chat_session, message_text, background_tasks
+            db, org, chat_session, message_text, background_tasks, org_config=org_config
         )
 
     # Fast-path: 6-digit OTP code sent as chat message (WhatsApp phone OTP
@@ -728,7 +1176,41 @@ async def process_message_with_graph(
     _awaiting = _is_awaiting_otp(chat_session)
     _raw_p_log = getattr(org_config, "require_phone_otp", False)
     _phone_pending_log = bool((False if _raw_p_log is None else bool(_raw_p_log)) and not bool(getattr(chat_session, "phone_otp_verified", False)))
-    logger.info(f"OTP chat check: msg='{_stripped[:20]}' is_6digit={_is_six} awaiting={_awaiting} phone_pending={_phone_pending_log}")
+    if not _is_six and _awaiting:
+        _code_match = re.search(r"(?<!\d)(\d{6})(?!\d)", _stripped)
+        if _code_match:
+            _stripped = _code_match.group(1)
+            _is_six = True
+    logger.info(f"OTP chat check: is_6digit={_is_six} awaiting={_awaiting} phone_pending={_phone_pending_log}")
+
+    # Snapshot any OTP record that already existed BEFORE this turn. The send
+    # happens later (when the customer confirms), so comparing this against the
+    # record at the end of the turn tells us, deterministically, whether the
+    # code was sent on THIS turn or on an earlier one.
+    #
+    # That distinction matters because the same "code pending" state needs two
+    # opposite replies:
+    #   sent on this turn  -> "I've sent a verification code to ..."
+    #   sent earlier       -> the booking-assistant line + enter your code
+    _otp_created_at_before: Optional[Any] = None
+    try:
+        import uuid as _uuid_snap
+        from sqlalchemy.future import select as _sel_snap
+
+        from app.models.otp import OTPRecord as _OTPSnap
+
+        try:
+            _sid_snap = _uuid_snap.UUID(str(session_id))
+        except Exception:
+            _sid_snap = session_id
+        _snap_row = (
+            await db.execute(
+                _sel_snap(_OTPSnap.created_at).where(_OTPSnap.session_id == _sid_snap)
+            )
+        ).scalars().first()
+        _otp_created_at_before = _snap_row
+    except Exception:
+        _otp_created_at_before = None
     if _is_six:
         # Determine which OTP channel is actually pending for this org/session.
         _raw_pp = getattr(org_config, "require_phone_otp", False)
@@ -767,6 +1249,12 @@ async def process_message_with_graph(
             collected_phone=str((chat_session.collected_data or {}).get("phone") or ""),
             otp_was_sent=_otp_was_sent,
         )
+        if _channels:
+            graph_message_text = "[verification code entered]"
+            # Privacy redaction outranks the original-text override: a pasted
+            # OTP must never reach the transcript (or Admin Inbox) in the clear,
+            # even when the inbound handler supplied transcript_user_text.
+            _transcript_user_text = "[verification code entered]"
         # Only attempt verify if at least one channel is pending.
         # Previous check required _is_awaiting_otp (sent_keys/last_sent_at) which
         # could be False due to state_data vs collected_data mismatch, causing
@@ -803,6 +1291,28 @@ async def process_message_with_graph(
                 # booking in the same turn. Persist before graph invocation.
                 if _verified_channel == "phone":
                     chat_session.phone_otp_verified = True
+                    # Store the verified key OUTSIDE the guarded block below.
+                    # That block ends in `except Exception: pass`, so anything
+                    # raising inside it silently skipped the key write; the
+                    # booking flow then read an empty key, judged the
+                    # verification bogus, revoked it, and booked nothing.
+                    _kp = str(
+                        (getattr(chat_session, "collected_data", None) or {}).get("phone")
+                        or ""
+                    ).strip()
+                    if _kp:
+                        from app.engine.message_processor import (
+                            _ensure_internal_state as _ensure_internal,
+                        )
+
+                        _ensure_internal(chat_session)[
+                            "phone_otp_verified_key"
+                        ] = f"otp_phone:{session_id}:{_kp}"
+                    else:
+                        logger.warning(
+                            "OTP verified but no phone in collected_data; keys=%s",
+                            (getattr(chat_session, "collected_data", None) or {}).keys(),
+                        )
                     try:
                         _es = _active_effect_state(chat_session)
                         _sk = _es.get("otp_sent_keys")
@@ -820,6 +1330,38 @@ async def process_message_with_graph(
                                             _cd, _parts[2].strip()
                                         )
                                     break
+                        # Build the verified key from the session + phone we can
+                        # actually see. _build_phone_otp_context_key() also
+                        # embeds date/time, so it returned "" whenever the slot
+                        # fields were absent, and the bare `except` below hid
+                        # it. Nothing was ever stored, so the booking flow read
+                        # an empty key, judged the verification bogus, revoked
+                        # it, and no booking was ever created.
+                        _verified_phone = str(
+                            (getattr(chat_session, "collected_data", None) or {}).get("phone")
+                            or ""
+                        ).strip()
+                        if not _verified_phone:
+                            for _k in _sk or []:
+                                _ks = str(_k or "")
+                                if _ks.startswith("otp_phone:"):
+                                    _pp = _ks.split(":")
+                                    if len(_pp) >= 3 and _pp[2].strip():
+                                        _verified_phone = _pp[2].strip()
+                                        break
+                        _verified_ctx = (
+                            f"otp_phone:{session_id}:{_verified_phone}"
+                            if _verified_phone
+                            else ""
+                        )
+                        if _verified_ctx:
+                            _ensure_internal_state(chat_session)[
+                                "phone_otp_verified_key"
+                            ] = _verified_ctx
+                            logger.info(
+                                "OTP verified key stored=%s",
+                                _verified_ctx,
+                            )
                         if isinstance(_sk, list):
                             # Clear phone OTP keys; keep email keys if any
                             _es["otp_sent_keys"] = [k for k in _sk if not str(k).startswith("otp_phone:")]
@@ -839,18 +1381,37 @@ async def process_message_with_graph(
                 # Fall through to graph — with verified flag set, it will
                 # proceed to booking confirmation instead of re-asking for OTP.
             else:
-                # Invalid / expired code — return deterministically, don't let
-                # the LLM invent a booking number or "no pending" hallucination.
-                _msg = "That code is incorrect or has expired. Please check the 6-digit code and try again, or say 'resend' to get a new code."
-                _field_meta: Dict[str, Any] = {"channel": _channels[0] if _channels else "phone"}
+                _recovered_verified = False
                 try:
-                    _meta = await otp_crud.get_otp_policy_metadata(db, session_id, channel=_channels[0])
-                    _field_meta.update(_meta)
+                    _later_session = await crud_chat.get_chat_session(db, session_id)
+                    if _later_session is not None:
+                        _later_channels = resolve_otp_verify_channels(
+                            is_whatsapp=_is_whatsapp,
+                            require_phone_otp=(False if _raw_pp is None else bool(_raw_pp)),
+                            require_otp=(True if _raw_ep is None else bool(_raw_ep)),
+                            phone_verified=bool(getattr(_later_session, "phone_otp_verified", False)),
+                            email_verified=bool(getattr(_later_session, "otp_verified", False)),
+                            collected_phone=str((getattr(_later_session, "collected_data", None) or {}).get("phone") or ""),
+                            otp_was_sent=True,
+                        )
+                        if not _later_channels:
+                            chat_session = _later_session
+                            _recovered_verified = True
+                            logger.info("otp verify race recovered: code already verified for session")
                 except Exception:
                     pass
-                _action = ActionPayload(message=_msg, widget_directive="REQUIRE_OTP_MODAL", field_meta=_field_meta)
-                await _persist_transcript_best_effort(db, session_id=session_id, user_message=message_text, assistant_message=_msg, directive="REQUIRE_OTP_MODAL", intent=chat_session.current_intent)
-                return _action
+                if not _recovered_verified:
+                    logger.warning("otp verify failed channels=%s session=%s", _channels, str(session_id)[:8])
+                    _msg = "That code is incorrect or has expired. Please check the 6-digit code and try again, or say 'resend' to get a new code."
+                    _field_meta: Dict[str, Any] = {"channel": _channels[0] if _channels else "phone"}
+                    try:
+                        _meta = await otp_crud.get_otp_policy_metadata(db, session_id, channel=_channels[0])
+                        _field_meta.update(_meta)
+                    except Exception:
+                        pass
+                    _action = ActionPayload(message=_msg, widget_directive="REQUIRE_OTP_MODAL", field_meta=_field_meta)
+                    await _persist_transcript_best_effort(db, session_id=session_id, user_message=_transcript_user_text, user_external_id=_inbound_id, assistant_message=_msg, directive="REQUIRE_OTP_MODAL", intent=chat_session.current_intent)
+                    return _action
 
     # NOTE: post-booking gate lives at the top of this function (before the
     # OTP fast-paths) so re-sent codes on finished sessions can never fork a
@@ -879,7 +1440,7 @@ async def process_message_with_graph(
     logger.info(f"Invoking LangGraph for session {session_id}")
     prior_missing_fields = list(chat_session.missing_fields or [])
     inputs = {
-        "messages": ([_window_item_to_message(item) for item in existing_window] + [HumanMessage(content=message_text)])[-MAX_RUNTIME_CONTEXT_MESSAGES:],
+        "messages": ([_window_item_to_message(item) for item in existing_window] + [HumanMessage(content=graph_message_text)])[-MAX_RUNTIME_CONTEXT_MESSAGES:],
         "summary": existing_summary,
         "session_id": session_id,
         "org_id": str(org.id),
@@ -887,6 +1448,26 @@ async def process_message_with_graph(
         "collected_fields": _normalize_collected_data(chat_session.collected_data),
         "current_intent": str(chat_session.current_intent or "START_BOOKING"),
         "otp_verified": bool(chat_session.otp_verified),
+        "phone_otp_verified": bool(getattr(chat_session, "phone_otp_verified", False)),
+        "otp_required": False,
+        "otp_pending": bool(
+            (not chat_session.otp_verified)
+            or (not getattr(chat_session, "phone_otp_verified", False))
+        ),
+        "otp_event_key": "",
+        "otp_code": "",
+        "validation_errors": {},
+        "validated_field_metadata": {},
+        "knowledge_answer": False,
+        "context_window": [],
+        "context_window_size": 0,
+        "context_compacted": False,
+        "date_reset_required": False,
+        "fallback_reason": "",
+        "fallback_next_step": "",
+        "schedule_answer": {},
+        "slot_unavailable": False,
+        "refreshed_slots": [],
         "optional_skips": [],
         "pending_conflict": {},
         "follow_up_fields": list(chat_session.missing_fields or []),
@@ -896,7 +1477,40 @@ async def process_message_with_graph(
     
     # The agent runs asynchronously across its nodes.
     # We use await ainvoke because our tool checks async slot_engine
-    result = await booking_agent.ainvoke(inputs, config=config)
+    try:
+        result = await asyncio.wait_for(booking_agent.ainvoke(inputs, config=config), timeout=GRAPH_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.error("booking_agent ainvoke failed: timeout")
+        if raise_on_timeout:
+            raise
+        action = ActionPayload(
+            message="I'm sorry, I encountered an internal error. Please try again.",
+            widget_directive="TEXT_INPUT",
+        )
+        await _persist_transcript_best_effort(
+            db,
+            session_id=session_id,
+            user_message=_transcript_user_text, user_external_id=_inbound_id,
+            assistant_message=action.message,
+            directive=action.widget_directive or "TEXT_INPUT",
+            intent=chat_session.current_intent,
+        )
+        return action
+    except Exception as _graph_exc:
+        logger.error("booking_agent ainvoke failed", exc_info=True)
+        action = ActionPayload(
+            message="I'm sorry, I encountered an internal error. Please try again.",
+            widget_directive="TEXT_INPUT"
+        )
+        await _persist_transcript_best_effort(
+            db,
+            session_id=session_id,
+            user_message=_transcript_user_text, user_external_id=_inbound_id,
+            assistant_message=action.message,
+            directive=action.widget_directive or "TEXT_INPUT",
+            intent=chat_session.current_intent,
+        )
+        return action
 
     # Extract the final AI message from the agent's updated state
     messages = result.get("messages", [])
@@ -909,7 +1523,7 @@ async def process_message_with_graph(
         await _persist_transcript_best_effort(
             db,
             session_id=session_id,
-            user_message=message_text,
+            user_message=_transcript_user_text, user_external_id=_inbound_id,
             assistant_message=action.message,
             directive=action.widget_directive or "TEXT_INPUT",
             intent=chat_session.current_intent,
@@ -930,7 +1544,7 @@ async def process_message_with_graph(
         await _persist_transcript_best_effort(
             db,
             session_id=session_id,
-            user_message=message_text,
+            user_message=_transcript_user_text, user_external_id=_inbound_id,
             assistant_message=action.message,
             directive=action.widget_directive or "TEXT_INPUT",
             intent="CANCEL_BOOKING",
@@ -1016,33 +1630,41 @@ async def process_message_with_graph(
             # don't fall through to an assumed "name" ask.
             if _is_bare_edit and not message_processor._is_edit_details_request(user_msg_lower):
                 from app.schemas.agent import ActionPayload as _AP
-                from app.crud import chat as _crud_chat_graph
                 _msg_pick = "Sure, which field would you like to change? You can say name, email, phone, date, or time."
                 _ap_pick = _AP(message=_msg_pick, widget_directive="TEXT_INPUT", field_meta={"name": "edit_choice", "type": "text", "label": "Field to change"})
-                await _crud_chat_graph.save_message(db, chat_session.session_id, message_text, _msg_pick, metadata={"directive": "TEXT_INPUT", "intent": "EDIT_DATA"})
+                await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+                await _persist_transcript_best_effort(db, session_id=chat_session.session_id, user_message=message_text, assistant_message=_msg_pick, directive="TEXT_INPUT", intent="EDIT_DATA")
                 return _ap_pick
             current_intent = "EDIT_DATA"
         else:
             # CONFIRM must always work on finish screen — even when graph was
-            # "decisive" as ASK_QUESTION/CHITCHAT on a short token. Pure
+            # "decisive" as ASK_QUESTION on a short token. Pure
             # confirm words force CONFIRM unless it's explicitly an edit turn.
             try:
                 from app.engine.time_flex import is_confirm_message as _is_confirm_msg
                 _confirmed = _is_confirm_msg(message_text)
             except Exception:
                 _confirmed = any(kw in user_msg_lower for kw in message_processor.CONFIRM_KEYWORDS)
+            _explicit_confirm = bool(
+                re.search(
+                    r"\b(?:yes|yep|yup|ok|okay|sure|confirm(?:ed|ation)?|proceed|book it|go ahead|done)\b",
+                    user_msg_lower,
+                )
+            )
             _is_pure_confirm = user_msg_lower.strip() in {
                 "confirm", "yes", "yep", "yup", "ok", "okay", "sure", "proceed",
                 "book it", "go ahead", "done", "confirmed",
-            } or (_confirmed and len(user_msg_lower.strip().split()) <= 2)
+            } or (_confirmed and len(user_msg_lower.strip().split()) <= 2) or _explicit_confirm
             _is_edit_mixed = _has_edit_signal and current_intent == "EDIT_DATA"
-            if not follow_up_fields and _confirmed:
+            if not follow_up_fields and (_confirmed or _is_pure_confirm):
                 if _graph_undecided or _is_pure_confirm:
-                    if not _is_edit_mixed and current_intent not in ("CANCEL_BOOKING", "CHITCHAT"):
+                    if not _is_edit_mixed and current_intent != "CANCEL_BOOKING":
                         current_intent = "CONFIRM_BOOKING"
-                elif _is_pure_confirm and current_intent not in ("CANCEL_BOOKING", "CHITCHAT", "EDIT_DATA"):
+                elif _is_pure_confirm and current_intent not in ("CANCEL_BOOKING", "EDIT_DATA"):
                     current_intent = "CONFIRM_BOOKING"
     chat_session.current_intent = current_intent
+    if current_intent == "CONFIRM_BOOKING" and not follow_up_fields:
+        directive = "PROCESS_BOOKING"
 
     if isinstance(follow_up_fields, list):
         chat_session.missing_fields = follow_up_fields
@@ -1130,14 +1752,21 @@ async def process_message_with_graph(
                 _parsed_d_av = _dp_av(_date_raw_av).date()
                 if _parsed_t_av is not None:
                     _inv_av, _status_av = await _csi_av(db, org.id, _parsed_d_av, org_config=org_config)
+                    try:
+                        _sched_res_av = await db.execute(select(BusinessSchedule).where(BusinessSchedule.org_id == org.id))
+                        _sched_av = _sched_res_av.scalars().first()
+                        _org_tz_av = str((_sched_av.timezone if _sched_av and _sched_av.timezone else None) or getattr(org_config, "timezone", None) or "UTC")
+                    except Exception:
+                        logger.warning("slot timezone resolve failed (availability check)", exc_info=True)
+                        _org_tz_av = str(getattr(org_config, "timezone", None) or "UTC")
                     _tz_res_av = _retzp_av(
                         requested_tz=chat_session.collected_data.get("user_timezone"),
-                        org_tz=str(getattr(org_config, "timezone", None) or "UTC"),
+                        org_tz=_org_tz_av,
                         requested_source=chat_session.collected_data.get("timezone_source"),
                     )
-                    _eff_tz_av = str(_tz_res_av.get("effective_timezone") or getattr(org_config, "timezone", None) or "UTC")
+                    _eff_tz_av = str(_tz_res_av.get("effective_timezone") or _org_tz_av)
                     _inv_av, _status_av, _ = _apsi_av(
-                        _inv_av, _parsed_d_av, base_status=_status_av, effective_timezone=_eff_tz_av, allow_same_day_booking=False, slot_cutoff_minutes=5
+                        _inv_av, _parsed_d_av, base_status=_status_av, effective_timezone=_eff_tz_av, **_slot_policy_kwargs(org_config)
                     )
                     try:
                         from zoneinfo import ZoneInfo as _ZI_av
@@ -1227,14 +1856,29 @@ async def process_message_with_graph(
     }
     missing_set_override = set(chat_session.missing_fields or [])
     changed_field = None
-    for field, kws in CHANGE_COLLECTED_FIELD_KEYWORDS.items():
-        if field in missing_set_override:
-            continue
-        if field not in (chat_session.collected_data or {}):
-            continue
-        if any(kw in message_text.lower() for kw in kws):
-            changed_field = field
-            break
+    # Prefer graph's reopen_fields if provided (structural, not keyword)
+    _reopen_candidate = None
+    if isinstance(result, dict) and isinstance(result.get("reopen_fields"), list) and result.get("reopen_fields"):
+        _first = result.get("reopen_fields")[0]
+        if isinstance(_first, str) and _first.strip():
+            _reopen_candidate = _first.strip().lower()
+    if not _reopen_candidate and isinstance(structured_assistant_payload, dict) and isinstance(structured_assistant_payload.get("reopen_fields"), list) and structured_assistant_payload.get("reopen_fields"):
+        _first2 = structured_assistant_payload.get("reopen_fields")[0]
+        if isinstance(_first2, str) and _first2.strip():
+            _reopen_candidate = _first2.strip().lower()
+    if _reopen_candidate and _reopen_candidate in CHANGE_COLLECTED_FIELD_KEYWORDS and _reopen_candidate not in missing_set_override and _reopen_candidate in (chat_session.collected_data or {}):
+        changed_field = _reopen_candidate
+    elif re.search(r"\b(don'?t|do not|dont|didn'?t|not|never|no need)\b", message_text.lower()):
+        changed_field = None
+    else:
+        for field, kws in CHANGE_COLLECTED_FIELD_KEYWORDS.items():
+            if field in missing_set_override:
+                continue
+            if field not in (chat_session.collected_data or {}):
+                continue
+            if any(kw in message_text.lower() for kw in kws):
+                changed_field = field
+                break
     if changed_field:
         chat_session.collected_data.pop(changed_field, None)
         if changed_field in ("date", "time"):
@@ -1410,10 +2054,16 @@ async def process_message_with_graph(
                                 from app.engine.slot_engine import compute_slot_inventory, format_slot_time
                                 from app.engine.scheduling_policy import resolve_effective_timezone_policy
 
-                                _parsed = _parse(str(_target)).date()
+                                _target_date = _parse(str(_target)).date()
                                 _org_cfg = org_config
-                                _tz_name = str(getattr(_org_cfg, "timezone", None) or "UTC")
-                                _inv, _stat = await compute_slot_inventory(db, org.id, _parsed, org_config=_org_cfg)
+                                try:
+                                    _sched_res = await db.execute(select(BusinessSchedule).where(BusinessSchedule.org_id == org.id))
+                                    _sched = _sched_res.scalars().first()
+                                    _tz_name = str((_sched.timezone if _sched and _sched.timezone else None) or getattr(_org_cfg, "timezone", None) or "UTC")
+                                except Exception:
+                                    logger.warning("slot timezone resolve failed (whatsapp slot)", exc_info=True)
+                                    _tz_name = str(getattr(_org_cfg, "timezone", None) or "UTC")
+                                _inv, _stat = await compute_slot_inventory(db, org.id, _target_date, org_config=_org_cfg)
                                 _tz_res = resolve_effective_timezone_policy(
                                     requested_tz=(chat_session.collected_data or {}).get("user_timezone"),
                                     org_tz=_tz_name,
@@ -1422,7 +2072,7 @@ async def process_message_with_graph(
                                 from app.engine.slot_engine import apply_scheduling_policy_to_inventory
 
                                 _inv, _stat, _ = apply_scheduling_policy_to_inventory(
-                                    _inv, _parsed, base_status=_stat, effective_timezone=str(_tz_res.get("effective_timezone") or _tz_name), allow_same_day_booking=False, slot_cutoff_minutes=5
+                                    _inv, _target_date, base_status=_stat, effective_timezone=str(_tz_res.get("effective_timezone") or _tz_name), **_slot_policy_kwargs(org_config)
                                 )
                                 try:
                                     from zoneinfo import ZoneInfo
@@ -1460,16 +2110,18 @@ async def process_message_with_graph(
                                         slots_text = "\n".join([f"• {label}" for label in _slot_labels])
                                         assistant_message = f"Available slots for {str(_target)}:\n{slots_text}\n\nPlease reply with your preferred time (e.g., {_slot_labels[0]})"
                                     else:
-                                        assistant_message = f"No available slots for {str(_target)}. Please try another date (e.g., {(await _resolve_horizon(db, org.id, org_config))[0] if False else 'tomorrow'})."
+                                        assistant_message = f"No available slots for {str(_target)}. Please try another date (e.g., tomorrow)."
                                     directive = "TEXT_INPUT"
-                                    field_meta = {
-                                        "name": "time",
-                                        "type": "time",
-                                        "label": "Preferred Time",
-                                        "available_slots": _slot_labels,
-                                        "target_date": str(_target),
-                                        "whatsapp_text_slots": True,
-                                    }
+                                    field_meta.update(
+                                        {
+                                            "name": "time",
+                                            "type": "time",
+                                            "label": "Preferred Time",
+                                            "available_slots": _slot_labels,
+                                            "target_date": str(_target),
+                                            "whatsapp_text_slots": True,
+                                        }
+                                    )
                                     # Skip directive creation - text only
                                     _raw = []
                                     # Continue to bypass directive creation; will return as TEXT_INPUT below
@@ -1507,7 +2159,7 @@ async def process_message_with_graph(
                                         except Exception:
                                             pass
                                         directive_meta["description"] = _format_time_prompt_for_whatsapp(
-                                            str(_parsed.date().isoformat()) if '_parsed' in locals() else str(_target or ""),
+                                            str(_target_date.isoformat()) if '_target_date' in locals() else str(_target or ""),
                                             str(_tz_res.get("effective_timezone") or _tz_name),
                                             _slot_mins3,
                                             weekly_schedule=_weekly3,
@@ -1627,26 +2279,6 @@ async def process_message_with_graph(
             logger.warning(f"DATE_LIST_INJECT failed: {_e}")
     elif directive == "REQUIRE_DATE_PICKER":
         logger.info(f"DATE_LIST_SKIP directive={directive} has_options={bool(directive_meta.get('options')) if isinstance(directive_meta, dict) else 'no_meta'}")
-    # WhatsApp-only hours context: when asking for date/time on WhatsApp, show
-    # a concise hours line contextually as per message flow (no verbose block).
-    # Web keeps its own widget copy, so never prepend this WhatsApp text there.
-    if _is_whatsapp and directive in ("REQUIRE_DATE_PICKER", "REQUIRE_TIME_SLOT_GRID"):
-        try:
-            _short = "Hours: Mon-Fri 9:00 AM–5:00 PM, Sat 9:00 AM–4:00 PM, Sun Closed (Asia/Calcutta)"
-            try:
-                from app.engine.scheduling_policy import load_weekly_hours_block
-
-                _full = await load_weekly_hours_block(db, str(org.id))
-                if _full and "Monday" in _full:
-                    _first = _full.split("\n")[0].replace("## ", "").replace(" (authoritative — answer timing questions from this)", "")
-                    if len(_first) < 120:
-                        _short = _first.strip()
-            except Exception:
-                pass
-            if isinstance(assistant_message, str) and "Hours:" not in assistant_message and "business hours" not in assistant_message.lower():
-                assistant_message = f"{_short}\n{assistant_message}"
-        except Exception:
-            pass
     is_valid_directive, validation_error = StateEvaluator.validate_directive_payload(
         directive,
         directive_meta,
@@ -1769,7 +2401,7 @@ async def process_message_with_graph(
         and directive == "PROCESS_BOOKING"
         and not chat_session.otp_verified
     )
-    # Phone OTP — Zavu sms_oneway (kd78m7agx48rpyegpfrmhp5rsx8dm8t9) BYO-OTP; independent of email gate
+    # Phone OTP — WhatsApp BYO-OTP; independent of email gate
     # Only require phone OTP when user explicitly CONFIRMS the booking (PROCESS_BOOKING directive)
     # Not when all fields are merely collected (REQUEST_CONFIRMATION)
     phone_otp_required = (
@@ -1782,7 +2414,168 @@ async def process_message_with_graph(
         result.get("otp_event_key")
         or f"otp:{session_id}:{chat_session.collected_data.get('email', '')}"
     )
-    if otp_required:
+    _behavior_profile: Dict[str, Any] = {}
+    try:
+        from app.engine.user_behavior import analyze_user_behavior as _analyze_behavior
+
+        _behavior_profile = _analyze_behavior(
+            message_text,
+            missing_fields=list(chat_session.missing_fields or []),
+            collected_data=dict(chat_session.collected_data or {}),
+        ) or {}
+    except Exception:
+        _behavior_profile = {}
+    _behavior_primary = str(_behavior_profile.get("primary_intent") or "")
+    _behavior_knowledge = bool(_behavior_profile.get("should_answer_knowledge"))
+    _behavior_oos = (
+        _behavior_primary == "unclear"
+        and len(str(message_text or "").split()) >= 2
+        and not re.search(r"\d", str(message_text or ""))
+        and not (chat_session.missing_fields or [])
+        and not otp_required
+        and not phone_otp_required
+        and current_intent not in ("CONFIRM_BOOKING", "CANCEL_BOOKING", "EDIT_DATA", "CHECK_BOOKING")
+    )
+    if _behavior_oos:
+        _business = str(
+            (org_config_dict or {}).get("business_name") or getattr(org, "name", "") or ""
+        ).strip() or "this business"
+        _oos_msg = (
+            f"That's outside what I can help with — I handle appointment bookings "
+            f"and questions about {_business}. "
+            f"Let me know if there's anything else I can do for you!"
+        )
+        await crud_chat.update_chat_session(db, session_id, chat_session)
+        _oos_action = ActionPayload(
+            message=_oos_msg, widget_directive="TEXT_INPUT", field_meta=field_meta
+        )
+        await _persist_transcript_best_effort(
+            db, session_id=session_id, user_message=_transcript_user_text, user_external_id=_inbound_id,
+            assistant_message=_oos_msg, directive="TEXT_INPUT", intent=chat_session.current_intent,
+        )
+        return _oos_action
+    # ── Single active booking per customer ──
+    # Check BEFORE OTP so we never send a code for a booking that cannot proceed.
+    # Mirrors message_processor._handle_booking_flow duplicate guard.
+    # Skip for knowledge/decline turns — questions must be answered, not blocked.
+    _is_non_booking_turn = str(current_intent).lower() in (
+        "ask_question",
+        "decline_booking",
+        "declined_booking",
+    ) or bool(result.get("knowledge_answer") or field_meta.get("knowledge_answer")) or _behavior_knowledge
+    if not _is_non_booking_turn:
+        try:
+            from app.engine.cancel_flow import _find_upcoming_booking as _find_dup_booking
+            from app.engine.cancel_flow import _format_slot_label as _dup_slot_label
+
+            _dup_booking = None
+            _dup_start = None
+            _dup_email_for_check = resolve_email_from_collected_data(
+                chat_session.collected_data, list(fd_map.values()) if isinstance(fd_map, dict) else None
+            )
+            _dup_phone_for_check = str((chat_session.collected_data or {}).get("phone") or "").strip()
+            if _dup_email_for_check:
+                _dup_booking, _dup_start = await _find_dup_booking(db, org, "email", _dup_email_for_check)
+            if _dup_booking is None and _dup_phone_for_check:
+                _dup_booking, _dup_start = await _find_dup_booking(db, org, "phone", _dup_phone_for_check)
+            if _dup_booking is not None:
+                _dup_slot = _dup_slot_label(_dup_start, org_config) if _dup_start else ""
+                _dup_date = ""
+                if _dup_start:
+                    try:
+                        from app.engine.cancel_flow import _org_timezone as _dup_tz
+
+                        _dup_date = _dup_start.astimezone(_dup_tz(org_config)).strftime("%d %b %Y")
+                    except Exception:
+                        _dup_date = ""
+                _dup_when = f"{_dup_date} at {_dup_slot}".strip() if _dup_date or _dup_slot else "upcoming"
+                _dup_msg = (
+                    f"You already have an appointment booked ({_dup_when}).\n\n"
+                    f"Name: {_dup_booking.customer_name}\n"
+                    f"Email: {_dup_booking.customer_email}\n"
+                    f"{'Phone: ' + str(_dup_booking.customer_phone) + chr(10) if _dup_booking.customer_phone else ''}"
+                    f"We allow only one active booking at a time. "
+                    f"To book a new slot, please cancel the existing one first — "
+                    f"just say 'cancel my booking'."
+                )
+                field_meta["duplicate_booking"] = True
+                field_meta["booking_id"] = str(_dup_booking.id)
+                assistant_message = _dup_msg
+                directive = "TEXT_INPUT"
+                # Do not send OTP — return duplicate info directly
+                # Persist and return (mirrors _handle_booking_flow early return)
+                action = ActionPayload(message=assistant_message, widget_directive=directive, field_meta=field_meta)
+                await _persist_transcript_best_effort(
+                    db, session_id=session_id, user_message=_transcript_user_text, user_external_id=_inbound_id,
+                    assistant_message=action.message, directive=directive, intent=chat_session.current_intent,
+                )
+                return action
+        except Exception as _dup_err:
+            logger.warning("duplicate booking guard failed open (graph): %s", _dup_err)
+
+    from app.core.otp_delivery import delivery_error, delivery_succeeded
+    from app.crud.otp import invalidate_otp_delivery
+    from app.core.config import settings as _otp_delivery_settings
+
+    booking_gate_handled = False
+    # Mandatory-OTP gate.
+    #
+    # This must NOT depend on the directive the model happened to choose. A
+    # security gate keyed off an LLM output is bypassable: when the graph
+    # answered REQUEST_CONFIRMATION instead of PROCESS_BOOKING (all fields
+    # collected), the OTP was never sent, the user was shown a "review your
+    # booking" summary, and saying "okay" produced "your appointment is
+    # confirmed" with no verification and no Booking row.
+    #
+    # So the gate is driven by state, not by the directive: whenever OTP is
+    # required by admin config, is not yet verified, and every required field
+    # is collected, the booking flow runs and its OTP branch sends the code.
+    _otp_pending = bool(
+        (otp_required and not getattr(chat_session, "otp_verified", False))
+        or (
+            phone_otp_required
+            and not getattr(chat_session, "phone_otp_verified", False)
+        )
+    )
+    _all_required_collected = not (chat_session.missing_fields or [])
+    # Did the customer actually confirm on THIS turn? Taken from the inbound
+    # text with the whole-word confirm matcher, never from the model's intent
+    # label. This is what authorises the booking itself.
+    _user_confirmed = _is_user_confirmation(message_text)
+    if should_run_booking_gate(
+        directive=directive,
+        missing_fields=chat_session.missing_fields,
+        # Config-level requirements, NOT the derived `otp_required` /
+        # `phone_otp_required` locals: those are False once a code is accepted
+        # and would switch the gate off on the booking turn.
+        require_otp=bool(require_otp),
+        require_phone_otp=bool(require_phone_otp),
+        otp_verified=bool(getattr(chat_session, "otp_verified", False)),
+        phone_otp_verified=bool(getattr(chat_session, "phone_otp_verified", False)),
+        user_confirmed=_user_confirmed,
+    ):
+        (
+            assistant_message,
+            directive,
+            booking_field_meta,
+        ) = await message_processor._handle_booking_flow(
+            db,
+            org,
+            org_config,
+            chat_session,
+            current_intent,
+            require_otp,
+            fd_map,
+            background_tasks,
+            dispatch_notifications=False,
+            require_phone_otp=require_phone_otp,
+            user_confirmed=_user_confirmed,
+        )
+        if isinstance(booking_field_meta, dict):
+            field_meta.update(booking_field_meta)
+        booking_gate_handled = True
+
+    if not booking_gate_handled and otp_required:
         effect_state = _active_effect_state(chat_session)
         sent_keys = effect_state.get("otp_sent_keys")
         if not isinstance(sent_keys, list):
@@ -1794,29 +2587,74 @@ async def process_message_with_graph(
             chat_session.collected_data,
             list(fd_map.values()),
         )
-        if otp_event_key not in sent_keys:
+        # Stale-key guard: otp_sent_keys persists even after OTPRecord expired/deleted
+        # (cleanup every 5m). If the record is gone, allow regeneration even if the
+        # key is still in sent_keys. Without this, users get stuck on
+        # "I've sent..." with no code actually deliverable.
+        _otp_exists = False
+        try:
+            import uuid as _uuid_exist
+            from sqlalchemy.future import select as _sel_exist
+
+            from app.models.otp import OTPRecord as _OTPExist
+
             try:
+                _sid_uuid = _uuid_exist.UUID(str(session_id))
+            except Exception:
+                _sid_uuid = session_id
+            _otp_row = (
+                await db.execute(
+                    _sel_exist(_OTPExist).where(
+                        _OTPExist.session_id == _sid_uuid, _OTPExist.channel == "email"
+                    )
+                )
+            ).scalars().first()
+            _otp_exists = _otp_row is not None
+            # Also check expiry - if expired, treat as not exists (will be cleaned)
+            if _otp_exists:
+                from datetime import datetime, timezone as _tz
+
+                _now = datetime.now(_tz.utc)
+                _exp = _otp_row.expires_at
+                if _exp.tzinfo is None:
+                    _exp = _exp.replace(tzinfo=_tz.utc)
+                if _now > _exp:
+                    _otp_exists = False
+                    # remove stale key so next turn regenerates
+                    if otp_event_key in sent_keys:
+                        sent_keys.remove(otp_event_key)
+        except Exception:
+            _otp_exists = False
+            if otp_event_key in sent_keys:
+                sent_keys.remove(otp_event_key)
+        if otp_event_key not in sent_keys or not _otp_exists:
+            try:
+                if not recipient_email:
+                    raise ValueError("We couldn't find an email address to send the code to.")
                 otp_code = await otp_crud.generate_otp(
                     db,
                     chat_session.session_id,
                     resend=False,
                 )
-                if recipient_email:
-                    if background_tasks:
-                        background_tasks.add_task(
-                            mailer.send_otp_email,
-                            recipient_email,
-                            otp_code,
-                            org_id=org.id,
-                            idempotency_key=otp_event_key,
-                        )
-                    else:
-                        await mailer.send_otp_email(
-                            recipient_email,
-                            otp_code,
-                            org_id=org.id,
-                            idempotency_key=otp_event_key,
-                        )
+                _result = await mailer.send_otp_email(
+                    recipient_email,
+                    otp_code,
+                    org_id=org.id,
+                    idempotency_key=otp_event_key,
+                )
+                if not delivery_succeeded(
+                    _result,
+                    allow_mock=bool(
+                        getattr(_otp_delivery_settings, "OTP_ALLOW_MOCK_DELIVERY", False)
+                    ),
+                ):
+                    await invalidate_otp_delivery(
+                        db,
+                        chat_session.session_id,
+                        "email",
+                        context_key=otp_event_key,
+                    )
+                    raise RuntimeError(delivery_error(_result))
                 sent_keys.append(otp_event_key)
                 await crud_chat.update_chat_session(db, session_id, chat_session)
             except Exception as otp_send_error:
@@ -1836,40 +2674,157 @@ async def process_message_with_graph(
         field_meta["channel"] = "email"
         if otp_error:
             field_meta["validation_error"] = otp_error
-        if recipient_email:
+            assistant_message = (
+                "I couldn't send the verification code right now. "
+                "Please check your contact details and try again."
+            )
+        elif recipient_email:
             assistant_message = (
                 f"Excellent! I have all your details. I've sent a verification code to {recipient_email}. "
                 "Please enter it here to continue."
             )
         else:
             assistant_message = "Please verify your OTP code to continue."
-    elif phone_otp_required:
+    # Knowledge question while OTP pending — answer it, don't spam OTP.
+    # The graph injected knowledge (knowledge_answer) for ASK_QUESTION;
+    # forcing OTP here would ignore the user's actual question and loop.
+    _is_knowledge_turn = bool(result.get("knowledge_answer") or field_meta.get("knowledge_answer")) or str(
+        current_intent
+    ) == "ASK_QUESTION" or _behavior_knowledge
+    if not booking_gate_handled and _is_knowledge_turn and phone_otp_required:
+        # Return the LLM's knowledge answer (already in assistant_message) with TEXT_INPUT
+        # and keep OTP pending (don't clear). Add gentle OTP reminder.
+        _knowledge_reply = str(assistant_message or "").strip()
+        # Don't re-send OTP on knowledge turn; just remind
+        try:
+            _policy_for_reminder = await otp_crud.get_otp_policy_metadata(
+                db, chat_session.session_id, channel="phone"
+            )
+        except Exception:
+            _policy_for_reminder = {}
+        field_meta.update(_policy_for_reminder)
+        field_meta["otp_required"] = True
+        field_meta["channel"] = "phone"
+        field_meta["knowledge_answer"] = True
+        # Append OTP reminder to knowledge answer so user knows next step
+        _k_phone_raw = str(chat_session.collected_data.get("phone") or "").strip()
+        _mask = _k_phone_raw[:4] + "***" + _k_phone_raw[-2:] if len(_k_phone_raw) > 6 else _k_phone_raw[:3] + "***" if _k_phone_raw else "+916***38"
+        _via = "WhatsApp"
+        _reminder = f"\n\nYour verification code is still waiting at {_mask} via {_via} — please enter it to confirm, or say 'resend' for a new code."
+        if _reminder not in _knowledge_reply:
+            _knowledge_reply = f"{_knowledge_reply}{_reminder}" if _knowledge_reply else _reminder.strip()
+        # Return early, bypassing OTP generation for this knowledge turn
+        _action = ActionPayload(message=_knowledge_reply, widget_directive="TEXT_INPUT", field_meta=field_meta)
+        await _persist_transcript_best_effort(
+            db,
+            session_id=session_id,
+            user_message=_transcript_user_text, user_external_id=_inbound_id,
+            assistant_message=_action.message,
+            directive="TEXT_INPUT",
+            intent=current_intent,
+        )
+        return _action
+    elif not booking_gate_handled and _is_knowledge_turn and not (chat_session.missing_fields or []):
+        _k_answer = str(assistant_message or "").strip()
+        if _k_answer and all(
+            frag not in _k_answer.lower()
+            for frag in ("internal error", "trouble connecting", "hard to process")
+        ):
+            field_meta["knowledge_answer"] = True
+            _k_action = ActionPayload(
+                message=_k_answer, widget_directive="TEXT_INPUT", field_meta=field_meta
+            )
+            await _persist_transcript_best_effort(
+                db,
+                session_id=session_id,
+                user_message=_transcript_user_text, user_external_id=_inbound_id,
+                assistant_message=_k_answer,
+                directive="TEXT_INPUT",
+                intent=current_intent,
+            )
+            return _k_action
+        directive = "TEXT_INPUT"
+    elif not booking_gate_handled and phone_otp_required:
         # Phone verification to confirm booking — provider abstraction
         # (WhatsApp active, SMS fallback), same as legacy path + /generate.
         phone = str(chat_session.collected_data.get("phone") or "").strip()
-        phone_event_key = f"otp_phone:{session_id}:{phone}:{chat_session.collected_data.get('date','')}:{chat_session.collected_data.get('time','')}"
+        # Normalize phone for dedupe key so "63500 63338" == "6350063338"
+        try:
+            import re as _re_key
+            import phonenumbers as _pn_key
+
+            _pn = _pn_key.parse(phone, "IN" if len(phone.replace(" ", "").replace("-", "").lstrip("+")) <= 11 else None)
+            _phone_norm = _pn_key.format_number(_pn, _pn_key.PhoneNumberFormat.E164) if _pn_key.is_possible_number(_pn) else _re_key.sub(r"\D", "", phone)
+        except Exception:
+            import re as _re_key
+
+            _phone_norm = _re_key.sub(r"\D", "", phone)
+        phone_event_key = f"otp_phone:{session_id}:{_phone_norm}:{chat_session.collected_data.get('date','')}:{chat_session.collected_data.get('time','')}"
         effect_state = _active_effect_state(chat_session)
         sent_keys = effect_state.get("otp_sent_keys")
         if not isinstance(sent_keys, list):
             sent_keys = []
             effect_state["otp_sent_keys"] = sent_keys
         otp_error = None
-        if phone_event_key not in sent_keys:
+        # Stale-key guard for phone: if OTPRecord expired/deleted but key persists in
+        # sent_keys, we would otherwise skip generation and user gets "sent" with no code.
+        _phone_otp_exists = False
+        try:
+            import uuid as _uuid_exist2
+            from sqlalchemy.future import select as _sel_exist2
+
+            from app.models.otp import OTPRecord as _OTPExist2
+
+            try:
+                _sid_uuid2 = _uuid_exist2.UUID(str(session_id))
+            except Exception:
+                _sid_uuid2 = session_id
+            _otp_row2 = (
+                await db.execute(
+                    _sel_exist2(_OTPExist2).where(
+                        _OTPExist2.session_id == _sid_uuid2, _OTPExist2.channel == "phone"
+                    )
+                )
+            ).scalars().first()
+            _phone_otp_exists = _otp_row2 is not None
+            if _phone_otp_exists:
+                from datetime import datetime, timezone as _tz2
+
+                _now2 = datetime.now(_tz2.utc)
+                _exp2 = _otp_row2.expires_at
+                if _exp2.tzinfo is None:
+                    _exp2 = _exp2.replace(tzinfo=_tz2.utc)
+                if _now2 > _exp2:
+                    _phone_otp_exists = False
+                    if phone_event_key in sent_keys:
+                        sent_keys.remove(phone_event_key)
+        except Exception:
+            _phone_otp_exists = False
+            if phone_event_key in sent_keys:
+                sent_keys.remove(phone_event_key)
+        if phone_event_key not in sent_keys or not _phone_otp_exists:
             try:
                 otp_code = await otp_crud.generate_otp(
                     db, chat_session.session_id, channel="phone", resend=False
                 )
-                # Delivery via provider abstraction (WhatsApp active, SMS fallback)
-                try:
-                    from app.core.config import settings as _cfg_otp
-                    from app.core.otp_delivery.whatsapp_provider import WhatsAppProvider
-                    from app.core.otp_delivery.sms_provider import SMSProvider
-                    _otp_provider = WhatsAppProvider() if (getattr(_cfg_otp, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else SMSProvider()
-                    await _otp_provider.send_otp(phone, otp_code, str(chat_session.session_id))
-                    logger.info(f"Phone OTP ({_otp_provider.__class__.__name__}) sent for {session_id}")
-                except Exception as sms_err:
-                    logger.error(f"Phone OTP send failed for {session_id}: {sms_err}")
-                    raise
+                from app.core.otp_delivery.whatsapp_provider import WhatsAppProvider
+                _otp_provider = WhatsAppProvider()
+                _result = await _otp_provider.send_otp(
+                    phone, otp_code, str(chat_session.session_id)
+                )
+                if not delivery_succeeded(
+                    _result,
+                    allow_mock=bool(
+                        getattr(_otp_delivery_settings, "OTP_ALLOW_MOCK_DELIVERY", False)
+                    ),
+                ):
+                    await invalidate_otp_delivery(
+                        db,
+                        chat_session.session_id,
+                        "phone",
+                        context_key=phone_event_key,
+                    )
+                    raise RuntimeError(delivery_error(_result))
                 sent_keys.append(phone_event_key)
                 await crud_chat.update_chat_session(db, session_id, chat_session)
             except Exception as otp_send_error:
@@ -1888,13 +2843,18 @@ async def process_message_with_graph(
         if otp_error:
             field_meta["validation_error"] = otp_error
         masked = phone[:4] + "***" + phone[-2:] if len(phone) > 6 else phone[:3] + "***"
-        from app.core.config import settings as _cfg_via
-        via = "WhatsApp" if (getattr(_cfg_via, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else "SMS"
-        assistant_message = (
-            f"Perfect! I've sent a verification code to {masked} via {via}. "
-            "Please enter the 6-digit code here to confirm your booking."
-        )
-    elif directive == "REQUEST_CONFIRMATION":
+        via = "WhatsApp"
+        if otp_error:
+            assistant_message = (
+                "I couldn't send the verification code right now. "
+                "Please check your phone number and try again."
+            )
+        else:
+            assistant_message = (
+                f"Perfect! I've sent a verification code to {masked} via {via}. "
+                "Please enter the 6-digit code here to confirm your booking."
+            )
+    elif not booking_gate_handled and directive == "REQUEST_CONFIRMATION":
         captured_deltas = field_meta.get("captured_deltas") if isinstance(field_meta, dict) else {}
         has_captured_changes = isinstance(captured_deltas, dict) and bool(captured_deltas)
         if current_intent == "EDIT_DATA" and not has_captured_changes:
@@ -1912,7 +2872,7 @@ async def process_message_with_graph(
             assistant_message, directive = message_processor._build_confirmation_summary(
                 chat_session, fd_map
             )
-    elif directive == "PROCESS_BOOKING":
+    elif not booking_gate_handled and directive == "PROCESS_BOOKING":
         (
             assistant_message,
             directive,
@@ -1927,6 +2887,8 @@ async def process_message_with_graph(
             fd_map,
             background_tasks,
             dispatch_notifications=False,
+            require_phone_otp=require_phone_otp,
+            user_confirmed=_user_confirmed,
         )
         if isinstance(booking_field_meta, dict):
             field_meta.update(booking_field_meta)
@@ -1964,35 +2926,56 @@ async def process_message_with_graph(
 
         if confirmation_event_key not in sent_confirmations:
             booking_details = dict(chat_session.collected_data or {})
-            # Enrich with meeting link from DB so SMTP mail shows Join Meeting (offline vs online)
-            # LangGraph path previously used only collected_data, missing meeting_ fields -> mail showed Offline
+            booking_row = None
             try:
                 from app.models.booking import Booking
                 from sqlalchemy import select as _sel
                 _res = await db.execute(_sel(Booking).where(Booking.session_id == session_id, Booking.org_id == org.id).order_by(Booking.created_at.desc()).limit(1))
-                _bk = _res.scalars().first()
-                if _bk:
-                    if getattr(_bk, "meeting_type_snapshot", None):
-                        booking_details["meeting_type_snapshot"] = _bk.meeting_type_snapshot
-                    if getattr(_bk, "meeting_link_status", None):
-                        _st = _bk.meeting_link_status
+                booking_row = _res.scalars().first()
+                if booking_row:
+                    booking_details["booking_id"] = str(booking_row.id)
+                    if not booking_details.get("email") and booking_row.customer_email:
+                        booking_details["email"] = booking_row.customer_email
+                    if not booking_details.get("name") and booking_row.customer_name:
+                        booking_details["name"] = booking_row.customer_name
+                    if getattr(booking_row, "meeting_type_snapshot", None):
+                        booking_details["meeting_type_snapshot"] = booking_row.meeting_type_snapshot
+                    if getattr(booking_row, "meeting_link_status", None):
+                        _st = booking_row.meeting_link_status
                         booking_details["meeting_link_status"] = _st.value if hasattr(_st, "value") else str(_st)
-                    if getattr(_bk, "meeting_link_url", None):
-                        booking_details["meeting_link_url"] = _bk.meeting_link_url
-                    if getattr(_bk, "meeting_link_provider", None):
-                        _pv = _bk.meeting_link_provider
+                    if getattr(booking_row, "meeting_link_url", None):
+                        booking_details["meeting_link_url"] = booking_row.meeting_link_url
+                    if getattr(booking_row, "meeting_link_provider", None):
+                        _pv = booking_row.meeting_link_provider
                         booking_details["meeting_link_provider"] = _pv.value if hasattr(_pv, "value") else str(_pv)
-                    # Add dual time if missing
-                    if getattr(_bk, "user_timezone", None) and "user_timezone" not in booking_details:
-                        booking_details["user_timezone"] = _bk.user_timezone
-                    if getattr(_bk, "org_timezone_snapshot", None) and "org_timezone_snapshot" not in booking_details:
-                        booking_details["org_timezone_snapshot"] = _bk.org_timezone_snapshot
+                    if getattr(booking_row, "user_timezone", None) and "user_timezone" not in booking_details:
+                        booking_details["user_timezone"] = booking_row.user_timezone
+                    if getattr(booking_row, "org_timezone_snapshot", None) and "org_timezone_snapshot" not in booking_details:
+                        booking_details["org_timezone_snapshot"] = booking_row.org_timezone_snapshot
             except Exception as _enrich_err:
                 logger.warning(f"Failed to enrich booking_details with meeting link for email: {_enrich_err}")
-            customer_email = booking_details.get("email")
-            admin_email = booking_details.get("admin_email")
-            # Prefer the current email typed field from session (e.g. contact_email)
-            # — the booking row may hold a stale value while the session has the fresh one.
+            booking_details["source_channel"] = (
+                "WhatsApp"
+                if str(getattr(chat_session, "channel", "") or "").lower()
+                in {"whatsapp", "whatsapp_cloud"}
+                else "Web Widget"
+            )
+            customer_email = str(
+                booking_details.get("email")
+                or getattr(booking_row, "customer_email", "")
+                or ""
+            ).strip()
+            admin_email = str(booking_details.get("admin_email") or "").strip()
+            if not admin_email:
+                try:
+                    from app.models.user import User as _EmailAdminUser
+                    _admin_result = await db.execute(
+                        select(_EmailAdminUser).where(_EmailAdminUser.org_id == org.id)
+                    )
+                    _admin_user = _admin_result.scalars().first()
+                    admin_email = str(getattr(_admin_user, "email", "") or "").strip()
+                except Exception:
+                    admin_email = ""
             try:
                 _fresh = resolve_email_from_collected_data(chat_session.collected_data, list(fd_map.values()))
                 if _fresh and _fresh != customer_email:
@@ -2000,11 +2983,11 @@ async def process_message_with_graph(
                     booking_details["email"] = _fresh
             except Exception:
                 pass
-            # Explicit: always send confirmation email if email present, even when email OTP was disabled and phone OTP verified
             if customer_email:
+                _masked_email = (customer_email[:1] + "***@" + customer_email.split("@")[-1]) if "@" in customer_email else "***"
                 logger.info(
                     "Booking confirmation email queued for %s via %s (session %s)",
-                    customer_email,
+                    _masked_email,
                     "phone-otp" if getattr(chat_session, "phone_otp_verified", False) else "email-otp/none",
                     session_id,
                 )
@@ -2098,12 +3081,7 @@ async def process_message_with_graph(
                         effective_timezone=str(
                             timezone_resolution["effective_timezone"]
                         ),
-                        allow_same_day_booking=bool(
-                            getattr(org_config, "allow_same_day_booking", False)
-                        ),
-                        slot_cutoff_minutes=getattr(
-                            org_config, "slot_cutoff_minutes", 5
-                        ),
+                        **_slot_policy_kwargs(org_config),
                     )
                 )
                 # Convert UTC slot times to the effective timezone for display
@@ -2156,8 +3134,19 @@ async def process_message_with_graph(
                 # in which case keep the time grid so outage tests stay actionable.
                 if not options:
                     if schedule is None:
-                        # Keep time grid — don't clobber the expected directive for tests
-                        logger.info("no_schedule_keep_time_grid", extra={"session_id": session_id})
+                        _legacy_slot = await _has_available_persisted_slot(
+                            db,
+                            org.id,
+                            target_date,
+                            chat_session.collected_data.get("time"),
+                            org_timezone,
+                            chat_session.collected_data.get("locked_slot_id"),
+                        )
+                        if _legacy_slot:
+                            directive = "PROCESS_BOOKING"
+                            field_meta["availability_status"] = "persisted_slot"
+                        else:
+                            logger.info("no_schedule_keep_time_grid", extra={"session_id": session_id})
                     else:
                         directive = "REQUIRE_DATE_PICKER"
                         chat_session.collected_data.pop("date", None)
@@ -2180,15 +3169,51 @@ async def process_message_with_graph(
                                 "follow_up_fields": ["date"],
                             }
                         )
+                        # Closed-days hint is now provided to the LLM via context, not hardcoded here.
+                        # The agent is trained in prompts.py 9f to explain closed days naturally.
+                        # Keep directive as DATE_PICKER and let LLM's response_text handle the message.
+                        # Only set a minimal fallback if LLM gave empty.
                         if availability_status == "same_day_disabled":
+                            field_meta["closed_reason"] = "same_day_disabled"
                             assistant_message = (
-                                "Same-day booking isn't available for this business. "
-                                "Please choose a future date."
+                                "Same-day booking isn't available. Please choose a future date."
                             )
-                        else:
+                        elif availability_status == "closed_day":
+                            field_meta["closed_reason"] = "closed_day"
                             assistant_message = (
-                                "There are no available time slots for that date. "
+                                f"We are closed on {parsed_date.strftime('%A, %B %d')}. "
                                 "Please choose another date."
+                            )
+                        elif availability_status == "exception_closed":
+                            field_meta["closed_reason"] = "exception_closed"
+                            closure_reason = ""
+                            try:
+                                from app.models.booking import ScheduleException as _SEClosed
+                                _se_res = await db.execute(
+                                    select(_SEClosed).where(
+                                        _SEClosed.org_id == org.id,
+                                        _SEClosed.exception_date == parsed_date,
+                                    )
+                                )
+                                _se_row = _se_res.scalars().first()
+                                closure_reason = str(getattr(_se_row, "reason", "") or "").strip()
+                            except Exception:
+                                closure_reason = ""
+                            if closure_reason:
+                                field_meta["closure_reason_text"] = closure_reason
+                                assistant_message = (
+                                    f"We are closed on {parsed_date.strftime('%A, %B %d')}: "
+                                    f"{closure_reason}. Please choose another date."
+                                )
+                            else:
+                                assistant_message = (
+                                    f"We are closed on {parsed_date.strftime('%A, %B %d')}. "
+                                    "Please choose another date."
+                                )
+                        else:
+                            field_meta["closed_reason"] = "no_available_slots"
+                            assistant_message = (
+                                "There are no available times on that date. Please choose another date."
                             )
             except Exception as slot_err:
                 logger.warning(
@@ -2227,22 +3252,9 @@ async def process_message_with_graph(
     # a concise hours line contextually as per message flow (no full paragraph).
     # Web keeps its own widget copy, so never prepend this WhatsApp text there.
     if _is_whatsapp and directive in ("REQUIRE_DATE_PICKER", "REQUIRE_TIME_SLOT_GRID"):
-        try:
-            _short = "Hours: Mon-Fri 9:00 AM–5:00 PM, Sat 9:00 AM–4:00 PM, Sun Closed (Asia/Calcutta)"
-            try:
-                from app.engine.scheduling_policy import load_weekly_hours_block
-
-                _full = await load_weekly_hours_block(db, str(org.id))
-                if _full and "Monday" in _full:
-                    _first = _full.split("\n")[0].replace("## ", "").replace(" (authoritative — answer timing questions from this)", "")
-                    if len(_first) < 120:
-                        _short = _first.strip()
-            except Exception:
-                pass
-            if isinstance(assistant_message, str) and "Hours:" not in assistant_message and "business hours" not in assistant_message.lower():
-                assistant_message = f"{_short}\n{assistant_message}"
-        except Exception:
-            pass
+        _prefix = await _whatsapp_hours_prefix(db, org)
+        if _prefix and isinstance(assistant_message, str) and "Hours:" not in assistant_message and "business hours" not in assistant_message.lower():
+            assistant_message = f"{_prefix}\n{assistant_message}"
 
     # Enforce one-by-one flow: override LLM dump of "provide name, email, phone, date, time" with deterministic single-field ask
     _single_field_directives = {
@@ -2264,10 +3276,43 @@ async def process_message_with_graph(
             pass
         else:
             # If LLM mentions 2+ fields or lists them, replace with deterministic single-field message
+            # Use word-boundary matching so "username" doesn't count as "name"
             _lower = (assistant_message or "").lower()
-            _mentions = sum(1 for _kw in ["name", "email", "phone", "date", "time"] if _kw in _lower)
-            if _mentions > 1 or ("," in assistant_message and _mentions >= 2):
-                assistant_message = message_processor._build_context_aware_response(
+            _mentions = sum(1 for _kw in ["name", "email", "phone", "date", "time"] if re.search(rf"\b{_kw}\b", _lower))
+            _is_knowledge = bool((field_meta or {}).get("knowledge_answer"))
+            _is_question_turn = current_intent == "ASK_QUESTION"
+            _llm_user_intent = str((structured_assistant_payload or {}).get("user_intent") or "").lower()
+            _is_off_topic = _llm_user_intent == "off_topic"
+            if _is_knowledge or _is_question_turn or _is_off_topic:
+                _need_field = str((field_meta or {}).get("name") or "")
+                _visibly_asks = (
+                    message_processor._response_asks_for_field(
+                        assistant_message,
+                        _need_field,
+                        (field_meta or {}).get("label"),
+                    )
+                    and not looks_like_json_debris(assistant_message)
+                )
+                if _need_field and not _visibly_asks:
+                    _deterministic_ask = message_processor._build_context_aware_response(
+                        directive=directive,
+                        field_meta=field_meta,
+                        collected_data=dict(chat_session.collected_data or {}),
+                        valid_data={},
+                        errors={},
+                        llm_generated_msg=assistant_message,
+                    )
+                    _had_validation_error = bool(
+                        str((field_meta or {}).get("validation_error") or "").strip()
+                    )
+                    if not _deterministic_ask.strip():
+                        pass
+                    elif _had_validation_error or looks_like_json_debris(assistant_message):
+                        assistant_message = _deterministic_ask
+                    else:
+                        assistant_message = f"{assistant_message}\n\n{_deterministic_ask}"
+            elif _mentions > 1 or ("," in assistant_message and _mentions >= 2):
+                _multi_ask = message_processor._build_context_aware_response(
                     directive=directive,
                     field_meta=field_meta,
                     collected_data=dict(chat_session.collected_data or {}),
@@ -2275,6 +3320,8 @@ async def process_message_with_graph(
                     errors={},
                     llm_generated_msg=assistant_message,
                 )
+                if _multi_ask.strip():
+                    assistant_message = _multi_ask
             else:
                 # F1 next-field guard (mirrors the legacy path): the reply
                 # must visibly ask for the directive's field. A single-field
@@ -2282,7 +3329,7 @@ async def process_message_with_graph(
                 # next missing field is "email") is replaced with the
                 # deterministic ask — the LLM may never reorder required
                 # fields on its own. But when the message was NOT a field
-                # attempt at all (a question, refusal, chitchat — no
+                # attempt at all (a question or refusal — no
                 # validation error), the LLM's answer is KEPT and the
                 # deterministic ask is appended, so answers are never
                 # squashed by the flow.
@@ -2316,7 +3363,9 @@ async def process_message_with_graph(
                     )
                     # Machine debris is never appended — it would leak raw
                     # JSON into the chat. Replace unconditionally.
-                    if _had_validation_error or looks_like_json_debris(
+                    if not _deterministic_ask.strip():
+                        pass
+                    elif _had_validation_error or looks_like_json_debris(
                         assistant_message
                     ):
                         logger.info(
@@ -2327,6 +3376,58 @@ async def process_message_with_graph(
                     else:
                         assistant_message = f"{assistant_message}\n\n{_deterministic_ask}"
 
+    # Only mention a code when one genuinely exists, and never on the turn that
+    # just sent it.
+    #
+    #   no record at all            -> say nothing about codes
+    #   record created this turn    -> let the "code sent" reply stand
+    #   record predates this turn   -> booking-assistant line + enter the code
+    #
+    # `_otp_created_at_before` was captured before this turn did any work, so
+    # comparing it to the live record is exact rather than inferred.
+    _otp_created_at_now: Optional[Any] = None
+    try:
+        import uuid as _uuid_now
+        from sqlalchemy.future import select as _sel_now
+
+        from app.models.otp import OTPRecord as _OTPNow
+
+        try:
+            _sid_now = _uuid_now.UUID(str(session_id))
+        except Exception:
+            _sid_now = session_id
+        _otp_created_at_now = (
+            await db.execute(
+                _sel_now(_OTPNow.created_at).where(_OTPNow.session_id == _sid_now)
+            )
+        ).scalars().first()
+    except Exception:
+        _otp_created_at_now = None
+
+    _code_exists = _otp_created_at_now is not None
+    _code_sent_this_turn = bool(
+        _code_exists and _otp_created_at_before != _otp_created_at_now
+    )
+    _code_awaiting = bool(_code_exists and not _code_sent_this_turn)
+
+    if _code_awaiting and isinstance(assistant_message, str):
+        _inbound_is_code = bool(re.fullmatch(r"\d{6}", str(_stripped or "").strip()))
+        if not _inbound_is_code:
+            _channel = "phone" if (require_phone_otp and not getattr(chat_session, "phone_otp_verified", False)) else "email"
+            _dest = str(chat_session.collected_data.get("phone") or resolve_email_from_collected_data(chat_session.collected_data, list(fd_map.values()) if isinstance(fd_map, dict) else None) or "your contact").strip()
+            # Say WHO we are instead of silently swallowing the question. The
+            # customer asked something unrelated mid-verification and used to
+            # get a bare "enter the code" with no acknowledgement at all, which
+            # read as being stonewalled. Acknowledge the limit, then re-prompt.
+            assistant_message = (
+                "I'm a booking assistant, so I can only help with "
+                "appointments — I don't have information about that.\n\n"
+                f"To finish your booking, please enter the verification code sent to {_dest}."
+            )
+            if directive == "TEXT_INPUT":
+                directive = "REQUIRE_OTP_MODAL"
+                field_meta["channel"] = _channel
+
     assistant_message = _guard_user_visible_booking_message(
         assistant_message=assistant_message,
         directive=directive,
@@ -2335,6 +3436,68 @@ async def process_message_with_graph(
         field_meta=field_meta,
         fd_map=fd_map,
     )
+
+    # Truthfulness invariant: a confirmation claim needs a persisted booking.
+    #
+    # The directive guard above only catches BOOKING_CONFIRMED_CARD. The model
+    # also writes confirmation PROSE ("your appointment is confirmed for ...")
+    # inside ordinary replies, and that text reached customers verbatim while
+    # no Booking row existed. So the sentence itself is checked against the
+    # database before it is allowed out. This is the last line of defence:
+    # nothing may tell a customer they are booked unless they are.
+    if isinstance(assistant_message, str) and assistant_message.strip():
+        try:
+            from app.engine.user_visible_text import looks_like_confirmation_claim
+
+            _claims_confirmation = looks_like_confirmation_claim(assistant_message)
+        except Exception:
+            _claims_confirmation = False
+        if _claims_confirmation and not await _session_has_persisted_booking(
+            db,
+            session_id,
+            org_id=getattr(org, "id", None),
+            collected_data=dict(chat_session.collected_data or {}),
+        ):
+            logger.warning(
+                "confirmation_claim_downgraded_no_booking",
+                extra={"session_id": session_id, "directive": directive},
+            )
+            assistant_message, directive = message_processor._build_confirmation_summary(
+                chat_session, fd_map
+            )
+
+    if session_state_dirty:
+        # A finished booking must stay finished. The graph keeps running after
+        # _handle_booking_flow, and its in-memory copy of the session still
+        # said ACTIVE, so the final save here wrote ACTIVE back over the
+        # CONFIRMED that _execute_booking had persisted. The session then
+        # looked like an unfinished booking and the customer was pushed into
+        # booking a second appointment.
+        #
+        # Terminal states are one-way: never let a stale in-memory copy undo
+        # a CONFIRMED/CANCELLED/EXPIRED session that is already on disk.
+        try:
+            _persisted = await crud_chat.get_chat_session(db, session_id)
+            _persisted_status = str(
+                getattr(_persisted, "session_status", "") or ""
+            ).upper()
+            _incoming_status = str(
+                getattr(chat_session, "session_status", "") or ""
+            ).upper()
+            if _persisted_status in _TERMINAL_SESSION_STATUSES and (
+                _incoming_status not in _TERMINAL_SESSION_STATUSES
+            ):
+                logger.info(
+                    "Skipping stale session save: disk=%s memory=%s session=%s",
+                    _persisted_status,
+                    _incoming_status,
+                    str(session_id)[:8],
+                )
+                chat_session.session_status = _persisted_status
+                session_state_dirty = False
+        except Exception as _status_exc:
+            logger.warning("Terminal session status guard failed: %s", _status_exc)
+
     if session_state_dirty:
         await crud_chat.update_chat_session(db, session_id, chat_session)
 
@@ -2348,7 +3511,7 @@ async def process_message_with_graph(
     await _persist_transcript_best_effort(
         db,
         session_id=session_id,
-        user_message=message_text,
+        user_message=_transcript_user_text, user_external_id=_inbound_id,
         assistant_message=action.message,
         directive=action.widget_directive or "TEXT_INPUT",
         intent=chat_session.current_intent,

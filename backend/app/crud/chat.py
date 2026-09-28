@@ -1,10 +1,15 @@
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm.attributes import flag_modified
+
+WHATSAPP_SESSION_TTL = timedelta(hours=8)
+# Channels that use the 8-hour inactivity expiry (WhatsApp). Web keeps its own lifecycle.
+WHATSAPP_EXPIRY_CHANNELS = {"whatsapp", "whatsapp_cloud"}
 
 from app.models.session import ChatSession
 from app.models.config import OrgConfig
@@ -41,6 +46,7 @@ async def create_chat_session(
     required_names = get_required_field_names(field_defs)
     snapshot = [field_def.model_dump(mode="python") for field_def in field_defs]
 
+    now = datetime.now(timezone.utc)
     db_session = ChatSession(
         org_id=uuid.UUID(org_id),
         channel=channel,
@@ -48,6 +54,7 @@ async def create_chat_session(
         state_data={FIELD_DEFINITIONS_SNAPSHOT_KEY: snapshot},
         missing_fields=required_names,
         current_intent="START_BOOKING",
+        last_activity_at=now,
     )
     db.add(db_session)
     await db.commit()
@@ -80,51 +87,135 @@ async def get_chat_session(
     )
 
 
+def _is_session_expired(last_activity: Optional[datetime], now: datetime) -> bool:
+    """True if now - last_activity > 8h. last_activity is made tz-aware."""
+    if last_activity is None:
+        return False
+    if last_activity.tzinfo is None:
+        last_activity = last_activity.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return (now - last_activity) > WHATSAPP_SESSION_TTL
+
+
 async def get_or_create_channel_session(
     db: AsyncSession, org_id: str, channel: str, channel_user_id: str
 ) -> ChatSessionState:
-    """Find an active session for a channel user, or create a new one."""
-    result = await db.execute(
-        select(ChatSession)
-        .where(
-            ChatSession.org_id == org_id,
-            ChatSession.channel == channel,
-            ChatSession.channel_user_id == channel_user_id,
-            # Human-handover sessions live under "human_active" (takeover)
-            # and "active" (release writes lowercase) — both must resolve to
-            # the SAME conversation, otherwise the next customer message
-            # spawns a fresh AI session and the handover is silently lost.
-            ChatSession.session_status.in_(
-                ["ACTIVE", "CONFIRMING", "human_active", "active"]
-            ),
-        )
-        .order_by(ChatSession.updated_at.desc())
-    )
-    db_session = result.scalars().first()
+    """Find an active session for a channel user, or create a new one.
 
-    if db_session:
-        return ChatSessionState(
-            session_id=str(db_session.id),
-            org_id=str(db_session.org_id),
-            channel=db_session.channel or channel,
-            channel_user_id=db_session.channel_user_id,
-            collected_data=db_session.state_data,
-            missing_fields=db_session.missing_fields,
-            current_intent=db_session.current_intent,
-            session_status=db_session.session_status or "ACTIVE",
-            otp_verified=db_session.otp_verified or False,
-            phone_otp_verified=getattr(db_session, "phone_otp_verified", False) or False,
-            pending_cancel=db_session.pending_cancel or False,
-        )
+    WhatsApp inactivity expiry (8h) is enforced BEFORE returning a session,
+    and BEFORE any LLM history is loaded — old context is never sent to the
+    agent after expiry. See pseudo-code in the task description.
+    """
+    now = datetime.now(timezone.utc)
+    # Per-user lock to prevent two simultaneous webhooks after expiry from
+    # creating two active sessions. Uses the in-memory debouncer lock keyed by
+    # channel+user (not session_id, which doesn't exist yet).
+    _lock_key = f"get_or_create:{org_id}:{channel}:{channel_user_id}"
+    try:
+        from app.core.whatsapp_debouncer import get_session_lock as _get_lock
 
-    new_session = await create_chat_session(
-        db, org_id, channel=channel, channel_user_id=channel_user_id
-    )
-    return await get_chat_session(db, str(new_session.id))
+        _lock = _get_lock(_lock_key)
+    except Exception:
+        _lock = None
+
+    async def _run() -> ChatSessionState:
+        # Use FOR UPDATE to lock the active row while we decide to expire it.
+        result = await db.execute(
+            select(ChatSession)
+            .where(
+                ChatSession.org_id == org_id,
+                ChatSession.channel == channel,
+                ChatSession.channel_user_id == channel_user_id,
+                ChatSession.session_status.in_(
+                    ["ACTIVE", "CONFIRMING", "human_active", "active"]
+                ),
+            )
+            .order_by(ChatSession.updated_at.desc())
+            .with_for_update()
+        )
+        db_session = result.scalars().first()
+
+        if db_session is not None:
+            # 8-hour inactivity check — only for WhatsApp channels
+            if channel in WHATSAPP_EXPIRY_CHANNELS:
+                last_activity = getattr(db_session, "last_activity_at", None)
+                if last_activity is None:
+                    last_activity = getattr(db_session, "updated_at", None) or getattr(
+                        db_session, "created_at", None
+                    )
+                if _is_session_expired(last_activity, now):
+                    # Expire old session — keep row for audit, never reuse
+                    db_session.session_status = "EXPIRED"
+                    db_session.is_active = False
+                    # Expire any pending BookingDirectives for the old session
+                    # so they are never considered active in the new conversation.
+                    try:
+                        from sqlalchemy import update as _update
+                        from app.models.booking_directive import BookingDirective
+
+                        await db.execute(
+                            _update(BookingDirective)
+                            .where(
+                                BookingDirective.session_id == db_session.id,
+                                BookingDirective.status == "PENDING",
+                            )
+                            .values(status="EXPIRED")
+                        )
+                    except Exception:
+                        pass
+                    # Do not bump last_activity_at on expired row
+                    try:
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        raise
+                    # Create fresh session — reset all temporary state
+                    new_session = await create_chat_session(
+                        db, org_id, channel=channel, channel_user_id=channel_user_id
+                    )
+                    return await get_chat_session(db, str(new_session.id))
+            # Continue existing session — bump last_activity_at
+            try:
+                db_session.last_activity_at = now
+                await db.commit()
+                await db.refresh(db_session)
+            except Exception:
+                await db.rollback()
+                # Non-fatal: still return session
+                pass
+            return ChatSessionState(
+                session_id=str(db_session.id),
+                org_id=str(db_session.org_id),
+                channel=db_session.channel or channel,
+                channel_user_id=db_session.channel_user_id,
+                collected_data=db_session.state_data,
+                missing_fields=db_session.missing_fields,
+                current_intent=db_session.current_intent,
+                session_status=db_session.session_status or "ACTIVE",
+                otp_verified=db_session.otp_verified or False,
+                phone_otp_verified=getattr(db_session, "phone_otp_verified", False) or False,
+                pending_cancel=db_session.pending_cancel or False,
+            )
+
+        # No active session — create new
+        new_session = await create_chat_session(
+            db, org_id, channel=channel, channel_user_id=channel_user_id
+        )
+        return await get_chat_session(db, str(new_session.id))
+
+    if _lock is not None:
+        async with _lock:
+            return await _run()
+    return await _run()
 
 
 async def update_chat_session(
-    db: AsyncSession, session_id: str, state: ChatSessionState
+    db: AsyncSession,
+    session_id: str,
+    state: ChatSessionState,
+    *,
+    remove_keys: Tuple[str, ...] = (),
 ) -> ChatSession:
     result = await db.execute(select(ChatSession).where(ChatSession.id == session_id))
     db_session = result.scalars().first()
@@ -144,6 +235,8 @@ async def update_chat_session(
                 FIELD_DEFINITIONS_SNAPSHOT_KEY
             ]
         existing_state.update(incoming_state)
+        for key in remove_keys:
+            existing_state.pop(str(key), None)
         db_session.state_data = existing_state
         db_session.missing_fields = state.missing_fields
         db_session.current_intent = state.current_intent
@@ -215,17 +308,33 @@ async def get_latest_channel_checkpoint(
     channel: str,
     channel_user_id: str,
 ) -> Optional[Tuple[str, Dict[str, Any]]]:
+    # Only return checkpoint from an ACTIVE conversation — expired sessions
+    # (8h inactivity) keep their rows for audit but are never used for LLM
+    # context after expiry. This prevents old booking/OTP state from leaking
+    # into a new session.
     result = await db.execute(
         select(ChatSession)
         .where(
             ChatSession.org_id == org_id,
             ChatSession.channel == channel,
             ChatSession.channel_user_id == channel_user_id,
+            ChatSession.is_active.is_(True),
+            ChatSession.session_status.in_(["ACTIVE", "CONFIRMING"]),
         )
         .order_by(ChatSession.updated_at.desc())
     )
     sessions = result.scalars().all()
+    now = datetime.now(timezone.utc)
     for session in sessions:
+        # Enforce 8h window at read time as well (defense-in-depth). If the
+        # row somehow survived as ACTIVE past 8h, treat it as expired for
+        # checkpoint purposes.
+        if channel in WHATSAPP_EXPIRY_CHANNELS:
+            last_activity = getattr(session, "last_activity_at", None) or getattr(
+                session, "updated_at", None
+            )
+            if last_activity is not None and _is_session_expired(last_activity, now):
+                continue
         checkpoint = _extract_checkpoint(session.state_data)
         if checkpoint is not None:
             return str(session.id), checkpoint
@@ -303,22 +412,87 @@ async def save_message(
     session_id: str,
     role: str,
     content: str,
-    metadata: dict = None,
-    sender_type: str = "ai",
-    human_agent_id: str = None,
+    metadata: Optional[dict] = None,
+    sender_type: Optional[str] = None,
+    human_agent_id: Optional[str] = None,
+    channel: Optional[str] = None,
+    direction: Optional[str] = None,
+    send_status: Optional[str] = None,
+    provider_message_id: Optional[str] = None,
+    external_message_id: Optional[str] = None,
 ) -> ChatMessage:
-    """Persist a single chat message (user or agent)."""
+    """Persist a single chat message (user or agent).
+
+    Outbound tracking: every assistant message is GENERATED at creation,
+    then SENT/FAILED after a provider attempt, and DELIVERED/READ after
+    a provider callback. Transcript existence is not delivery proof.
+    """
+    import logging as _lg
+
+    _logger = _lg.getLogger(__name__)
+    effective_sender_type = sender_type or ("user" if role == "user" else "ai")
+    # Infer channel/direction/send_status if not provided
+    if channel is None:
+        try:
+            _sess = (await db.execute(select(ChatSession).where(ChatSession.id == uuid.UUID(session_id)))).scalars().first()
+            if _sess is not None:
+                channel = getattr(_sess, "channel", None)
+        except Exception:
+            pass
+    if direction is None:
+        direction = "inbound" if role == "user" else "outbound"
+    if send_status is None and role == "agent":
+        # User messages have no send_status; agent outbound starts GENERATED
+        send_status = "GENERATED" if effective_sender_type in ("ai", "human") else None
+        # Human handoff messages are considered SENT immediately (no provider)
+        if effective_sender_type == "human":
+            send_status = "SENT"
     msg = ChatMessage(
         session_id=uuid.UUID(session_id),
         role=role,
         content=content,
         metadata_=metadata,
-        sender_type=sender_type,
+        sender_type=effective_sender_type,
         human_agent_id=uuid.UUID(human_agent_id) if human_agent_id else None,
     )
+    # Set outbound tracking fields if they exist on the model
+    #
+    # external_message_id means "the provider message that PRODUCED this row".
+    # For a user turn that is the inbound id (wamid / Baileys key.id), which
+    # the inbound handler scopes ambiently so no call site can forget it —
+    # helper flows (cancel lookup, check-booking, decline/refusal) were
+    # silently writing NULL before.
+    #
+    # The ambient fallback applies to USER ROWS ONLY. Applying it to every row
+    # stamped the bot's own reply with the inbound message's id, so a user row
+    # and the agent row that answered it shared one id and the column could not
+    # be used to trace a conversation. Agent rows carry their own outbound id in
+    # provider_message_id, and an explicit argument always wins.
+    _role_key = str(role or "").strip().lower()
+    if external_message_id is None and _role_key == "user":
+        try:
+            from app.core.inbound_context import get_inbound_message_id
+
+            external_message_id = get_inbound_message_id()
+        except Exception:
+            external_message_id = None
+    for _attr, _val in [
+        ("channel", channel),
+        ("direction", direction),
+        ("send_status", send_status),
+        ("provider_message_id", provider_message_id),
+        ("external_message_id", external_message_id),
+    ]:
+        try:
+            if hasattr(msg, _attr) and _val is not None:
+                setattr(msg, _attr, _val)
+        except Exception:
+            pass
     db.add(msg)
     # Bump the parent session so the admin inbox (sorted by updated_at)
     # reorders live when polling — a message insert alone never touches it.
+    # For the 8-hour inactivity window, only USER messages count as activity
+    # (bot replies must not extend the window).
     try:
         from datetime import datetime, timezone
 
@@ -326,12 +500,115 @@ async def save_message(
             await db.execute(select(ChatSession).where(ChatSession.id == uuid.UUID(session_id)))
         ).scalars().first()
         if parent is not None:
-            parent.updated_at = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc)
+            parent.updated_at = now
+            if role == "user" or effective_sender_type == "user":
+                try:
+                    parent.last_activity_at = now
+                except Exception:
+                    pass
     except Exception:
         pass
     await db.commit()
     await db.refresh(msg)
     return msg
+
+
+async def mark_latest_outbound_sent(
+    db: AsyncSession,
+    session_id: str,
+    provider_message_id: Optional[str] = None,
+) -> Optional[ChatMessage]:
+    result = await db.execute(
+        select(ChatMessage)
+        .where(
+            ChatMessage.session_id == uuid.UUID(str(session_id)),
+            ChatMessage.role == "agent",
+            ChatMessage.sender_type != "system",
+            ChatMessage.direction == "outbound",
+        )
+        .order_by(ChatMessage.created_at.desc())
+        .limit(1)
+    )
+    message = result.scalars().first()
+    if message is None:
+        return None
+    message.send_status = "SENT"
+    message.sent_at = datetime.now(timezone.utc)
+    if provider_message_id:
+        message.provider_message_id = str(provider_message_id)
+    await db.commit()
+    await db.refresh(message)
+    return message
+
+
+async def mark_latest_outbound_failed(
+    db: AsyncSession,
+    session_id: str,
+    error_message: str,
+) -> Optional[ChatMessage]:
+    result = await db.execute(
+        select(ChatMessage)
+        .where(
+            ChatMessage.session_id == uuid.UUID(str(session_id)),
+            ChatMessage.role == "agent",
+            ChatMessage.sender_type != "system",
+            ChatMessage.direction == "outbound",
+        )
+        .order_by(ChatMessage.created_at.desc())
+        .limit(1)
+    )
+    message = result.scalars().first()
+    if message is None:
+        return None
+    message.send_status = "FAILED"
+    message.failed_at = datetime.now(timezone.utc)
+    message.error_message = str(error_message)[:2000]
+    await db.commit()
+    await db.refresh(message)
+    return message
+
+
+async def apply_delivery_status(
+    db: AsyncSession,
+    provider_message_id: str,
+    status: str,
+    error_message: Optional[str] = None,
+) -> Optional[ChatMessage]:
+    normalized = str(provider_message_id or "").strip()
+    if not normalized:
+        return None
+    result = await db.execute(
+        select(ChatMessage).where(
+            ChatMessage.provider_message_id == normalized
+        )
+    )
+    message = result.scalars().first()
+    if message is None:
+        return None
+    value = str(status or "").upper()
+    now = datetime.now(timezone.utc)
+    if value in {"SENT", "ACCEPTED"}:
+        message.send_status = "SENT"
+        message.sent_at = message.sent_at or now
+    elif value == "DELIVERED":
+        message.send_status = "DELIVERED"
+        message.delivered_at = now
+        message.sent_at = message.sent_at or now
+    elif value == "READ":
+        message.send_status = "READ"
+        message.read_at = now
+        message.delivered_at = message.delivered_at or now
+        message.sent_at = message.sent_at or now
+    elif value in {"FAILED", "DELETED", "UNREAD"}:
+        message.send_status = "FAILED"
+        message.failed_at = now
+        message.error_message = str(error_message or value)[:2000]
+    else:
+        return message
+    await db.commit()
+    await db.refresh(message)
+    return message
 
 
 async def get_session_messages(

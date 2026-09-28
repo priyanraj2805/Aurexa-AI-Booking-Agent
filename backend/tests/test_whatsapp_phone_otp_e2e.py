@@ -1,6 +1,7 @@
-"""Zavu phone OTP E2E — booking confirmation via SMS (kd78m7agx48rpyegpfrmhp5rsx8dm8t9)."""
+"""WhatsApp phone OTP E2E — booking confirmation via WhatsApp-delivered codes."""
 import uuid
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import AsyncClient
@@ -13,8 +14,11 @@ from app.models.booking import Booking, TimeSlot
 from app.models.otp import OTPRecord
 
 
+BOOKING_DATE = (datetime.now(timezone.utc) + timedelta(days=30)).date().isoformat()
+
+
 async def _make_org(db, require_phone_otp=True, require_otp=False):
-    org = Organization(name="Zavu E2E Org", api_key=f"ds_zavu_{uuid.uuid4().hex[:8]}", is_active=True)
+    org = Organization(name="WhatsApp E2E Org", api_key=f"ds_wa_{uuid.uuid4().hex[:8]}", is_active=True)
     db.add(org)
     await db.flush()
     cfg = OrgConfig(org_id=org.id, required_fields=["name","email","phone","date","time"])
@@ -25,10 +29,10 @@ async def _make_org(db, require_phone_otp=True, require_otp=False):
     await db.refresh(org)
     return org
 
-async def _make_sess(db, org, phone="+919876543210"):
+async def _make_sess(db, org, phone="+916350063338"):
     sess = ChatSession(
         org_id=org.id,
-        state_data={"phone": phone, "name":"Zavu Tester", "email":"zavu@test.com", "date":"2026-09-10", "time":"10:00", "user_timezone":"UTC"},
+        state_data={"phone": phone, "name":"WhatsApp Tester", "email":"wa@test.com", "date":BOOKING_DATE, "time":"10:00", "user_timezone":"UTC"},
         missing_fields=[], current_intent="CONFIRM_BOOKING", session_status="ACTIVE", otp_verified=True, phone_otp_verified=False,
     )
     db.add(sess)
@@ -37,11 +41,21 @@ async def _make_sess(db, org, phone="+919876543210"):
     return sess
 
 
+def _mock_whatsapp_send(monkeypatch):
+    """Phone OTP sends go through WhatsApp — mock delivery, never real network."""
+    send = AsyncMock(return_value={"success": True})
+    monkeypatch.setattr(
+        "app.core.otp_delivery.whatsapp_provider.WhatsAppProvider.send_otp", send
+    )
+    return send
+
+
 @pytest.mark.asyncio
-async def test_zavu_generate_creates_record_and_mock_send(client: AsyncClient, db_session, monkeypatch):
-    """Zavu generate_otp for phone creates OTPRecord + mock SMS (zv_test sandbox)."""
+async def test_whatsapp_generate_creates_record(client: AsyncClient, db_session, monkeypatch):
+    """generate_otp for phone creates OTPRecord; delivery goes via WhatsApp."""
+    _mock_whatsapp_send(monkeypatch)
     org = await _make_org(db_session)
-    sess = await _make_sess(db_session, org, phone="+919876543210")
+    sess = await _make_sess(db_session, org, phone="+916350063338")
     sid = str(sess.id)
 
     from app.crud.otp import generate_otp
@@ -49,19 +63,15 @@ async def test_zavu_generate_creates_record_and_mock_send(client: AsyncClient, d
     assert len(code)==6 and code.isdigit()
     rec = await db_session.execute(select(OTPRecord).where(OTPRecord.session_id==sess.id, OTPRecord.channel=="phone"))
     assert rec.scalars().first() is not None
-    # Zavu mock for zv_test returns mock success
-    from app.core.sms import _send_zavu_sms_sync
-    res = _send_zavu_sms_sync("+919876543210", f"Your DotStark verification code is {code}. It expires in 5 minutes. Do not share this code.")
-    assert res.get("success") is True
     # Endpoint also works (may be 200 or 401 depending on test client auth, but crud path is primary)
     resp = await client.post("/api/v1/auth/security/otp/generate", json={"session_id": sid, "channel":"phone"}, headers={"X-Requested-With":"XMLHttpRequest"})
     assert resp.status_code in (200, 401)
 
 
 @pytest.mark.asyncio
-async def test_zavu_verify_correct_code_marks_session(client: AsyncClient, db_session):
+async def test_whatsapp_verify_correct_code_marks_session(client: AsyncClient, db_session):
     org = await _make_org(db_session)
-    sess = await _make_sess(db_session, org, phone="+919876543210")
+    sess = await _make_sess(db_session, org, phone="+916350063338")
     sid = str(sess.id)
     from app.crud.otp import generate_otp
     code = await generate_otp(db_session, sid, channel="phone")
@@ -73,9 +83,9 @@ async def test_zavu_verify_correct_code_marks_session(client: AsyncClient, db_se
     assert s.phone_otp_verified is True
 
 @pytest.mark.asyncio
-async def test_zavu_verify_wrong_code_rejected(client: AsyncClient, db_session):
+async def test_whatsapp_verify_wrong_code_rejected(client: AsyncClient, db_session):
     org = await _make_org(db_session)
-    sess = await _make_sess(db_session, org, phone="+919876543210")
+    sess = await _make_sess(db_session, org, phone="+916350063338")
     sid = str(sess.id)
     from app.crud.otp import generate_otp
     await generate_otp(db_session, sid, channel="phone")
@@ -86,11 +96,12 @@ async def test_zavu_verify_wrong_code_rejected(client: AsyncClient, db_session):
 @pytest.mark.asyncio
 async def test_booking_blocked_until_phone_otp_then_confirmed(client: AsyncClient, db_session, monkeypatch):
     """Booking should be REQUIRE_OTP_MODAL while phone_otp_verified False, BOOKING_CONFIRMED_CARD after correct code."""
+    _mock_whatsapp_send(monkeypatch)
     org = await _make_org(db_session, require_phone_otp=True, require_otp=False)
-    sess = await _make_sess(db_session, org, phone="+919876543210")
+    sess = await _make_sess(db_session, org, phone="+916350063338")
     sid = str(sess.id)
     # Slot
-    slot_start = datetime(2026,9,10,10,0, tzinfo=timezone.utc)
+    slot_start = datetime.fromisoformat(f"{BOOKING_DATE}T10:00:00+00:00")
     slot = TimeSlot(org_id=org.id, start_time=slot_start, end_time=slot_start+timedelta(hours=1), is_booked=False)
     db_session.add(slot)
     await db_session.commit()

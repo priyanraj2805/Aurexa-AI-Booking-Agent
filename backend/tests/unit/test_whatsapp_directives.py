@@ -96,3 +96,24 @@ class TestUpcomingDateOptions:
 
     def test_bad_timezone_falls_back_to_utc(self):
         assert len(_upcoming_date_options("Not/AZone", 90)) == 7
+
+
+class TestDirectiveFrameMatchesAction:
+    def test_confirm_frame_only_for_confirm_step_replies(self):
+        from app.engine.booking_directive.service import directive_frame_matches_action
+
+        assert directive_frame_matches_action("CONFIRM_BOOKING", "REQUEST_CONFIRMATION") is True
+        assert directive_frame_matches_action("CONFIRM_BOOKING", "PROCESS_BOOKING") is True
+        assert directive_frame_matches_action("CONFIRM_BOOKING", "BOOKING_CONFIRMED_CARD") is True
+        assert directive_frame_matches_action("CONFIRM_BOOKING", "TEXT_INPUT") is False
+        assert directive_frame_matches_action("CONFIRM_BOOKING", "REQUIRE_OTP_MODAL") is False
+        assert directive_frame_matches_action("CONFIRM_BOOKING", None) is False
+
+    def test_step_frames_match_their_widgets(self):
+        from app.engine.booking_directive.service import directive_frame_matches_action
+
+        assert directive_frame_matches_action("SELECT_DATE", "REQUIRE_DATE_PICKER") is True
+        assert directive_frame_matches_action("SELECT_SLOT", "REQUIRE_TIME_SLOT_GRID") is True
+        assert directive_frame_matches_action("SELECT_TIME", "REQUIRE_TIME_SLOT_GRID") is True
+        assert directive_frame_matches_action("SELECT_DATE", "TEXT_INPUT") is False
+        assert directive_frame_matches_action("BOGUS_TYPE", "TEXT_INPUT") is False

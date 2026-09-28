@@ -1973,51 +1973,45 @@ async def cancel_booking_admin(
         user_agent=request.headers.get("user-agent"),
     )
 
-    if chat_session:
-        try:
-            customer_email = (chat_session.state_data or {}).get(
-                "email"
-            ) or booking.customer_email
-            if customer_email:
-                booking_details = {
-                    "name": (chat_session.state_data or {}).get("name")
-                    or booking.customer_name,
-                    "email": customer_email,
-                    "date": (chat_session.state_data or {}).get("date"),
-                    "time": (chat_session.state_data or {}).get("time"),
-                }
+    try:
+        session_data = (chat_session.state_data or {}) if chat_session else {}
+        customer_email = session_data.get("email") or booking.customer_email
+        if customer_email:
+            channel_name = getattr(chat_session, "channel", None) or "web"
+            booking_details = {
+                "booking_id": str(booking.id),
+                "name": session_data.get("name") or booking.customer_name,
+                "email": customer_email,
+                "date": session_data.get("date"),
+                "time": session_data.get("time"),
+                "source_channel": {
+                    "web": "Web Widget",
+                    "whatsapp": "WhatsApp",
+                    "whatsapp_cloud": "WhatsApp",
+                }.get(channel_name, "Web Widget"),
+            }
 
-                if booking.meeting_type_snapshot:
-                    booking_details["meeting_type_snapshot"] = (
-                        booking.meeting_type_snapshot
-                    )
-                if booking.meeting_link_status:
-                    booking_details["meeting_link_status"] = (
-                        booking.meeting_link_status.value
-                    )
-                if booking.meeting_link_url:
-                    booking_details["meeting_link_url"] = booking.meeting_link_url
-                if booking.meeting_link_provider:
-                    booking_details["meeting_link_provider"] = (
-                        booking.meeting_link_provider.value
-                    )
-                if booking.user_timezone:
-                    booking_details["user_timezone"] = booking.user_timezone
-                if booking.org_timezone_snapshot:
-                    booking_details["org_timezone_snapshot"] = (
-                        booking.org_timezone_snapshot
-                    )
+            if booking.meeting_type_snapshot:
+                booking_details["meeting_type_snapshot"] = booking.meeting_type_snapshot
+            if booking.meeting_link_status:
+                booking_details["meeting_link_status"] = booking.meeting_link_status.value
+            if booking.meeting_link_url:
+                booking_details["meeting_link_url"] = booking.meeting_link_url
+            if booking.meeting_link_provider:
+                booking_details["meeting_link_provider"] = booking.meeting_link_provider.value
+            if booking.user_timezone:
+                booking_details["user_timezone"] = booking.user_timezone
+            if booking.org_timezone_snapshot:
+                booking_details["org_timezone_snapshot"] = booking.org_timezone_snapshot
 
-                await send_cancellation_email(
-                    customer_email=customer_email,
-                    customer_name=(chat_session.state_data or {}).get("name")
-                    or booking.customer_name
-                    or "there",
-                    booking_details=booking_details,
-                    org_id=user.org_id,
-                )
-        except Exception as mail_error:
-            logger.warning(f"Admin cancellation email failed: {mail_error}")
+            await send_cancellation_email(
+                customer_email=customer_email,
+                customer_name=session_data.get("name") or booking.customer_name or "there",
+                booking_details=booking_details,
+                org_id=user.org_id,
+            )
+    except Exception as mail_error:
+        logger.warning(f"Admin cancellation email failed: {mail_error}")
 
     return CancelBookingResponse(
         success=True,
@@ -2037,8 +2031,19 @@ class MessageItem(BaseModel):
     id: str
     role: str
     content: str
+    sender_type: Optional[str] = None
+    channel: Optional[str] = None
+    direction: Optional[str] = None
+    send_status: Optional[str] = None
+    provider_message_id: Optional[str] = None
+    external_message_id: Optional[str] = None
     metadata: Optional[dict] = None
     created_at: datetime
+    sent_at: Optional[datetime] = None
+    delivered_at: Optional[datetime] = None
+    read_at: Optional[datetime] = None
+    failed_at: Optional[datetime] = None
+    error_message: Optional[str] = None
 
 
 @router.get("/conversations/{session_id}/messages", response_model=List[MessageItem])
@@ -2073,8 +2078,19 @@ async def get_conversation_messages(
             id=str(m.id),
             role=m.role,
             content=m.content,
+            sender_type=getattr(m, "sender_type", None),
+            channel=getattr(m, "channel", None),
+            direction=getattr(m, "direction", None),
+            send_status=getattr(m, "send_status", None),
+            provider_message_id=getattr(m, "provider_message_id", None),
+            external_message_id=getattr(m, "external_message_id", None),
             metadata=m.metadata_,
             created_at=m.created_at,
+            sent_at=getattr(m, "sent_at", None),
+            delivered_at=getattr(m, "delivered_at", None),
+            read_at=getattr(m, "read_at", None),
+            failed_at=getattr(m, "failed_at", None),
+            error_message=getattr(m, "error_message", None),
         )
         for m in messages
     ]

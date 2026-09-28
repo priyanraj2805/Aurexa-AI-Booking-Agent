@@ -26,7 +26,9 @@ from app.core.limiter import limiter
 from app.core.whatsapp_debouncer import (
     get_session_lock,
     is_duplicate,
+    release_message,
     check_sender_rate_limit,
+    session_lock_key,
 )
 from app.db.database import get_db
 from app.models.organization import Organization
@@ -430,10 +432,15 @@ class QrInboundPayload(BaseModel):
 
 
 class QrEventPayload(BaseModel):
-    """Gateway lifecycle push (service-key auth, no JWT)."""
+    """Gateway lifecycle and delivery push (service-key auth, no JWT)."""
 
     connectionId: str
-    event: str  # logged_out | connected
+    event: str
+    sessionId: Optional[str] = None
+    fromNumber: Optional[str] = None
+    chatJid: Optional[str] = None
+    providerMessageId: Optional[str] = None
+    error: Optional[str] = None
 
 
 async def _require_gateway_key(request: Request) -> None:
@@ -473,6 +480,69 @@ async def qr_events(
         return {"status": "ignored", "reason": "unknown_connection"}
     event = str(payload.event or "").strip().lower()
     now = datetime.now(timezone.utc)
+    if event in {"message_sent", "message_failed", "message_delivered", "message_read"}:
+        from app.crud import chat as _crud_chat
+        from app.models.session import ChatSession as _ChatSession
+
+        session_id = str(payload.sessionId or "").strip()
+        session_uuid = None
+        if session_id:
+            try:
+                session_uuid = _uuid.UUID(session_id)
+            except ValueError:
+                session_uuid = None
+        session = None
+        if session_uuid is not None:
+            session = (
+                await db.execute(
+                    select(_ChatSession).where(
+                        _ChatSession.id == session_uuid,
+                        _ChatSession.org_id == row.org_id,
+                        _ChatSession.channel == "whatsapp",
+                    )
+                )
+            ).scalars().first()
+        if session is None and payload.fromNumber:
+            digits = re.sub(r"\D", "", str(payload.fromNumber))
+            if digits:
+                session = (
+                    await db.execute(
+                        select(_ChatSession)
+                        .where(
+                            _ChatSession.org_id == row.org_id,
+                            _ChatSession.channel == "whatsapp",
+                            _ChatSession.channel_user_id == digits,
+                        )
+                        .order_by(_ChatSession.updated_at.desc())
+                        .limit(1)
+                    )
+                ).scalars().first()
+        if session is None:
+            return {"status": "ignored", "reason": "unknown_session"}
+        try:
+            if event == "message_sent":
+                await _crud_chat.mark_latest_outbound_sent(
+                    db,
+                    str(session.id),
+                    payload.providerMessageId,
+                )
+            elif event == "message_failed":
+                await _crud_chat.mark_latest_outbound_failed(
+                    db,
+                    str(session.id),
+                    payload.error or "WhatsApp gateway send failed",
+                )
+            else:
+                await _crud_chat.apply_delivery_status(
+                    db,
+                    payload.providerMessageId or "",
+                    "DELIVERED" if event == "message_delivered" else "READ",
+                    payload.error,
+                )
+        except Exception as delivery_error:
+            logger.warning("QR delivery status update failed: %s", delivery_error)
+            return {"status": "ignored", "reason": "delivery_status_failed"}
+        return {"status": "ok"}
     if event == "logged_out":
         if row.status != WhatsAppConnectionStatus.LOGGED_OUT:
             row.status = WhatsAppConnectionStatus.LOGGED_OUT
@@ -541,7 +611,23 @@ async def qr_inbound(    payload: QrInboundPayload,
 
     from_phone = "".join(c for c in str(payload.from_number or "") if c.isdigit())
     text = str(payload.text or "").strip()
+    # Exact text the human sent, captured before any directive-tap rewrite.
+    # Booking logic consumes the (possibly rewritten) `text`; the transcript
+    # and audit trail must record what was actually received.
+    _original_text = text
+    _inbound_message_id = str(payload.messageId or "").strip() or None
+    # Make the provider id ambient for every persistence call made while this
+    # message is handled (directive-tap replies, engine transcript, cancel /
+    # check-booking / decline helpers). Starlette runs each request in its own
+    # task, so this value cannot leak into another conversation.
+    try:
+        from app.core.inbound_context import set_inbound_message_id
+
+        set_inbound_message_id(_inbound_message_id)
+    except Exception:
+        pass
     if len(from_phone) < 7 or not text:
+        release_message(f"qr:{payload.messageId}")
         return {"status": "ignored"}
 
     # OTP codes and knowledge questions must never be rate-limited — they are
@@ -567,6 +653,7 @@ async def qr_inbound(    payload: QrInboundPayload,
     cfg_res = await db.execute(select(OrgConfig).where(OrgConfig.org_id == org.id))
     org_config = cfg_res.scalars().first()
     if org_config is None:  # pragma: no cover — every org has one
+        release_message(f"qr:{payload.messageId}")
         return {"status": "ignored"}
 
     # Booking kill switch: replies work only when the admin toggle is ON.
@@ -577,6 +664,7 @@ async def qr_inbound(    payload: QrInboundPayload,
             "qr inbound ignored (whatsapp booking disabled: %s)",
             _bk_reason or "unknown",
         )
+        release_message(f"qr:{payload.messageId}")
         return {"status": "ignored", "reason": _bk_reason or "whatsapp_booking_disabled"}
 
     chat_session = await crud_chat.get_or_create_channel_session(
@@ -800,6 +888,17 @@ async def qr_inbound(    payload: QrInboundPayload,
                             ),
                         )
                         if _iso_g:
+                            _available_g, _availability_correction, _availability_reason = await _guards.validate_typed_date_availability(
+                                db,
+                                org.id,
+                                org_config,
+                                _iso_g,
+                            )
+                            if not _available_g:
+                                _iso_g = None
+                                _corr_g = _availability_correction
+                                _reason_g = _availability_reason
+                        if _iso_g:
                             _typed_iso = _iso_g
                             _matched = {
                                 "id": f"date_typed_{_iso_g.replace('-', '')}",
@@ -824,7 +923,12 @@ async def qr_inbound(    payload: QrInboundPayload,
                                 _cd_b.pop("active_directive_id", None)
                                 chat_session.collected_data = _cd_b
                                 try:
-                                    await db.commit()
+                                   await crud_chat.update_chat_session(
+                                        db,
+                                        str(chat_session.session_id),
+                                        chat_session,
+                                        remove_keys=("active_directive_id",),
+                                    )
                                 except Exception:
                                     pass
                                 logger.info(f"Directive {str(_dir.id)[:8]} LLM bypass to engine: {text[:40]!r}")
@@ -865,7 +969,12 @@ async def qr_inbound(    payload: QrInboundPayload,
                             _cd_h.pop("active_directive_id", None)
                             chat_session.collected_data = _cd_h
                             try:
-                                await db.commit()
+                                await crud_chat.update_chat_session(
+                                    db,
+                                    str(chat_session.session_id),
+                                    chat_session,
+                                    remove_keys=("active_directive_id",),
+                                )
                             except Exception:
                                 pass
                             logger.info(f"Directive {str(_dir.id)[:8]} cancel bypass to engine: {text[:40]!r}")
@@ -880,7 +989,12 @@ async def qr_inbound(    payload: QrInboundPayload,
                                 _cd_h.pop("active_directive_id", None)
                                 chat_session.collected_data = _cd_h
                                 try:
-                                    await db.commit()
+                                   await crud_chat.update_chat_session(
+                                        db,
+                                        str(chat_session.session_id),
+                                        chat_session,
+                                        remove_keys=("active_directive_id",),
+                                    )
                                 except Exception:
                                     pass
                                 logger.info(f"Directive {str(_dir.id)[:8]} field-change ({_change_field}) to engine: {text[:40]!r}")
@@ -904,7 +1018,12 @@ async def qr_inbound(    payload: QrInboundPayload,
                             _cd_b2.pop("active_directive_id", None)
                             chat_session.collected_data = _cd_b2
                             try:
-                                await db.commit()
+                                await crud_chat.update_chat_session(
+                                    db,
+                                    str(chat_session.session_id),
+                                    chat_session,
+                                    remove_keys=("active_directive_id",),
+                                )
                             except Exception:
                                 pass
                             logger.info(f"Directive {str(_dir.id)[:8]} LLM bypass to engine (slot guard): {text[:40]!r}")
@@ -978,7 +1097,12 @@ async def qr_inbound(    payload: QrInboundPayload,
                                 _fds2 = _ofd2(_pfd2(chat_session.collected_data.get("field_definitions_snapshot") or org_config.field_definitions or org_config.required_fields))
                                 _req2 = [f.name for f in _fds2 if f.required]
                                 chat_session.missing_fields = _SE2.calculate_missing_fields(_req2, _cd2)
-                                await db.commit()
+                                await crud_chat.update_chat_session(
+                                    db,
+                                    str(chat_session.session_id),
+                                    chat_session,
+                                    remove_keys=("active_directive_id",),
+                                )
                                 logger.info(f"Directive {str(_dir.id)[:8]} completed via typed date: {_typed_iso}")
                             except Exception as _e2:
                                 logger.warning(f"Directive typed-date completion failed: {_e2}")
@@ -1007,7 +1131,12 @@ async def qr_inbound(    payload: QrInboundPayload,
                                     _fds = order_field_definitions(parse_field_definitions(chat_session.collected_data.get("field_definitions_snapshot") or org_config.field_definitions or org_config.required_fields))
                                     _req = [f.name for f in _fds if f.required]
                                     chat_session.missing_fields = StateEvaluator.calculate_missing_fields(_req, _cd)
-                                    await db.commit()
+                                    await crud_chat.update_chat_session(
+                                        db,
+                                        str(chat_session.session_id),
+                                        chat_session,
+                                        remove_keys=("active_directive_id",),
+                                    )
                                     logger.info(f"Directive {str(_dir.id)[:8]} completed via tap: {str(_matched.get('label'))[:20]}")
                             except Exception as _e:
                                 logger.warning(f"Directive tap state update failed: {_e}")
@@ -1024,7 +1153,7 @@ async def qr_inbound(    payload: QrInboundPayload,
         logger.warning(f"Directive tap handling failed, falling back to LLM: {_e}")
 
     logger.info("qr inbound session=%s (org resolved, engine next)", chat_session.session_id)
-    session_lock = get_session_lock(str(chat_session.session_id))
+    session_lock = get_session_lock(session_lock_key(str(chat_session.session_id)))
     async with session_lock:
         logger.info("qr inbound invoking route_whatsapp_message()")
         _t0 = _time.monotonic()
@@ -1036,9 +1165,12 @@ async def qr_inbound(    payload: QrInboundPayload,
                 chat_session=chat_session,
                 message_text=text,
                 background_tasks=background_tasks,
+                transcript_user_text=_original_text,
+                inbound_message_id=_inbound_message_id,
             )
         except Exception:
             logger.exception("qr inbound engine raised")
+            release_message(f"qr:{payload.messageId}")
             raise
         _dt = _time.monotonic() - _t0
         # Human handover won the race after the early check, or the engine
@@ -1062,9 +1194,19 @@ async def qr_inbound(    payload: QrInboundPayload,
         if _active_id_after:
             try:
                 from app.engine.booking_directive.service import get_by_id as _get_dir2
+                from app.engine.booking_directive.service import (
+                    directive_frame_matches_action as _frame_matches,
+                )
 
                 _dir_after = await _get_dir2(db, _active_id_after)
-                if _dir_after and _dir_after.status == "PENDING":
+                if (
+                    _dir_after
+                    and _dir_after.status == "PENDING"
+                    and _frame_matches(
+                        getattr(_dir_after, "type", ""),
+                        getattr(action, "widget_directive", ""),
+                    )
+                ):
                     _title = str(getattr(_dir_after, "title", "") or "").strip()
                     _desc = str(getattr(_dir_after, "description", "") or "").strip()
                     _opts = list(getattr(_dir_after, "options", None) or [])
@@ -1148,49 +1290,57 @@ async def qr_inbound(    payload: QrInboundPayload,
             # Final anti-hallucination gate: block invented contact/money
             # entities (phones, emails, prices) absent from org facts, catalog
             # fees, and the customer's own session details. Fail-open on error.
+            # Skip for deterministic duplicate-booking (DB truth, not hallucination)
+            _skip_gate_qr = False
             try:
-                from app.engine import knowledge_guards as _kb_guards
+                _fm_qr = getattr(action, "field_meta", None) or {}
+                if isinstance(_fm_qr, dict) and _fm_qr.get("duplicate_booking"):
+                    _skip_gate_qr = True
+            except Exception:
+                pass
+            if not _skip_gate_qr:
+                try:
+                    from app.engine import knowledge_guards as _kb_guards
 
-                _body0 = str((wa_msg or {}).get("body") or "")
-                if _body0 and str((wa_msg or {}).get("type") or "") == "text":
-                    _cd0 = dict(chat_session.collected_data or {})
-                    _facts0: list = [str(getattr(org, "name", "") or "")]
-                    try:
-                        from app.engine.knowledge_profile import format_business_profile as _fbp
-
-                        _facts0.append(_fbp(getattr(org_config, "knowledge_context", None)) or "")
-                    except Exception:
-                        pass
-                    try:
-                        from sqlalchemy.future import select as _SelFee
-                        from app.models.service_unit import ProviderFee as _FeeModel
-
-                        _fees = (
-                            await db.execute(
-                                _SelFee(_FeeModel).where(
-                                    _FeeModel.org_id == org.id,
-                                    _FeeModel.is_active.is_(True),
-                                )
-                            )
-                        ).scalars().all()
-                        for _f in _fees:
-                            if _f.amount_paise:
-                                _facts0.append(f"{(_f.currency or 'INR')} {(_f.amount_paise / 100):,.2f}")
-                    except Exception:
-                        pass
-                    _sess0 = [str(_cd0.get(k) or "") for k in ("name", "email", "phone", "date", "time")]
-                    _safe0, _blocked0, _ents0 = _kb_guards.guard_final_text(
-                        _body0, org_facts=_facts0, session_details=_sess0
-                    )
-                    if _blocked0:
-                        logger.warning("whatsapp KB entity gate blocked reply with unlisted %s", _ents0)
+                    _body0 = str((wa_msg or {}).get("body") or "")
+                    if _body0 and str((wa_msg or {}).get("type") or "") == "text":
+                        _cd0 = dict(chat_session.collected_data or {})
+                        _facts0: list = [str(getattr(org, "name", "") or "")]
                         try:
-                            await crud_chat.save_message(db, str(chat_session.session_id), "agent", _safe0)
+                            from app.engine.knowledge_profile import format_business_profile as _fbp
+
+                            _facts0.append(_fbp(getattr(org_config, "knowledge_context", None)) or "")
                         except Exception:
                             pass
-                        wa_msg = {"type": "text", "body": _safe0[:4096]}
-            except Exception as _gate_e:
-                logger.warning(f"whatsapp KB entity gate failed open: {_gate_e}")
+                        try:
+                            from sqlalchemy.future import select as _SelFee
+                            from app.models.service_unit import ProviderFee as _FeeModel
+
+                            _fees = (
+                                await db.execute(
+                                    _SelFee(_FeeModel).where(
+                                        _FeeModel.org_id == org.id,
+                                        _FeeModel.is_active.is_(True),
+                                    )
+                                )
+                            ).scalars().all()
+                            for _f in _fees:
+                                if _f.amount_paise:
+                                    _facts0.append(f"{(_f.currency or 'INR')} {(_f.amount_paise / 100):,.2f}")
+                        except Exception:
+                            pass
+                        _sess0 = [str(_cd0.get(k) or "") for k in ("name", "email", "phone", "date", "time")]
+                        _safe0, _blocked0, _ents0 = _kb_guards.guard_final_text(
+                            _body0, org_facts=_facts0, session_details=_sess0
+                        )
+                        if _blocked0:
+                            logger.warning("whatsapp KB entity gate blocked reply with unlisted %s", _ents0)
+                            # Do not save second ghost row — transcript already saved by
+                            # langgraph_orchestrator; saving here creates divergence
+                            # (Image 1 ghost only on WhatsApp, transcript shows duplicate+ghost)
+                            wa_msg = {"type": "text", "body": _safe0[:4096]}
+                except Exception as _gate_e:
+                    logger.warning(f"whatsapp KB entity gate failed open: {_gate_e}")
         # Approved Marketing templates via Cloud API (language `en`), Baileys stays as fallback.
         # Sends Cloud copy for Meta compliance; the Baileys `wa_msg` above is still
         # returned so the QR thread keeps working (dual-sender, same as OTP today).
@@ -1200,7 +1350,7 @@ async def qr_inbound(    payload: QrInboundPayload,
             if _wtemplates.templates_enabled():
                 _directive = getattr(action, "widget_directive", "") or ""
                 _fmeta = getattr(action, "field_meta", None) or {}
-                _sdata = chat_session.state_data if isinstance(getattr(chat_session, "state_data", None), dict) else {}
+                _sdata = chat_session.collected_data if isinstance(getattr(chat_session, "collected_data", None), dict) else {}
                 _cname = str(_sdata.get("name") or "").strip() or None
                 try:
                     _cname = _cname or str((_sdata.get("pushName") or "")).strip() or "there"

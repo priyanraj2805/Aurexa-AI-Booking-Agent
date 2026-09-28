@@ -37,6 +37,7 @@ DATEISH_TOKEN_RE = re.compile(
 # serverless/free-tier model; raise if a faster provider is configured.
 RERANK_HARD_TIMEOUT_SECONDS = 6.0
 MAIN_LLM_HARD_TIMEOUT_SECONDS = 35.0
+FALLBACK_LLM_HARD_TIMEOUT_SECONDS = 12.0
 
 _RAG_SKIP_PATTERNS = (
     re.compile(r"^\s*\d{1,2}(:\d{2})\s*(am|pm)?\s*$", flags=re.IGNORECASE),
@@ -312,6 +313,19 @@ async def call_model(
         requested_source="user_selected",
     )
     effective_timezone = str(timezone_policy.get("effective_timezone") or "UTC")
+    max_booking_days = 90
+    try:
+        from app.engine.scheduling_policy import resolve_booking_horizon_days
+
+        max_booking_days = (
+            await resolve_booking_horizon_days(
+                db,
+                str(state.get("org_id") or ""),
+                org_config,
+            )
+        )[0]
+    except Exception:
+        pass
 
     active_summary, active_messages, context_compacted = _compact_context_messages(
         messages=list(state.get("messages", [])),
@@ -325,6 +339,24 @@ async def call_model(
             latest_user_message = _sanitize_user_message(_message_content(message).strip())
             if latest_user_message:
                 break
+
+    # User behaviour understanding — every word before booking
+    _behaviour_hint = ""
+    _behaviour = {}
+    try:
+        from app.engine.user_behavior import analyze_user_behavior, behaviour_to_prompt_hint
+
+        _hist_texts = [str(_message_content(m) or "").strip() for m in active_messages if isinstance(m, HumanMessage)]
+        _behaviour = analyze_user_behavior(
+            latest_user_message or "",
+            history=_hist_texts[-4:],
+            collected_data=dict(state.get("collected_fields", {}) or {}),
+            missing_fields=list(state.get("follow_up_fields", []) or []),
+        )
+        _behaviour_hint = behaviour_to_prompt_hint(_behaviour)
+    except Exception:
+        _behaviour_hint = ""
+        _behaviour = {}
 
     if latest_user_message:
         schedule_answer = await lookup_schedule_business_hours_answer(
@@ -431,6 +463,8 @@ async def call_model(
     context_block = build_context_block(collected, missing, "ACTIVE")
     if active_summary:
         context_block = f"{context_block}\n\nConversation summary:\n{active_summary}"
+    if _behaviour_hint:
+        context_block = f"{context_block}\n\n{_behaviour_hint}"
 
     # 3b. Retrieve relevant knowledge from uploaded documents and crawled websites.
     # Tiered: booking field values/confirmations skip entirely ("skip");
@@ -661,12 +695,18 @@ async def call_model(
                 context_block = (
                     f"{context_block}\n\n"
                     "## NO KNOWLEDGE FOUND\n"
-                    "The user asked a question, but NONE of the company's materials "
-                    "contain the answer. You MUST reply honestly that you don't have "
-                    "this information — for example: \"Sorry, I don't have information "
-                    "about this.\" Do NOT guess, do NOT answer from general knowledge, "
-                    "and do NOT invent names, facts or details. "
-                    "You MAY briefly offer to help with booking an appointment instead."
+                    "NONE of the company's materials answer this question. "
+                    "Decide which kind of question it is:\n"
+                    "1. If it is about the COMPANY (its services, staff, prices, "
+                    "hours, policies, locations), reply honestly that you don't "
+                    "have that information, then offer to book an appointment. "
+                    "NEVER invent a company fact.\n"
+                    "2. If it is UNRELATED to the company (general trivia, "
+                    "geography, science, news, coding), answer it in ONE short "
+                    "sentence from general knowledge, then say you are a booking "
+                    "assistant and offer to book. Do NOT say the information is "
+                    "not in your materials, and do NOT tell the user to search "
+                    "elsewhere — that reads as a brush-off."
                 )
         except Exception:
             logger.warning("RAG retrieval failed", exc_info=True)
@@ -703,7 +743,7 @@ async def call_model(
             try:
                 response = await asyncio.wait_for(
                     fallback_llm.ainvoke(messages),
-                    timeout=MAIN_LLM_HARD_TIMEOUT_SECONDS,
+                    timeout=FALLBACK_LLM_HARD_TIMEOUT_SECONDS,
                 )
                 logger.warning(
                     "main_llm_fallback_used",
@@ -723,7 +763,7 @@ async def call_model(
                     from app.schemas.agent import parse_field_definitions as _parse_fds
 
                     _fds = _parse_fds(field_definitions)
-                    _fallback_extracted = _fallback_extract(latest_user_message, missing, _fds, effective_timezone, 90)
+                    _fallback_extracted = _fallback_extract(latest_user_message, missing, _fds, effective_timezone, max_booking_days)
                     if _fallback_extracted:
                         # Validate & merge like the normal path
                         from app.engine.state_merge import apply_state_merge as _apply_merge
@@ -793,7 +833,7 @@ async def call_model(
                 from app.schemas.agent import parse_field_definitions as _parse_fds2
 
                 _fds2 = _parse_fds2(field_definitions)
-                _fallback_extracted2 = _fallback_extract2(latest_user_message, missing, _fds2, effective_timezone, 90)
+                _fallback_extracted2 = _fallback_extract2(latest_user_message, missing, _fds2, effective_timezone, max_booking_days)
                 if _fallback_extracted2:
                     from app.engine.state_merge import apply_state_merge as _apply_merge2
 
@@ -905,7 +945,6 @@ async def call_model(
             )
             from app.engine.knowledge_guards import (
                 find_ungrounded_names as _find_names,
-                knowledge_decline as _kb_decline,
             )
 
             _injected_chunks = locals().get("rag_chunks") or []
@@ -920,9 +959,10 @@ async def call_model(
                 _custom_prompts = org_config.get("custom_prompts") or {}
                 if isinstance(_custom_prompts, dict):
                     _persona_now = _custom_prompts.get("persona") or {}
-                    if isinstance(_persona_now, dict):
-                        if _persona_now.get("agent_name"):
-                            _safe_now.append(str(_persona_now.get("agent_name")))
+                    if _custom_prompts.get("agent_name"):
+                        _safe_now.append(str(_custom_prompts.get("agent_name")))
+                    if isinstance(_persona_now, dict) and _persona_now.get("agent_name"):
+                        _safe_now.append(str(_persona_now.get("agent_name")))
                 _bad_names = _find_names(
                     _visible_now,
                     _chunk_texts + [str(org_config.get("knowledge_context") or "")],
@@ -930,13 +970,32 @@ async def call_model(
                 )
                 if _bad_names:
                     logger.warning(
-                        "knowledge_name_gate_blocked",
+                        "knowledge_name_gate_masked",
                         extra={
                             "session_id": state.get("session_id"),
                             "names": _bad_names,
                         },
                     )
-                    data["response_text"] = _kb_decline()
+                    # Strip only the invented names and keep the rest of the
+                    # answer. The previous behaviour replaced the entire reply
+                    # with a canned "I don't have that information" apology,
+                    # which told the customer nothing and repeatedly hijacked
+                    # in-progress booking conversations.
+                    _current_text = str(data.get("response_text") or "")
+                    for _bad in _bad_names:
+                        _current_text = re.sub(
+                            r"\b" + re.escape(str(_bad)) + r"\b",
+                            "that person",
+                            _current_text,
+                            flags=re.IGNORECASE,
+                        )
+                    _current_text = re.sub(r"[ \t]{2,}", " ", _current_text).strip()
+                    if not _current_text:
+                        _current_text = (
+                            "That detail isn't something I can confirm. "
+                            "Could you tell me a little more about what you need?"
+                        )
+                    data["response_text"] = _current_text
                     response = AIMessage(content=json.dumps(data))
         except Exception:
             logger.warning("knowledge_name_gate_failed_open", exc_info=True)
@@ -963,6 +1022,7 @@ async def call_model(
             valid_entities, entity_errors, entity_metadata = DataValidator.validate_entities(
                 extracted_for_validation,
                 timezone=effective_timezone,
+                max_booking_days=max_booking_days,
                 include_metadata=True,
                 field_definitions=None,
             )

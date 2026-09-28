@@ -13,6 +13,60 @@ def _ordered_unique(values: Iterable[str]) -> List[str]:
     return ordered
 
 
+# A person's name is a short label, never a sentence. These bounds are
+# deliberately loose at the top end (long names are real) and only reject
+# values that are unambiguously not names. Four words covers "Mary Jane
+# Watson-Kelly" and "Dr Ananya Sharma" with room to spare; a real question to
+# the business ("I want to know about dotstark") is six words and is rejected.
+_NAME_MAX_CHARS = 80
+_NAME_MAX_WORDS = 4
+
+_IMPLAUSIBLE_NAME_REASON = (
+    "That looks like a question or a sentence rather than a name. "
+    "Could you tell me just your full name?"
+)
+
+
+def _looks_like_sentence(value: Any) -> bool:
+    """True when a free-text field value is really a sentence/question."""
+    text = str(value or "").strip()
+    if not text:
+        return True
+    if text.endswith("?"):
+        return True
+    if len(text) > _NAME_MAX_CHARS:
+        return True
+    return len([w for w in text.split() if w]) > _NAME_MAX_WORDS
+
+
+def reject_implausible_values(
+    extracted_fields: Dict[str, Any],
+    allowed_fields: Set[str],
+) -> Dict[str, str]:
+    """Move obviously non-values out of the extraction and into `invalid_fields`.
+
+    A model handed "I want to know about dotstark" while the active step was
+    "full name" returned that whole sentence as the customer's name. The merge
+    then treated the name as collected, dropped it from the missing queue, and
+    the customer was never asked again — a booking could be written with
+    `customer_name = "I want to know about dotstark"`. Asking the customer a
+    question is not a field value, so it is rejected here rather than merged.
+
+    Only free-text identity fields are checked. Dates, times, emails and phone
+    numbers have their own validators, and rejecting them here would duplicate
+    (and fight) that logic.
+    """
+    rejected: Dict[str, str] = {}
+    for key, value in (extracted_fields or {}).items():
+        if key not in allowed_fields:
+            continue
+        if str(key).strip().lower() != "name":
+            continue
+        if _looks_like_sentence(value):
+            rejected[key] = _IMPLAUSIBLE_NAME_REASON
+    return rejected
+
+
 def apply_state_merge(
     *,
     current_fields: Dict[str, Any],
@@ -32,9 +86,15 @@ def apply_state_merge(
 
     merged = dict(current_fields)
     deltas: Dict[str, Any] = {}
-    invalid = invalid_fields or {}
     conflict_map = conflicts or {}
     explicit_unknown = unknown_fields or {}
+
+    # Safety net: a question is not a field value. Runs before the unknown-field
+    # and invalid-field passes so a rejected capture is reported the same way as
+    # any other invalid value (kept out of `merged`, re-asked in follow-up).
+    implied_invalid = reject_implausible_values(extracted_fields, allowed_fields)
+    invalid: Dict[str, str] = dict(implied_invalid)
+    invalid.update(invalid_fields or {})
 
     unknown_from_extract = {
         key: value for key, value in extracted_fields.items() if key not in allowed_fields

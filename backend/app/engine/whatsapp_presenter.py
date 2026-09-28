@@ -47,6 +47,18 @@ _TONE_GUIDANCE = {
 
 _FALLBACK_TONE = "friendly"
 
+# Used when there is no grounded material to answer from. The old canned
+# content-free apology offered no way forward and was the message customers
+# kept receiving in the middle of a booking. This one is honest about the
+# limit and hands the customer a concrete next step.
+_NO_KNOWLEDGE_REPLY = (
+    "I'd rather give you an accurate answer than guess at one.\n\n"
+    "Here's what I can do for you right now:\n"
+    "• Book a new appointment\n"
+    "• Check, reschedule or cancel an existing one\n\n"
+    "Which would you like to do?"
+)
+
 
 def _tone_line(tone: Optional[str]) -> str:
     key = (tone or _FALLBACK_TONE).strip().lower()
@@ -425,8 +437,11 @@ class WhatsAppPresenter:
             knowledge = ""
 
         if not chunks:
-            # Honest fallback without LLM if possible
-            msg = "Sorry, I don't have that information available right now. Would you like to book an appointment or contact the organization for details?"
+            # Honest fallback without LLM if possible. This must offer the
+            # customer something they can actually do next: the previous
+            # content-free apology answered nothing and was the message
+            # customers kept receiving mid-booking.
+            msg = _NO_KNOWLEDGE_REPLY
             # Still allow tone-aware LLM rewrite if available, but with strict no-hallucination system
             if not llm or not settings.LLM_API_KEY:
                 return StructuredWhatsAppResponse(type="text", body=msg)
@@ -436,7 +451,9 @@ class WhatsAppPresenter:
             "Rules:\n"
             "- Answer using ONLY the retrieved organization knowledge provided (PDFs/website) and live org data.\n"
             "- Do NOT invent doctors, departments, services, prices, hours, availability, policies, or contact info.\n"
-            "- If retrieved knowledge does not support the answer, say you don't have that information and offer booking/contact.\n"
+            "- If the question is about the organisation (services, doctors, prices, hours, policies, locations) and the retrieved knowledge does not support it, say you don't have that information and offer booking/contact.\n"
+            "- If the question is completely unrelated (general trivia, news, geography, coding questions), answer it in ONE short sentence from general knowledge, then move on: do NOT say it's not in the knowledgebase and do NOT tell the user to search elsewhere. Only frame something as organisation information when the knowledgebase actually supports it.\n"
+            "- Never invent organisation facts: no made-up services, staff, prices, hours or policies.\n"
             "- Respect the requested tone for wording/emoji/length, but not facts.\n"
             "- WhatsApp-friendly, concise (2-6 sentences).\n"
         )
@@ -455,9 +472,6 @@ class WhatsAppPresenter:
             if not raw:
                 raise RuntimeError("empty")
             body = raw.strip()
-            # Basic hallucination guard: if no chunks, ensure fallback phrase present
-            if not chunks and "don't have" not in body.lower() and "not have" not in body.lower():
-                body = "Sorry, I don't have that information available right now. " + body
             if len(body) > 1500:
                 body = body[:1497] + "..."
             logger.info(
@@ -480,5 +494,5 @@ class WhatsAppPresenter:
                 fallback = "\n\n".join((c.get('content') or c.get('snippet') or "")[:400] for c in chunks[:2])
                 return StructuredWhatsAppResponse(type="text", body=fallback[:1200] or "Here's what I found — let me know if you'd like to book.")
             return StructuredWhatsAppResponse(
-                type="text", body="Sorry, I don't have that information available right now. Would you like to book an appointment?"
+                type="text", body=_NO_KNOWLEDGE_REPLY
             )

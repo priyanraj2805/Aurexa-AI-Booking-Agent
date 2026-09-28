@@ -572,6 +572,8 @@ async def lookup_schedule_business_hours_answer(
 ) -> Optional[dict[str, Any]]:
     if not is_schedule_business_hours_query(user_message):
         return None
+    if in_booking_flow:
+        return None
     if db is None or not hasattr(db, "execute"):
         return None
 

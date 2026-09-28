@@ -127,6 +127,10 @@ def is_duplicate(message_id: str) -> bool:
     return False
 
 
+def release_message(message_id: str) -> None:
+    _processed_message_ids.pop(message_id, None)
+
+
 def _prune_sender_hits(hits: list, cutoff: float) -> None:
     """Drop timestamps outside the window, in place (lists stay tiny)."""
     while hits and hits[0] <= cutoff:
@@ -175,4 +179,29 @@ def prune_rate_limit_state(*, now: Optional[float] = None) -> int:
 
 def get_session_lock(session_id: str) -> asyncio.Lock:
     """Get the lock for a specific session."""
-    return _get_session_lock(session_id)
+    return _get_session_lock(session_lock_key(session_id))
+
+
+# Transport prefixes that used to be part of the lock key. The same human can
+# reach us over both QR/Baileys and Meta Cloud, and those handlers used
+# different key shapes (`<session_id>` vs `cloud:<session_id>`), so one
+# conversation could be processed concurrently by two locks. Locking is
+# per-conversation, so the key must be derived canonically in ONE place.
+_TRANSPORT_LOCK_PREFIXES = ("qr:", "cloud:", "meta:", "whatsapp_cloud:")
+
+
+def session_lock_key(session_id: str) -> str:
+    """Canonical lock key for a conversation, independent of transport.
+
+    Both inbound transports must pass through here so a session can never end
+    up with two independent locks.
+    """
+    key = str(session_id or "").strip()
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _TRANSPORT_LOCK_PREFIXES:
+            if key.startswith(prefix):
+                key = key[len(prefix):]
+                changed = True
+    return key or "__unknown_session__"

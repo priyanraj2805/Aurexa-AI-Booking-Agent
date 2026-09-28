@@ -79,6 +79,17 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
       if (p && typeof p.catch === 'function') p.catch(() => {});
     } catch (_) { /* never break socket handling */ }
   };
+  const notifyDelivery = async (id, event) => {
+    try {
+      await notify(id, event);
+    } catch (err) {
+      log.warn(`delivery status notify failed: ${err && err.message ? err.message : 'unknown'}`);
+    }
+  };
+  const providerMessageId = (value) => {
+    if (!value || typeof value !== 'object') return undefined;
+    return value.key && value.key.id ? String(value.key.id) : undefined;
+  };
   // P7 inbound pipeline (wired by index.js; tests inject fakes).
   const deliver = deliverInbound || (async () => null);
   // P8 outbound: route through the per-connection outbox when available so
@@ -252,12 +263,30 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
         log.warn(`outside 24h window for ${envelope.chatJid}, free-form reply may need template (24h)`);
       }
       try {
-        await replyVia(id, envelope.chatJid, replyDict, `qr-reply:${envelope.messageId}`);
+        const sendResult = await replyVia(id, envelope.chatJid, replyDict, `qr-reply:${envelope.messageId}`);
         log.info(`reply handed to outbox for delivery`);
+        if (result && result.session_id) {
+          await notifyDelivery(id, {
+            type: 'message_sent',
+            sessionId: result.session_id,
+            fromNumber: envelope.from,
+            chatJid: envelope.chatJid,
+            providerMessageId: providerMessageId(sendResult),
+          });
+        }
         await stopTyping();
         return { delivered: true, replied: true };
       } catch (err) {
         log.error(`reply send failed: ${err.message}`);
+        if (result && result.session_id) {
+          await notifyDelivery(id, {
+            type: 'message_failed',
+            sessionId: result.session_id,
+            fromNumber: envelope.from,
+            chatJid: envelope.chatJid,
+            error: err && err.message ? err.message : 'send failed',
+          });
+        }
         noteTransportFailure(id, err);
         await stopTyping();
         return { delivered: true, replied: false };

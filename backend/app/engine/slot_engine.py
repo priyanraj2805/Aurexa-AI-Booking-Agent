@@ -49,6 +49,8 @@ def _slots_for_range(
     slots: List[time] = []
     current = datetime.combine(date.today(), open_t)
     close_dt = datetime.combine(date.today(), close_t)
+    if close_dt <= current:
+        close_dt += timedelta(days=1)
     delta = timedelta(minutes=duration_minutes)
 
     while current + delta <= close_dt:
@@ -132,6 +134,8 @@ async def compute_slot_inventory(
     except Exception:
         business_zone = ZoneInfo("UTC")
 
+    if open_t is None or close_t is None:
+        return [], "no_slots_in_window"
     candidates = _slots_for_range(open_t, close_t, duration, break_start, break_end)
     if not candidates:
         return [], "no_slots_in_window"
@@ -309,6 +313,7 @@ async def create_timeslot_lock(
     requested_time: time,
     duration_minutes: int,
     lock_minutes: int = 5,
+    allow_existing_lock_id: Optional[str] = None,
 ) -> Optional[TimeSlot]:
     """
     Creates (or re-uses expired lock on) a TimeSlot row for the given slot,
@@ -356,14 +361,22 @@ async def create_timeslot_lock(
             .with_for_update(nowait=True)
         )
         existing = existing_result.scalars().first()
+        if schedule is None and existing is None:
+            return None
 
         if existing:
             if existing.is_booked:
                 logger.warning(f"Slot {start_dt} already booked for org {org_id}")
                 return None
-            if existing.locked_until and existing.locked_until > now:
-                logger.warning(f"Slot {start_dt} actively locked for org {org_id}")
-                return None
+            if existing.locked_until:
+                locked_until = existing.locked_until
+                if locked_until.tzinfo is None:
+                    locked_until = locked_until.replace(tzinfo=timezone.utc)
+                if locked_until > now:
+                    if allow_existing_lock_id and str(existing.id) == str(allow_existing_lock_id):
+                        return existing
+                    logger.warning(f"Slot {start_dt} actively locked for org {org_id}")
+                    return None
             # Re-use expired lock row
             existing.locked_until = lock_until
             await db.commit()

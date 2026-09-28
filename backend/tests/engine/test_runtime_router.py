@@ -149,7 +149,7 @@ async def test_sunset_gate_blocks_automatic_fallback_after_phase_end(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_whatsapp_routing_remains_legacy_in_phase_two(monkeypatch):
+async def test_whatsapp_routing_uses_active_graph(monkeypatch):
     from app.engine import runtime_router
 
     calls = {"graph": 0, "legacy": 0}
@@ -167,5 +167,5 @@ async def test_whatsapp_routing_remains_legacy_in_phase_two(monkeypatch):
 
     result = await runtime_router.route_whatsapp_message(**_build_context())
 
-    assert result.message == "legacy"
-    assert calls == {"graph": 0, "legacy": 1}
+    assert result.message == "graph"
+    assert calls == {"graph": 1, "legacy": 0}

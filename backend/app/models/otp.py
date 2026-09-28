@@ -37,6 +37,6 @@ class AuthOTPRecord(Base):
     resend_count = Column(Integer, default=0, nullable=False)
     last_sent_at = Column(DateTime(timezone=True), nullable=True)
     consumed_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     __table_args__ = (UniqueConstraint("email", "purpose", name="uq_auth_otp_email_purpose"),)

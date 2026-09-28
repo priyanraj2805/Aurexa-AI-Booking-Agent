@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import or_
 from sqlalchemy.future import select
 
 from app.models.booking_directive import BookingDirective, DirectiveStatus, DirectiveType
@@ -29,6 +30,18 @@ async def create_directive(
     booking_id=None,
 ) -> BookingDirective:
     now = datetime.now(timezone.utc)
+    old_rows = (
+        await db.execute(
+            select(BookingDirective).where(
+                BookingDirective.session_id == session_id,
+                BookingDirective.status == DirectiveStatus.PENDING,
+            )
+        )
+    ).scalars().all()
+    for old in old_rows:
+        old.status = DirectiveStatus.EXPIRED
+    if old_rows:
+        await db.flush()
     expires_at = now + timedelta(seconds=expires_in_seconds) if expires_in_seconds else None
     row = BookingDirective(
         id=uuid.uuid4(),
@@ -50,10 +63,55 @@ async def create_directive(
     return row
 
 
+async def _clear_session_pointer(db: AsyncSession, directive: BookingDirective) -> None:
+    from app.models.session import ChatSession
+    from sqlalchemy.orm.attributes import flag_modified
+
+    result = await db.execute(
+        select(ChatSession).where(ChatSession.id == directive.session_id)
+    )
+    session = result.scalars().first()
+    if session is None:
+        return
+    state = dict(session.state_data) if isinstance(session.state_data, dict) else {}
+    if str(state.get("active_directive_id") or "") == str(directive.id):
+        state.pop("active_directive_id", None)
+        session.state_data = state
+        flag_modified(session, "state_data")
+
+
+_STEP_ACTION_DIRECTIVES = {
+    "SELECT_DATE": {"REQUIRE_DATE_PICKER"},
+    "SELECT_SLOT": {"REQUIRE_TIME_SLOT_GRID", "REQUIRE_SELECT"},
+    "SELECT_TIME": {"REQUIRE_TIME_SLOT_GRID", "REQUIRE_SELECT"},
+    "CONFIRM_BOOKING": {"REQUEST_CONFIRMATION", "PROCESS_BOOKING", "BOOKING_CONFIRMED_CARD"},
+}
+
+
+def directive_frame_matches_action(directive_type, action_directive) -> bool:
+    """True only when the pending step's frame matches what the engine just produced.
+
+    The WhatsApp transports wrap the engine reply in the pending directive's
+    title/options. Without this gate, a stale step (e.g. CONFIRM_BOOKING)
+    frames unrelated replies — edit prompts, delete lookups — with
+    "Please confirm your booking … Reply CONFIRM", misleading the customer
+    into typing CONFIRM in the wrong place.
+    """
+    allowed = _STEP_ACTION_DIRECTIVES.get(str(directive_type or ""))
+    if not allowed:
+        return False
+    return str(action_directive or "") in allowed
+
+
 async def get_active(db: AsyncSession, session_id, type: Optional[str] = None):
+    now = datetime.now(timezone.utc)
     stmt = select(BookingDirective).where(
         BookingDirective.session_id == session_id,
         BookingDirective.status == DirectiveStatus.PENDING,
+        or_(
+            BookingDirective.expires_at.is_(None),
+            BookingDirective.expires_at > now,
+        ),
     )
     if type:
         stmt = stmt.where(BookingDirective.type == type)
@@ -83,6 +141,7 @@ async def verify(db: AsyncSession, directive_id, customer_id: str, option_id: st
         return False, f"not_pending_{row.status.lower()}", row
     if row.expires_at and row.expires_at < datetime.now(timezone.utc):
         row.status = DirectiveStatus.EXPIRED
+        await _clear_session_pointer(db, row)
         await db.flush()
         return False, "expired", row
     ids = {str(o.get("id")) for o in (row.options or [])}
@@ -104,6 +163,7 @@ async def complete(db: AsyncSession, directive_id, option_id, booking_id=None) -
     row.completed_at = datetime.now(timezone.utc)
     if booking_id:
         row.booking_id = booking_id
+    await _clear_session_pointer(db, row)
     await db.flush()
     return row
 
@@ -195,6 +255,7 @@ async def generate_for_next_step(db, org_id, session_id, customer_id, missing_fi
             _max = 30
             _slot_mins = None
             _business_hours_summary = ""
+            _cfg2 = None
             try:
                 from sqlalchemy.future import select as _sel2
                 from app.models.config import OrgConfig as _OC2
@@ -229,7 +290,40 @@ async def generate_for_next_step(db, org_id, session_id, customer_id, missing_fi
                     pass
             except Exception:
                 pass
-            _gen_labels = _upcoming_date_options(_tz, _max)
+            compute_slot_inventory = None
+            try:
+                from zoneinfo import ZoneInfo
+                from app.engine.slot_engine import compute_slot_inventory
+
+                _zone = ZoneInfo(_tz)
+            except Exception:
+                from datetime import timezone as _tz_fallback
+
+                _zone = _tz_fallback.utc
+            _today = datetime.now(_zone).date()
+            _allow_same_day = bool(getattr(_cfg2, "allow_same_day_booking", False))
+            _gen_labels = []
+            for _offset in range(int(_max or 30) + 1):
+                if compute_slot_inventory is None:
+                    break
+                if _offset == 0 and not _allow_same_day:
+                    continue
+                _day = _today + timedelta(days=_offset)
+                try:
+                    _inventory, _status = await compute_slot_inventory(
+                        db,
+                        uuid.UUID(str(org_id)),
+                        _day,
+                        org_config=_cfg2,
+                    )
+                except Exception:
+                    continue
+                if _status == "ok" and any(
+                    bool(item.get("available")) for item in _inventory
+                ):
+                    _gen_labels.append(_day.strftime("%a, %b %d"))
+                if len(_gen_labels) >= 7:
+                    break
             if _gen_labels:
                 raw_opts = _gen_labels
                 meta["options"] = list(raw_opts)

@@ -90,8 +90,18 @@ def format_action_for_whatsapp(action_payload) -> dict:
     """
     directive = action_payload.widget_directive or "TEXT_INPUT"
     message = action_payload.message or ""
-    # Strip markdown bold (WhatsApp uses *bold* natively)
-    message = message.replace("**", "*")
+    # Central outbound formatting. Every reply — graph, legacy, cancel flow,
+    # decline flow, directive acknowledgements — is composed in a different
+    # place with its own layout, so formatting is applied once here instead of
+    # being re-implemented per call site. Handles WhatsApp single-asterisk
+    # bold, paragraph spacing, bullet normalisation, and strips internal
+    # template headers (e.g. "BUSINESS HOURS") that leaked to customers.
+    try:
+        from app.core.wa_text import format_outbound
+
+        message = format_outbound(message)
+    except Exception:
+        message = message.replace("**", "*")
     # Human-texting style guarantee: em/en dashes read as AI-generated.
     # Spaced em dashes become commas, bare ones get spaces trimmed into
     # commas, and en dashes (often ranges) become plain hyphens.
@@ -108,7 +118,14 @@ def format_action_for_whatsapp(action_payload) -> dict:
         correction = str(field_meta.get("validation_error") or "").strip()
         if correction and correction.replace("**", "*").lower() not in message.lower():
             message = f"{correction}\n\n{message}" if message else correction
-            message = message.replace("**", "*")
+            # Re-format: the correction is prepended after the first pass, so
+            # it must go through the same WhatsApp formatting rules.
+            try:
+                from app.core.wa_text import format_outbound
+
+                message = format_outbound(message)
+            except Exception:
+                message = message.replace("**", "*")
             message = message.replace(" — ", ", ").replace("—", ",").replace("–", "-")
     except Exception:
         pass

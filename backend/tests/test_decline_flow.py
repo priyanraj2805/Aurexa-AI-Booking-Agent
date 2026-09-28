@@ -139,8 +139,10 @@ async def test_start_decline_sets_flag_and_farewell(db_session: AsyncSession):
     action = await flow.start_decline(
         db_session, SimpleNamespace(name="Acme"), state
     )
-    assert "No problem" in action.message
-    assert "Acme" in action.message
+    # Formal decline — no service examples, trained via prompts.py 9c
+    assert "completely okay" in action.message.lower()
+    assert "feel free to reach out" in action.message.lower()
+    # Business name no longer injected (formal, no examples)
     assert flow.is_declined(state) is True
 
 
@@ -157,7 +159,7 @@ async def test_reengage_clears_on_values(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_reengage_ignores_chitchat(db_session: AsyncSession):
+async def test_reengage_ignores_vague_text(db_session: AsyncSession):
     row = await _row(db_session)
     state = _state(
         session_id=str(row.id),

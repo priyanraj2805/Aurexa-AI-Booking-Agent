@@ -100,7 +100,11 @@ def test_guard_final_text_pass_through_and_block():
     )
     assert blocked2 is True
     assert ents2 == ["+91 11111 22222"]
-    assert "don't have that information" in safe2
+    # The invented number is masked in place. The reply is no longer discarded
+    # in favour of a canned "I don't have that information" apology.
+    assert "+91 11111 22222" not in safe2
+    assert "[hidden]" in safe2
+    assert "don't have that information" not in safe2.lower()
 
 
 def test_guard_final_text_payment_skips_price():

@@ -20,6 +20,20 @@ class BookingAgentState(TypedDict):
     merge_diagnostics: Dict[str, Any]
     current_intent: str
     otp_verified: bool
+    phone_otp_verified: bool
     otp_required: bool
+    otp_pending: bool
     otp_event_key: str
     otp_code: str
+    validation_errors: Dict[str, str]
+    validated_field_metadata: Dict[str, Dict[str, str]]
+    knowledge_answer: bool
+    context_window: List[Dict[str, str]]
+    context_window_size: int
+    context_compacted: bool
+    date_reset_required: bool
+    fallback_reason: str
+    fallback_next_step: str
+    schedule_answer: Dict[str, Any]
+    slot_unavailable: bool
+    refreshed_slots: List[str]

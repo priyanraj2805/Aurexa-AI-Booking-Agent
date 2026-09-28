@@ -17,7 +17,7 @@ from app.schemas.email_delivery import EmailDeliveryCreate, EmailChannel
 from app.schemas.monitoring import SystemAlertCreate, AlertComponent, AlertSeverity
 from app.core.email_delivery_service import _classify_email_failure, _is_retryable_failure
 from app.core.email_delivery_service import send_email_with_failover
-from app.core.mail import send_confirmation_emails
+from app.core.mail import send_cancellation_email, send_confirmation_emails
 
 
 def _to_aware(dt: datetime) -> datetime:
@@ -402,4 +402,36 @@ async def test_send_confirmation_emails_dedupes_by_booking_and_role(monkeypatch)
     assert send_mock.await_count == 2
     channels = [call.kwargs["channel"] for call in send_mock.await_args_list]
     assert channels == ["booking_confirmation", "booking_confirmation"]
+
+
+@pytest.mark.asyncio
+async def test_send_cancellation_email_dedupes_by_booking(monkeypatch):
+    send_mock = AsyncMock()
+    monkeypatch.setattr("app.core.mail.send_email_with_failover", send_mock)
+
+    booking_details = {
+        "booking_id": "booking-cancel-123",
+        "name": "Cancelled User",
+        "email": "cancelled@example.com",
+        "date": "2030-01-10",
+        "time": "10:00",
+    }
+
+    await send_cancellation_email(
+        "cancelled@example.com",
+        "Cancelled User",
+        booking_details,
+        org_id=uuid.uuid4(),
+    )
+    await send_cancellation_email(
+        "cancelled@example.com",
+        "Cancelled User",
+        booking_details,
+        org_id=uuid.uuid4(),
+    )
+
+    assert send_mock.await_count == 1
+    assert send_mock.await_args.kwargs["payload"]["idempotency_key"] == (
+        "booking-cancel-123:customer:booking_cancellation"
+    )
 

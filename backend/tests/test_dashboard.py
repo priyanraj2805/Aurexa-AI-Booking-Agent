@@ -739,13 +739,18 @@ class TestRecentBookings:
 
 
 class TestConversations:
+    @staticmethod
+    def _rows(response):
+        payload = response.json()
+        return payload["items"] if isinstance(payload, dict) else payload
+
     async def test_conversations_empty(self, registered_user, client: AsyncClient):
         resp = await client.get(
             "/api/v1/dashboard/conversations",
             headers=registered_user["headers"],
         )
         assert resp.status_code == 200
-        assert isinstance(resp.json(), list)
+        assert isinstance(self._rows(resp), list)
 
     async def test_conversations_limit(self, registered_user, client: AsyncClient):
         resp = await client.get(
@@ -753,7 +758,7 @@ class TestConversations:
             headers=registered_user["headers"],
         )
         assert resp.status_code == 200
-        assert len(resp.json()) <= 5
+        assert len(self._rows(resp)) <= 5
 
     async def test_conversations_contract_keys(
         self, registered_user, client: AsyncClient
@@ -763,7 +768,7 @@ class TestConversations:
             headers=registered_user["headers"],
         )
         assert resp.status_code == 200
-        rows = resp.json()
+        rows = self._rows(resp)
         if rows:
             row = rows[0]
             assert "id" in row
@@ -821,7 +826,7 @@ class TestConversations:
 
         resp = await client.get("/api/v1/dashboard/conversations", headers=headers)
         assert resp.status_code == 200
-        ids = {row["id"] for row in resp.json()}
+        ids = {row["id"] for row in self._rows(resp)}
         assert str(active.id) in ids
         assert str(archived.id) not in ids
 
@@ -865,7 +870,7 @@ class TestConversations:
             "/api/v1/dashboard/conversations?include_archived=true", headers=headers
         )
         assert resp.status_code == 200
-        ids = {row["id"] for row in resp.json()}
+        ids = {row["id"] for row in self._rows(resp)}
         assert str(archived.id) in ids
 
     async def test_conversations_archived_filter_preserves_org_isolation(
@@ -912,7 +917,7 @@ class TestConversations:
             "/api/v1/dashboard/conversations?include_archived=true", headers=headers
         )
         assert resp.status_code == 200
-        ids = {row["id"] for row in resp.json()}
+        ids = {row["id"] for row in self._rows(resp)}
         assert str(session_b.id) not in ids
 
     async def test_conversation_messages_returns_transcript_rows(
@@ -1016,7 +1021,7 @@ class TestAgentConfig:
         resp = await client.put(
             "/api/v1/dashboard/agent-config",
             json={
-                "required_fields": ["name", "email", "date", "time"],
+                "required_fields": ["name", "email", "phone", "date", "time"],
                 "timezone": "America/New_York",
                 "ui_brand_color": "#FF0000",
             },
@@ -1025,7 +1030,7 @@ class TestAgentConfig:
         assert resp.status_code == 200
         body = resp.json()
         assert body["timezone"] == "America/New_York"
-        assert "phone" not in body["required_fields"]
+        assert "phone" in body["required_fields"]
         if body["api_key"]:
             assert "..." in body["api_key"]
 

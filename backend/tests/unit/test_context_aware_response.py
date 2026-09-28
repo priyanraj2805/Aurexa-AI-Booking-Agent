@@ -21,8 +21,8 @@ class TestBuildContextAwareResponse:
             errors={},
             llm_generated_msg="whatever",
         )
-        assert "John" in msg
-        assert "email" in msg.lower()
+        assert "verification code" not in msg.lower()
+        assert msg == ""
 
     def test_requires_select_with_name(self):
         msg = _build_context_aware_response(

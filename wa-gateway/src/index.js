@@ -100,7 +100,15 @@ async function deliverEventToBackend(connectionId, event) {
     const res = await fetch(`${BACKEND_BASE_URL}/api/v1/internal/whatsapp-qr/events`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Gateway-Key': key },
-      body: JSON.stringify({ connectionId, event: event && event.type }),
+      body: JSON.stringify({
+        connectionId,
+        event: event && event.type,
+        sessionId: event && event.sessionId,
+        fromNumber: event && event.fromNumber,
+        chatJid: event && event.chatJid,
+        providerMessageId: event && event.providerMessageId,
+        error: event && event.error,
+      }),
       signal: ctrl.signal,
     });
     if (!res.ok) throw new Error(`backend events failed status=${res.status}`);

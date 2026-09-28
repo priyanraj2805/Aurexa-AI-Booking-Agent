@@ -198,10 +198,36 @@ CONFIRM_KEYWORDS = [
 RESEND_KEYWORDS = [
     "resend",
     "re-send",
+    "recend",
+    "recend otp",
+    "resent",
+    "resent otp",
     "send again",
     "new code",
     "didn't get",
     "didnt get",
+    "didn't receive",
+    "didnt receive",
+    "didn't received",
+    "didnt received",
+    "did not receive",
+    "did not received",
+    "haven't received",
+    "havent received",
+    "hasn't received",
+    "hasnt received",
+    "not received",
+    "not got",
+    "never received",
+    "never got",
+    "no otp",
+    "no code",
+    "waiting for otp",
+    "waiting for code",
+    "where is otp",
+    "where is code",
+    "otp not received",
+    "code not received",
 ]
 
 EDIT_DATA_KEYWORDS = [
@@ -263,7 +289,15 @@ def _build_phone_otp_context_key(
 ) -> str:
     if not isinstance(chat_session.collected_data, dict):
         return f"otp_phone:{chat_session.session_id}:::"
-    phone = str(chat_session.collected_data.get("phone") or "").strip()
+    raw_phone = str(chat_session.collected_data.get("phone") or "").strip()
+    # Normalize to E.164-like digits to keep "63500 63338" == "6350063338" == "+916350063338"
+    try:
+        import phonenumbers
+
+        pn = phonenumbers.parse(raw_phone, "IN" if len(raw_phone.replace(" ", "").replace("-", "").lstrip("+")) <= 11 else None)
+        phone = phonenumbers.format_number(pn, phonenumbers.PhoneNumberFormat.E164) if phonenumbers.is_possible_number(pn) else re.sub(r"\D", "", raw_phone)
+    except Exception:
+        phone = re.sub(r"\D", "", raw_phone)
     date_value = _normalize_otp_date_component(chat_session.collected_data.get("date"))
     time_value = _normalize_otp_time_component(chat_session.collected_data.get("time"))
     return f"otp_phone:{chat_session.session_id}:{phone}:{date_value}:{time_value}"
@@ -733,7 +767,7 @@ def _format_time_prompt_for_whatsapp(
         except Exception:
             pass
     if not hours_text:
-        hours_text = "9:00 AM to 5:00 PM"
+        return "We don't have published hours for that day yet. Please choose another date or contact us."
     dur = _format_slot_duration_human(slot_minutes)
     dur_part = f" and your booking will be of {dur}" if dur else ""
     tz_note = f" (All times in {timezone_name})." if (timezone_name or "").strip() else ""
@@ -791,7 +825,7 @@ def _build_llm_recovery_message(
     field_meta: Optional[Dict[str, Any]],
 ) -> str:
     lead = (
-        "I'm having a temporary issue understanding full messages, but we can continue."
+        "I didn't quite catch that one, but no problem — we can keep going."
     )
 
     if directive == "REQUIRE_TIME_SLOT_GRID":
@@ -817,6 +851,44 @@ def _build_llm_recovery_message(
             return f"{lead} Please share your {str(label).strip().lower()}."
         return f"{lead} Please share the required detail."
     return f"{lead} Please repeat your last answer once more."
+
+
+def _format_confirmed_when(collected_data) -> str:
+    try:
+        from dateutil.parser import parse as date_parse
+
+        data = collected_data if isinstance(collected_data, dict) else {}
+        date_raw = str(data.get("date") or "").strip()
+        time_raw = str(data.get("time") or "").strip()
+        if not date_raw or not time_raw:
+            return ""
+        parsed_date = date_parse(date_raw).date()
+        when_date = f"{parsed_date.strftime('%B')} {parsed_date.day}"
+        parsed_time = date_parse(time_raw).time()
+        hour = parsed_time.hour % 12 or 12
+        suffix = "AM" if parsed_time.hour < 12 else "PM"
+        if parsed_time.minute:
+            when_time = f"{hour}:{parsed_time.minute:02d} {suffix}"
+        else:
+            when_time = f"{hour} {suffix}"
+        return f"{when_date} at {when_time}"
+    except Exception:
+        return ""
+
+
+def build_finished_session_reply(chat_session, status: str) -> str:
+    status = str(status or "").upper()
+    if status == "CONFIRMED":
+        data = getattr(chat_session, "collected_data", None)
+        when = _format_confirmed_when(data if isinstance(data, dict) else {})
+        if when:
+            return f"Your booking is already confirmed for {when}. Let us know if you need anything else."
+        return "Your booking is confirmed! You can say 'cancel my booking' or 'reschedule' anytime."
+    if status == "CANCELLED":
+        return "Your previous booking was cancelled. Just say 'I want to book' to start a new one!"
+    if status == "EXPIRED":
+        return "This session expired. Say 'I want to book' to start a new booking!"
+    return "Is there anything else I can help you with?"
 
 
 def _build_context_aware_response(
@@ -884,9 +956,7 @@ def _build_context_aware_response(
         return "Please choose your preferred date for the appointment."
 
     if directive == "REQUIRE_EMAIL_INPUT":
-        if user_name:
-            return f"Thank you, {user_name.split()[0]}. Please share your email address so I can send you a verification code."
-        return "Please share your email address so I can send you a verification code."
+        return ""
 
     if directive == "REQUIRE_PHONE_INPUT":
         if user_name:
@@ -922,6 +992,8 @@ def _build_context_aware_response(
     if directive == "TEXT_INPUT":
         if field_label:
             request_phrase = _label_to_request(field_label, "share")
+            if request_phrase == "your full name":
+                return ""
             if user_name:
                 return (
                     f"Thank you, {user_name.split()[0]}. Please share {request_phrase}."
@@ -931,6 +1003,8 @@ def _build_context_aware_response(
             request_phrase = _label_to_request(
                 field_name.replace("_", " ").title(), "share"
             )
+            if request_phrase == "your full name":
+                return ""
             if user_name:
                 return (
                     f"Thank you, {user_name.split()[0]}. Please share {request_phrase}."
@@ -960,6 +1034,8 @@ async def process_message(
     chat_session: ChatSessionState,
     message_text: str,
     background_tasks: Optional[BackgroundTasks] = None,
+    transcript_user_text: Optional[str] = None,
+    inbound_message_id: Optional[str] = None,
 ) -> ActionPayload:
     """
     Process a single user message through the booking pipeline.
@@ -967,12 +1043,19 @@ async def process_message(
 
     This function is CHANNEL-AGNOSTIC — it doesn't know or care whether
     the message came from the web widget, WhatsApp, or SMS.
+
+    transcript_user_text: original user text for transcript rows when callers
+    rewrote message_text (e.g. directive-tap option values). Logic still uses
+    message_text. inbound_message_id is accepted for forward compatibility.
     """
     # Empty input carries no intent: stay silent (no reply, no transcript,
     # no state change). Inbounds translate SILENT_NO_REPLY to reply=None.
     if not str(message_text or "").strip():
         return ActionPayload(message="", widget_directive="SILENT_NO_REPLY",
                              field_meta={"silent": True})
+    _transcript_user_text = (
+        transcript_user_text if transcript_user_text is not None else message_text
+    )
 
     # Recover deterministic stuck state: OTP verified but still marked CONFIRMING.
     if (
@@ -993,13 +1076,14 @@ async def process_message(
             message=msg, widget_directive="TEXT_INPUT", is_terminal=False
         )
         await _save_transcript(
-            db, chat_session.session_id, message_text, msg, "TEXT_INPUT"
+            db, chat_session.session_id, _transcript_user_text, msg, "TEXT_INPUT"
         )
         return action
 
     if chat_session.session_status in ("CONFIRMED", "CANCELLED", "EXPIRED"):
         return await _handle_post_booking(
-            db, org, org_config, chat_session, message_text, background_tasks
+            db, org, org_config, chat_session, message_text, background_tasks,
+            transcript_user_text=_transcript_user_text,
         )
 
     # ── Load config values ────────────────────────────────────
@@ -1118,7 +1202,7 @@ async def process_message(
         # Persist and return directly — no LLM needed, and booking progress is preserved
         await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
         _action = ActionPayload(message=_combined_msg, widget_directive=_dir_for_hours, field_meta=_meta_for_hours)
-        await _save_transcript(db, chat_session.session_id, message_text, _combined_msg, _dir_for_hours)
+        await _save_transcript(db, chat_session.session_id, _transcript_user_text, _combined_msg, _dir_for_hours)
         return _action
     # Available-dates inquiry mid-booking ("which dates can I book?"): answer
     # from the live slot inventory, then re-ask the current field so the flow
@@ -1158,7 +1242,7 @@ async def process_message(
         )
         await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
         _dates_action = ActionPayload(message=_combined_dates_msg, widget_directive=_dir_for_dates, field_meta=_meta_for_dates)
-        await _save_transcript(db, chat_session.session_id, message_text, _combined_dates_msg, _dir_for_dates)
+        await _save_transcript(db, chat_session.session_id, _transcript_user_text, _combined_dates_msg, _dir_for_dates)
         return _dates_action
     # Field refusal pre-LLM: "no" / "don't want to share X" aimed at the
     # current missing field gets a soft re-ask of the SAME field — the LLM
@@ -1166,7 +1250,7 @@ async def process_message(
     from app.engine import decline_flow as _decline_flow_pre
 
     _refusal_action = await _decline_flow_pre.maybe_handle_field_refusal(
-        db, org, chat_session, message_text
+        db, org, chat_session, message_text, inbound_message_id=inbound_message_id
     )
     if _refusal_action is not None:
         return _refusal_action
@@ -1308,7 +1392,9 @@ async def process_message(
     from app.engine import decline_flow as _decline_flow_gate
 
     if _decline_flow_gate.is_no_booking_request(message_text):
-        return await _decline_flow_gate.start_decline(db, org, chat_session, message_text)
+        return await _decline_flow_gate.start_decline(
+            db, org, chat_session, message_text, inbound_message_id=inbound_message_id
+        )
     await _decline_flow_gate.maybe_reengage(db, chat_session, message_text)
 
     # ── CHECK override (LLM-driven, no keywords) ─────────────
@@ -1332,20 +1418,17 @@ async def process_message(
     if _pending_action is not None:
         return _pending_action
 
-    # ── CHITCHAT (LLM-decided social talk) ─────────────────────
-    # Greetings/thanks/farewells carry no field value: drop any extraction
-    # so validation can never save "thanks" as a name, and let the LLM's own
-    # warm ack (llm_generated_msg) flow into the normal next-step ask below.
-    # The turn advances nothing and waives nothing.
+    # ── Social-word extraction guard ─────────────────────
+    # Greetings/thanks carry no field value: drop any extraction so
+    # validation can never save "thanks" as a name. The turn otherwise
+    # flows through the normal pipeline (no special routing).
     if intent == "CHITCHAT":
         raw_entities = {}
-        chat_session.current_intent = intent
 
     # ── CONFIRM override (LLM-primary, but pure CONFIRM always wins) ──
-    # "confirm" must always work on the finish screen. LLM stumbles on
-    # short tokens (ASK_QUESTION / CHITCHAT) and would leave the user
-    # looping. Pure confirm tokens force CONFIRM unless the turn is
-    # explicitly an edit (e.g. "ok, but change date" → EDIT).
+    # "confirm" must always work on the finish screen. Pure confirm tokens
+    # force CONFIRM unless the turn is explicitly an edit
+    # (e.g. "ok, but change date" → EDIT).
     _has_edit_signal = any(kw in user_msg_lower for kw in ("change", "edit", "modify", "update"))
     _is_edit_mixed = _has_edit_signal and intent == "EDIT_DATA"
     _is_pure_confirm = user_msg_lower.strip() in {
@@ -1358,7 +1441,7 @@ async def process_message(
             if not _is_edit_mixed:
                 intent = "CONFIRM_BOOKING"
                 chat_session.current_intent = intent
-        elif _is_pure_confirm and intent not in ("CANCEL_BOOKING", "CHITCHAT"):
+        elif _is_pure_confirm and intent != "CANCEL_BOOKING":
             # Even when LLM was "decisive" but message is unambiguous confirm,
             # honor it — decisive EDIT with edit words stays EDIT (handled above).
             if not _is_edit_mixed:
@@ -1382,7 +1465,7 @@ async def process_message(
                 widget_directive="TEXT_INPUT",
                 field_meta={"name": "edit_choice", "type": "text", "label": "Field to change"},
             )
-            await _save_transcript(db, chat_session.session_id, message_text, msg, "TEXT_INPUT", intent="EDIT_DATA")
+            await _save_transcript(db, chat_session.session_id, _transcript_user_text, msg, "TEXT_INPUT", intent="EDIT_DATA")
             return action
         intent = "EDIT_DATA"
         chat_session.current_intent = intent
@@ -1396,14 +1479,32 @@ async def process_message(
     _email_needs_resend = require_otp and not chat_session.otp_verified
     _phone_needs_resend = require_phone_otp and not _phone_verified
     _llm_claimed_turn = intent not in _LLM_INDECISIVE_INTENTS and not llm_temporary_fallback
-    if (_email_needs_resend or _phone_needs_resend) and not _llm_claimed_turn and any(kw in user_msg_lower for kw in RESEND_KEYWORDS):
+    _has_resend_kw = any(kw in user_msg_lower for kw in RESEND_KEYWORDS)
+    if not _has_resend_kw and ("otp" in user_msg_lower or "code" in user_msg_lower):
+        _neg = (
+            "didn't" in user_msg_lower
+            or "didnt" in user_msg_lower
+            or "did not" in user_msg_lower
+            or "not received" in user_msg_lower
+            or "not got" in user_msg_lower
+            or "never" in user_msg_lower
+            or "no otp" in user_msg_lower
+            or "no code" in user_msg_lower
+            or "haven't" in user_msg_lower
+            or "hasn't" in user_msg_lower
+            or "waiting" in user_msg_lower
+            or "where" in user_msg_lower
+        )
+        _has_resend_kw = bool(_neg)
+    if (_email_needs_resend or _phone_needs_resend) and not _llm_claimed_turn and _has_resend_kw:
         # Determine which channel to resend: email first if pending, else phone
         _resend_channel = "email" if _email_needs_resend else "phone"
         # If message explicitly mentions phone/sms, override to phone
         if "phone" in user_msg_lower or "sms" in user_msg_lower or "mobile" in user_msg_lower:
             _resend_channel = "phone" if _phone_needs_resend else "email"
         return await _handle_otp_resend(
-            db, org, chat_session, message_text, background_tasks, channel=_resend_channel
+            db, org, chat_session, message_text, background_tasks,
+            channel=_resend_channel, transcript_user_text=_transcript_user_text,
         )
 
     # ── Change date override during time selection ────────────
@@ -1445,7 +1546,7 @@ async def process_message(
         )
         action = ActionPayload(message=msg, widget_directive="REQUIRE_DATE_PICKER")
         await _save_transcript(
-            db, chat_session.session_id, message_text, msg, "REQUIRE_DATE_PICKER"
+            db, chat_session.session_id, _transcript_user_text, msg, "REQUIRE_DATE_PICKER"
         )
         return action
 
@@ -1525,7 +1626,7 @@ async def process_message(
             field_meta=next_step.get("field_meta"),
         )
         await _save_transcript(
-            db, chat_session.session_id, message_text, msg, changed_directive
+            db, chat_session.session_id, _transcript_user_text, msg, changed_directive
         )
         return action
 
@@ -1591,7 +1692,7 @@ async def process_message(
                             widget_directive="REQUIRE_OTP_MODAL",
                             field_meta={**_meta, "channel": "email"},
                         )
-                        await _save_transcript(db, chat_session.session_id, message_text, action.message, "REQUIRE_OTP_MODAL")
+                        await _save_transcript(db, chat_session.session_id, _transcript_user_text, action.message, "REQUIRE_OTP_MODAL")
                         return action
                 else:
                     chat_session.otp_verified = True
@@ -1604,7 +1705,7 @@ async def process_message(
                         )
                         # _handle_booking_flow will emit phone OTP modal
                         action = ActionPayload(message=msg, widget_directive=directive, field_meta=booking_field_meta)
-                        await _save_transcript(db, chat_session.session_id, message_text, msg, directive, intent="CONFIRM_BOOKING")
+                        await _save_transcript(db, chat_session.session_id, _transcript_user_text, msg, directive, intent="CONFIRM_BOOKING")
                         return action
                 # If all required verifications done
                 _still_needs_email = require_otp and not chat_session.otp_verified
@@ -1618,7 +1719,7 @@ async def process_message(
                         db, org, org_config, chat_session, "CONFIRM_BOOKING", require_otp, fd_map, background_tasks, require_phone_otp=require_phone_otp
                     )
                     action = ActionPayload(message=msg, widget_directive=directive, field_meta=booking_field_meta)
-                    await _save_transcript(db, chat_session.session_id, message_text, msg, directive, intent="CONFIRM_BOOKING")
+                    await _save_transcript(db, chat_session.session_id, _transcript_user_text, msg, directive, intent="CONFIRM_BOOKING")
                     return action
                 # Fallthrough if still pending other channel (already handled above)
             else:
@@ -1632,7 +1733,7 @@ async def process_message(
                     widget_directive="REQUIRE_OTP_MODAL",
                     field_meta={**_meta, "channel": _fail_channel},
                 )
-                await _save_transcript(db, chat_session.session_id, message_text, action.message, "REQUIRE_OTP_MODAL")
+                await _save_transcript(db, chat_session.session_id, _transcript_user_text, action.message, "REQUIRE_OTP_MODAL")
                 return action
 
     # ── Data Validation ───────────────────────────────────────
@@ -1763,17 +1864,20 @@ async def process_message(
         )
 
     # ── Ghost suppression during OTP pending ────────────────
-    # When OTP is pending (require_otp & not verified), the LLM's RAG fallback
-    # "Sorry, I don't have that information in our records..." is never
-    # appropriate — it creates a ghost second bubble after the OTP SMS.
-    # Suppress it and keep the OTP prompt visible.
+    # A content-free "I have no information" reply is never the right answer
+    # when the customer is one code away from booking. The canned apology is no
+    # longer produced anywhere in the product; this only catches a model
+    # reproducing the phrasing on its own.
     _needs_otp_now = (require_otp and not chat_session.otp_verified) or (require_phone_otp and not getattr(chat_session, "phone_otp_verified", False))
-    if _needs_otp_now and isinstance(llm_generated_msg, str) and "don't have that information in our records" in llm_generated_msg.lower():
-        _channel = "phone" if (require_phone_otp and not getattr(chat_session, "phone_otp_verified", False)) else "email"
-        _dest = str(chat_session.collected_data.get("phone") or _resolve_session_email(chat_session, fd_map) or "your contact").strip()
-        llm_generated_msg = f"Please enter the verification code sent to {_dest}."
-        if next_step.get("directive") == "TEXT_INPUT":
-            next_step = {"directive": "REQUIRE_OTP_MODAL", "field_meta": {"channel": _channel}}
+    if _needs_otp_now and isinstance(llm_generated_msg, str):
+        from app.engine.knowledge_guards import is_knowledge_fallback_text as _is_kb_fallback
+
+        if _is_kb_fallback(llm_generated_msg):
+            _channel = "phone" if (require_phone_otp and not getattr(chat_session, "phone_otp_verified", False)) else "email"
+            _dest = str(chat_session.collected_data.get("phone") or _resolve_session_email(chat_session, fd_map) or "your contact").strip()
+            llm_generated_msg = f"Please enter the verification code sent to {_dest}."
+            if next_step.get("directive") == "TEXT_INPUT":
+                next_step = {"directive": "REQUIRE_OTP_MODAL", "field_meta": {"channel": _channel}}
 
     # ── Hallucinated slot timings guard ───────────────
     # LLM sometimes invents times like "9am, 10am" not in the real inventory
@@ -1855,7 +1959,9 @@ async def process_message(
                     agent_name=persona.get("agent_name", "Booking Assistant"),
                 )
                 # Machine debris is never appended — replace unconditionally.
-                if (isinstance(errors, dict) and errors.get(_need_field)) or looks_like_json_debris(
+                if not _det_ask.strip():
+                    msg = llm_generated_msg
+                elif (isinstance(errors, dict) and errors.get(_need_field)) or looks_like_json_debris(
                     llm_generated_msg
                 ):
                     logger.info(
@@ -1887,13 +1993,18 @@ async def process_message(
 
         if manual_time_requires_slot_selection:
             directive = "REQUIRE_TIME_SLOT_GRID"
-            msg = "Please select your preferred time from the available slot buttons below."
+            msg = "Please select your preferred time from the available slot below."
         elif llm_temporary_fallback:
-            msg = _build_llm_recovery_message(directive, next_step.get("field_meta"))
+            if str(getattr(chat_session, "session_status", "") or "").upper() in (
+                "CONFIRMED", "CANCELLED", "EXPIRED",
+            ):
+                msg = build_finished_session_reply(chat_session, chat_session.session_status)
+            else:
+                msg = _build_llm_recovery_message(directive, next_step.get("field_meta"))
         elif valid_data:
             # User provided valid data — use deterministic response to ask
             # for the next field in order. This keeps the flow stable.
-            msg = _build_context_aware_response(
+            _valid_ask = _build_context_aware_response(
                 directive=directive,
                 field_meta=next_step.get("field_meta"),
                 collected_data=chat_session.collected_data,
@@ -1902,6 +2013,7 @@ async def process_message(
                 llm_generated_msg=llm_generated_msg,
                 agent_name=persona.get("agent_name", "Booking Assistant"),
             )
+            msg = _valid_ask if _valid_ask.strip() else llm_generated_msg
         else:
             # User didn't provide data (greeting, etc.) -> still enforce one-by-one deterministic ask
             # to prevent LLM from dumping "provide name, email, phone..." at once.
@@ -1916,7 +2028,7 @@ async def process_message(
                 "REQUIRE_NUMBER_INPUT",
             }
             if directive in single_field_directives:
-                msg = _build_context_aware_response(
+                _single_ask = _build_context_aware_response(
                     directive=directive,
                     field_meta=next_step.get("field_meta"),
                     collected_data=chat_session.collected_data,
@@ -1925,6 +2037,7 @@ async def process_message(
                     llm_generated_msg=llm_generated_msg,
                     agent_name=persona.get("agent_name", "Booking Assistant"),
                 )
+                msg = _single_ask if _single_ask.strip() else llm_generated_msg
             else:
                 # For ASK_QUESTION / TEXT_INPUT free chat, let LLM handle naturally
                 msg = llm_generated_msg
@@ -2088,16 +2201,29 @@ async def process_message(
                             chat_session.missing_fields or []
                         )
                 elif not options:
-                    directive = "REQUIRE_DATE_PICKER"
-                    msg = _build_context_aware_response(
-                        directive="REQUIRE_DATE_PICKER",
-                        field_meta=None,
-                        collected_data=chat_session.collected_data,
-                        valid_data=valid_data,
-                        errors={},
-                        llm_generated_msg=llm_generated_msg,
-                        agent_name=persona.get("agent_name", "Booking Assistant"),
-                    )
+                    if availability_status == "closed_day":
+                        msg = (
+                            f"We are closed on {parsed_date.strftime('%A, %B %d')}. "
+                            "Please choose another date."
+                        )
+                    elif availability_status == "exception_closed":
+                        msg = (
+                            f"We are closed on {parsed_date.strftime('%A, %B %d')}. "
+                            "Please choose another date."
+                        )
+                    else:
+                        msg = (
+                            "There are no available times on that date. "
+                            "Please choose another date."
+                        )
+                    field_meta["closed_reason"] = availability_status
+                    chat_session.collected_data.pop("date", None)
+                    chat_session.collected_data.pop("time", None)
+                    chat_session.collected_data.pop("selected_slot_id", None)
+                    if "date" not in chat_session.missing_fields:
+                        chat_session.missing_fields = ["date"] + list(
+                            chat_session.missing_fields or []
+                        )
             except Exception as slot_err:
                 logger.warning(f"Failed to compute time slots: {slot_err}")
                 field_meta["options"] = []
@@ -2159,8 +2285,14 @@ async def _handle_otp_resend(
     message_text: str,
     background_tasks: Optional[BackgroundTasks] = None,
     channel: str = "email",
+    transcript_user_text: Optional[str] = None,
 ) -> ActionPayload:
-    from app.crud.otp import generate_otp, get_otp_policy_metadata, OTP_RESEND_CAP
+    _transcript_user_text = (
+        transcript_user_text if transcript_user_text is not None else message_text
+    )
+    from app.crud.otp import generate_otp, get_otp_policy_metadata, invalidate_otp_delivery, OTP_RESEND_CAP
+    from app.core.otp_delivery import delivery_error, delivery_succeeded
+    from app.core.config import settings as _otp_settings
 
     channel = (channel or "email").lower()
     if channel not in ("email", "phone"):
@@ -2170,28 +2302,37 @@ async def _handle_otp_resend(
             phone = str(chat_session.collected_data.get("phone") or "").strip()
             if not phone:
                 action = ActionPayload(
-                    message="I need your phone number to send a verification code. Please share your phone number.",
+                    message="Please share your phone number.",
                     widget_directive="REQUIRE_PHONE_INPUT",
                 )
-                await _save_transcript(db, chat_session.session_id, message_text, action.message, action.widget_directive)
+                await _save_transcript(db, chat_session.session_id, _transcript_user_text, action.message, action.widget_directive)
                 return action
             code = await generate_otp(db, chat_session.session_id, channel="phone", resend=True)
             policy_meta = await get_otp_policy_metadata(db, chat_session.session_id, channel="phone")
             policy_meta["channel"] = "phone"
-            # Respect the configured phone OTP channel (WhatsApp vs SMS) for the user-facing copy
-            from app.core.config import settings as _cfg_otp_resend
-            _via_resend = "WhatsApp" if (getattr(_cfg_otp_resend, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else "SMS"
+            _via_resend = "WhatsApp"
             resend_attempt = OTP_RESEND_CAP - int(policy_meta.get("resends_left", 0))
             otp_send_key = f"otp_phone:{chat_session.session_id}:resend:{resend_attempt}"
-            # Phone OTP via Zavu/WhatsApp is sent by the caller (_handle_booking_flow) or by whatsapp_provider;
+            # Phone OTP via WhatsApp is sent by the caller (_handle_booking_flow) or by whatsapp_provider;
             # for resend we still need to actually send the code (background_tasks path handles it for email, but phone needs explicit send here)
             try:
                 from app.core.otp_delivery.whatsapp_provider import WhatsAppProvider as _WPPResend
-                from app.core.otp_delivery.sms_provider import SMSProvider as _SPResend
-                _prov_resend = _WPPResend() if _via_resend == "WhatsApp" else _SPResend()
-                await _prov_resend.send_otp(phone, code, str(chat_session.session_id))
+                _prov_resend = _WPPResend()
+                _result = await _prov_resend.send_otp(phone, code, str(chat_session.session_id))
+                if not delivery_succeeded(
+                    _result,
+                    allow_mock=bool(getattr(_otp_settings, "OTP_ALLOW_MOCK_DELIVERY", False)),
+                ):
+                    await invalidate_otp_delivery(
+                        db,
+                        chat_session.session_id,
+                        "phone",
+                        context_key=otp_send_key,
+                    )
+                    raise RuntimeError(delivery_error(_result))
             except Exception as _send_resend_err:
                 logger.warning(f"Phone OTP resend send failed ({_via_resend}): {_send_resend_err}")
+                raise
             action = ActionPayload(
                 message=f"I've sent a new verification code to {phone} via {_via_resend}. Please enter it here.",
                 widget_directive="REQUIRE_OTP_MODAL",
@@ -2205,21 +2346,31 @@ async def _handle_otp_resend(
             policy_meta["channel"] = "email"
             resend_attempt = OTP_RESEND_CAP - int(policy_meta.get("resends_left", 0))
             otp_send_key = f"otp:{chat_session.session_id}:resend:{resend_attempt}"
-            if background_tasks:
-                background_tasks.add_task(
-                    send_otp_email,
-                    recipient_email,
-                    code,
-                    org_id=org.id,
-                    idempotency_key=otp_send_key,
+            if not recipient_email:
+                await invalidate_otp_delivery(
+                    db,
+                    chat_session.session_id,
+                    "email",
+                    context_key=otp_send_key,
                 )
-            else:
-                await send_otp_email(
-                    recipient_email,
-                    code,
-                    org_id=org.id,
-                    idempotency_key=otp_send_key,
+                raise ValueError("Email address is required")
+            _result = await send_otp_email(
+                recipient_email,
+                code,
+                org_id=org.id,
+                idempotency_key=otp_send_key,
+            )
+            if not delivery_succeeded(
+                _result,
+                allow_mock=bool(getattr(_otp_settings, "OTP_ALLOW_MOCK_DELIVERY", False)),
+            ):
+                await invalidate_otp_delivery(
+                    db,
+                    chat_session.session_id,
+                    "email",
+                    context_key=otp_send_key,
                 )
+                raise RuntimeError(delivery_error(_result))
             action = ActionPayload(
                 message=f"I've sent a new verification code to {recipient_email}. Please check your inbox.",
                 widget_directive="REQUIRE_OTP_MODAL",
@@ -2261,6 +2412,111 @@ async def _handle_otp_resend(
     return action
 
 
+def should_create_booking(
+    *,
+    intent: str,
+    user_confirmed: Optional[bool],
+    session_status: str,
+    missing_fields,
+    require_otp: bool,
+    require_phone_otp: bool,
+    otp_verified: bool,
+    phone_otp_verified: bool,
+) -> bool:
+    """Decide whether this turn may create the booking.
+
+    Creating a booking is the single most consequential action in the
+    product, so the decision is driven by verified state rather than by the
+    intent label the language model happened to emit. Keying it off
+    ``intent == "CONFIRM_BOOKING"`` meant a model that returned anything else
+    on the confirmation turn silently fell through to a summary card: no
+    booking row, no calendar entry, no notification, no email, and no error
+    anywhere.
+
+    ``user_confirmed`` is supplied by the caller from the actual inbound text.
+    When it is None the legacy intent check is used, so callers that predate
+    this change behave exactly as before.
+
+    Fails closed: every obligation (fields collected, OTP satisfied where
+    required, session still active, user actually confirmed) must hold.
+    """
+    if str(session_status or "").upper() != "ACTIVE":
+        return False
+
+    if user_confirmed is None:
+        # No confirmation signal available: preserve the previous behaviour.
+        return intent == "CONFIRM_BOOKING"
+
+    if not user_confirmed:
+        # A bare 6-digit code is not a confirmation word, but accepting a code
+        # IS the confirmation: the code is only ever sent after the customer
+        # explicitly confirmed the summary. Blocking here on the code turn
+        # re-showed the summary forever and no booking was ever created.
+        if require_phone_otp and phone_otp_verified:
+            pass
+        elif require_otp and otp_verified:
+            pass
+        else:
+            return False
+    if missing_fields:
+        return False
+    if require_otp and not otp_verified:
+        return False
+    if require_phone_otp and not phone_otp_verified:
+        return False
+    return True
+
+
+def _verified_key_matches_context(stored_key: str, context_key: str) -> bool:
+    """Does a stored OTP-verified key belong to this customer in this session?
+
+    A stored key has been written in two shapes:
+      * the full context key  ``otp_phone:<session>:<phone>:<date>:<time>``
+      * just the phone number  ``+916350063338``
+
+    Comparing the two shapes directly meant a correctly verified customer was
+    revoked on practically every booking, because the full key embeds the
+    date and time: any difference in how the slot was stored between the
+    verification turn and the booking turn (a date the customer changed, a time
+    normalised from "10:30 AM" to "10:30") produced a mismatch, the
+    verification was thrown away, a fresh code was sent, and the booking was
+    never created.
+
+    The check exists to stop verification being carried over from a DIFFERENT
+    customer or conversation, so that is what it compares: the session and the
+    phone number. Slot details are deliberately excluded, so editing the
+    appointment after verifying does not silently discard a real verification.
+    """
+    stored = str(stored_key or "").strip()
+    context = str(context_key or "").strip()
+    if not stored or not context:
+        return False
+
+    def _parts(key: str) -> list:
+        return [p for p in key.split(":")]
+
+    stored_parts = _parts(stored)
+    context_parts = _parts(context)
+
+    # Session must match (or the stored value is a bare phone, which is
+    # session-scoped by where it is stored).
+    if len(context_parts) >= 2 and stored_parts and stored_parts[0].startswith("otp_"):
+        if stored_parts[1].strip() != context_parts[1].strip():
+            return False
+
+    # Phone must match. Compare on digits so formatting is irrelevant.
+    def _phone_of(parts: list) -> str:
+        if len(parts) >= 3 and parts[0].startswith("otp_"):
+            return re.sub(r"\D", "", parts[2])
+        return re.sub(r"\D", "", parts[0])
+
+    stored_phone = _phone_of(stored_parts)
+    context_phone = _phone_of(context_parts)
+    if not stored_phone or not context_phone:
+        return False
+    return stored_phone == context_phone
+
+
 async def _handle_booking_flow(
     db: AsyncSession,
     org: Organization,
@@ -2273,8 +2529,14 @@ async def _handle_booking_flow(
     *,
     dispatch_notifications: bool = True,
     require_phone_otp: bool = False,
+    user_confirmed: Optional[bool] = None,
 ) -> Tuple[str, str, Optional[Dict[str, Any]]]:
-    """Handle the PROCESS_BOOKING directive — OTP (email/phone), confirmation, slot booking."""
+    """Handle the PROCESS_BOOKING directive — OTP (email/phone), confirmation, slot booking.
+
+    user_confirmed: whether THIS turn's inbound text was a confirmation. When
+    provided it drives the booking decision (see should_create_booking) instead
+    of the model-supplied intent label. None keeps the legacy behaviour.
+    """
     # Support caller not passing phone flag explicitly — read from config as fallback
     if not require_phone_otp:
         require_phone_otp = bool(getattr(org_config, "require_phone_otp", False))
@@ -2282,6 +2544,31 @@ async def _handle_booking_flow(
     # Lock the slot BEFORE showing OTP modal or confirmation request
     # This prevents ghost slots during the waiting period
     await _lock_slot_for_booking(db, org, chat_session)
+
+    # ── Review before verification ──────────────────────────────
+    # Required order: collect details -> show the summary -> customer
+    # confirms -> only THEN send the OTP -> customer enters it -> booking is
+    # created.
+    #
+    # Previously the OTP was sent as soon as the fields were complete, so the
+    # customer got a code first and the summary afterwards; confirming then
+    # re-displayed the summary instead of moving on to verification.
+    #
+    # The summary is only skipped when the caller cannot tell us whether the
+    # customer confirmed (user_confirmed is None), preserving legacy callers.
+    if user_confirmed is False and not (chat_session.missing_fields or []):
+        _already_verified = bool(
+            (require_otp and getattr(chat_session, "otp_verified", False))
+            or (
+                require_phone_otp
+                and getattr(chat_session, "phone_otp_verified", False)
+            )
+        )
+        if not _already_verified:
+            _summary_msg, _summary_directive = _build_confirmation_summary(
+                chat_session, fd_map
+            )
+            return _summary_msg, _summary_directive, None
 
     # ── Email OTP gate ──
     recipient_email = _resolve_session_email(chat_session, fd_map)
@@ -2343,8 +2630,10 @@ async def _handle_booking_flow(
             await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
 
     if require_otp and not chat_session.otp_verified:
-        from app.crud.otp import generate_otp, get_otp_policy_metadata
+        from app.crud.otp import generate_otp, get_otp_policy_metadata, invalidate_otp_delivery
         from app.core.mail import send_otp_email
+        from app.core.otp_delivery import delivery_error, delivery_succeeded
+        from app.core.config import settings as _otp_settings
         otp_send_key = _build_otp_context_key(chat_session, fd_map)
         internal_state = _ensure_internal_state(chat_session)
         if internal_state.get("otp_send_key") == otp_send_key:
@@ -2357,22 +2646,26 @@ async def _handle_booking_flow(
             )
 
         try:
+            if not recipient_email:
+                raise ValueError("Email address is required")
             code = await generate_otp(db, chat_session.session_id, channel="email", resend=False)
-            if background_tasks:
-                background_tasks.add_task(
-                    send_otp_email,
-                    recipient_email,
-                    code,
-                    org_id=org.id,
-                    idempotency_key=otp_send_key,
+            _result = await send_otp_email(
+                recipient_email,
+                code,
+                org_id=org.id,
+                idempotency_key=otp_send_key,
+            )
+            if not delivery_succeeded(
+                _result,
+                allow_mock=bool(getattr(_otp_settings, "OTP_ALLOW_MOCK_DELIVERY", False)),
+            ):
+                await invalidate_otp_delivery(
+                    db,
+                    chat_session.session_id,
+                    "email",
+                    context_key=otp_send_key,
                 )
-            else:
-                await send_otp_email(
-                    recipient_email,
-                    code,
-                    org_id=org.id,
-                    idempotency_key=otp_send_key,
-                )
+                raise RuntimeError(delivery_error(_result))
             internal_state["otp_send_key"] = otp_send_key
             internal_state.pop("otp_verified_key", None)
             await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
@@ -2387,8 +2680,11 @@ async def _handle_booking_flow(
             logger.error(f"OTP email failed: {otp_err}")
             return (
                 "I couldn't send the verification code to your email. Please double-check your email address and try again, or say 'resend' to retry.",
-                "TEXT_INPUT",
-                None,
+                "REQUIRE_OTP_MODAL",
+                {
+                    "channel": "email",
+                    "validation_error": "We couldn't find an email address to send the code to.",
+                },
             )
 
     # ── Phone OTP gate (sequential after email) ──
@@ -2404,15 +2700,19 @@ async def _handle_booking_flow(
         _phone_context_key = _build_phone_otp_context_key(chat_session)
         _internal_state = _ensure_internal_state(chat_session)
         _verified_phone_key = str(_internal_state.get("phone_otp_verified_key") or "")
-        if _phone_verified and _verified_phone_key != _phone_context_key:
+        if _phone_verified and not _verified_key_matches_context(
+            _verified_phone_key, _phone_context_key
+        ):
             chat_session.phone_otp_verified = False
             _phone_verified = False
             _internal_state.pop("phone_otp_verified_key", None)
             await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
 
     if require_phone_otp and not _phone_verified:
-        from app.crud.otp import generate_otp as _gen_phone_otp, get_otp_policy_metadata as _get_phone_meta
-        # Zavu sms_oneway (kd78m7agx48rpyegpfrmhp5rsx8dm8t9) — BYO-OTP via backend SMS
+        from app.crud.otp import generate_otp as _gen_phone_otp, get_otp_policy_metadata as _get_phone_meta, invalidate_otp_delivery as _invalidate_phone_otp
+        from app.core.otp_delivery import delivery_error as _phone_delivery_error, delivery_succeeded as _phone_delivery_succeeded
+        from app.core.config import settings as _phone_otp_settings
+        # Phone OTP via WhatsApp — BYO-OTP generated by the backend
         _phone_send_key = _build_phone_otp_context_key(chat_session)
         _internal_state = _ensure_internal_state(chat_session)
         _phone = str(chat_session.collected_data.get("phone") or "").strip()
@@ -2420,8 +2720,7 @@ async def _handle_booking_flow(
             meta = await _get_phone_meta(db, chat_session.session_id, channel="phone")
             meta["channel"] = "phone"
             meta["phone"] = _phone
-            from app.core.config import settings as _cfg_via2
-            via2 = "WhatsApp" if (getattr(_cfg_via2, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else "SMS"
+            via2 = "WhatsApp"
             return (
                 f"I've sent a verification code to {_phone} via {via2}. Please enter it here to continue.",
                 "REQUIRE_OTP_MODAL",
@@ -2429,33 +2728,43 @@ async def _handle_booking_flow(
             )
         try:
             code = await _gen_phone_otp(db, chat_session.session_id, channel="phone", resend=False)
-            # Delivery via provider abstraction (WhatsApp active, SMS fallback — Zavu path kept intact)
-            try:
-                from app.core.config import settings as _cfg2
-                from app.core.otp_delivery.whatsapp_provider import WhatsAppProvider
-                from app.core.otp_delivery.sms_provider import SMSProvider
-                _provider = WhatsAppProvider() if (getattr(_cfg2, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else SMSProvider()
-                await _provider.send_otp(_phone, code, str(chat_session.session_id))
-            except Exception as sms_err:
-                logger.error(f"Phone OTP send failed ({_provider.__class__.__name__ if '_provider' in locals() else 'unknown'}): {sms_err}")
+            from app.core.otp_delivery.whatsapp_provider import WhatsAppProvider
+            _provider = WhatsAppProvider()
+            _result = await _provider.send_otp(
+                _phone, code, str(chat_session.session_id)
+            )
+            if not _phone_delivery_succeeded(
+                _result,
+                allow_mock=bool(getattr(_phone_otp_settings, "OTP_ALLOW_MOCK_DELIVERY", False)),
+            ):
+                await _invalidate_phone_otp(
+                    db,
+                    chat_session.session_id,
+                    "phone",
+                    context_key=_phone_send_key,
+                )
+                raise RuntimeError(_phone_delivery_error(_result))
             _internal_state["phone_otp_send_key"] = _phone_send_key
             _internal_state.pop("phone_otp_verified_key", None)
             await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
             meta = await _get_phone_meta(db, chat_session.session_id, channel="phone")
             meta["channel"] = "phone"
             meta["phone"] = _phone
-            via = "WhatsApp" if (getattr(__import__("app.core.config", fromlist=["settings"]).settings, "OTP_PHONE_PROVIDER", "whatsapp") or "whatsapp").lower() == "whatsapp" else "SMS"
+            via = "WhatsApp"
             return (
                 f"I've sent a verification code to {_phone} via {via}. Please enter it here to continue.",
                 "REQUIRE_OTP_MODAL",
                 meta,
             )
         except Exception as otp_err:
-            logger.error(f"OTP phone SMS failed: {otp_err}")
+            logger.error(f"OTP phone WhatsApp send failed: {otp_err}")
             return (
                 "I couldn't send the verification code to your phone. Please double-check your phone number and try again, or say 'resend' to retry.",
-                "TEXT_INPUT",
-                None,
+                "REQUIRE_OTP_MODAL",
+                {
+                    "channel": "phone",
+                    "validation_error": "We couldn't send the verification code to your phone.",
+                },
             )
 
     # ── Razorpay Route payment gate ──
@@ -2526,7 +2835,16 @@ async def _handle_booking_flow(
     if chat_session.session_status != "ACTIVE":
         return "Your booking is already processed.", "TEXT_INPUT", None
 
-    if intent == "CONFIRM_BOOKING":
+    if should_create_booking(
+        intent=intent,
+        user_confirmed=user_confirmed,
+        session_status=chat_session.session_status,
+        missing_fields=chat_session.missing_fields,
+        require_otp=require_otp,
+        require_phone_otp=require_phone_otp,
+        otp_verified=bool(getattr(chat_session, "otp_verified", False)),
+        phone_otp_verified=bool(getattr(chat_session, "phone_otp_verified", False)),
+    ):
         msg, directive, booking_field_meta = await _execute_booking(
             db,
             org,
@@ -2723,13 +3041,37 @@ async def _handle_post_booking(
     chat_session: ChatSessionState,
     message_text: str,
     background_tasks: Optional[BackgroundTasks] = None,
+    transcript_user_text: Optional[str] = None,
 ) -> ActionPayload:
     """
     Handle user messages AFTER a booking is confirmed, cancelled, or expired.
     Supports: cancel, reschedule, restart new booking, conversational replies.
     """
+    _transcript_user_text = (
+        transcript_user_text if transcript_user_text is not None else message_text
+    )
     user_msg_lower = message_text.lower().strip()
     status = chat_session.session_status
+
+    # Deterministic confirm short-circuit (mirrors the graph runtime): on a
+    # finished CONFIRMED booking a confirm word is never a new request.
+    if status == "CONFIRMED" and not chat_session.pending_cancel:
+        try:
+            from app.engine.time_flex import is_pure_confirm_message as _is_confirm_msg_pre
+
+            _pre_confirm = bool(_is_confirm_msg_pre(message_text))
+        except Exception:
+            _pre_confirm = False
+        if _pre_confirm:
+            msg = build_finished_session_reply(chat_session, status)
+            action = ActionPayload(
+                message=msg, widget_directive="TEXT_INPUT", is_terminal=False
+            )
+            await _save_transcript(
+                db, chat_session.session_id, _transcript_user_text, msg, "TEXT_INPUT"
+            )
+            return action
+
     self_check = await _llm_post_booking_self_check(
         message_text=message_text,
         status=status,
@@ -2763,7 +3105,7 @@ async def _handle_post_booking(
             message=msg, widget_directive="TEXT_INPUT", is_terminal=False
         )
         await _save_transcript(
-            db, chat_session.session_id, message_text, msg, "TEXT_INPUT"
+            db, chat_session.session_id, _transcript_user_text, msg, "TEXT_INPUT"
         )
         return action
 
@@ -2776,7 +3118,13 @@ async def _handle_post_booking(
             and not is_question
         )
     ):
-        return await _reschedule_booking(db, org, chat_session, background_tasks)
+        return await _reschedule_booking(
+            db,
+            org,
+            chat_session,
+            background_tasks,
+            user_message=message_text,
+        )
 
     # ── Cancel a CONFIRMED booking (always ask for confirmation) ──────
     if status == "CONFIRMED":
@@ -2828,14 +3176,14 @@ async def _handle_post_booking(
             if _is_cancellation_info_request(user_msg_lower):
                 msg = (
                     "Great question — your booking is still active. "
-                    "To cancel, just say **'cancel my booking'** and I'll ask for a final yes/no confirmation "
+                    "To cancel, just say **'Cancel'** and I'll ask for a final yes/no confirmation "
                     "before cancelling. Once confirmed, the slot is released immediately."
                 )
                 action = ActionPayload(
                     message=msg, widget_directive="TEXT_INPUT", is_terminal=False
                 )
                 await _save_transcript(
-                    db, chat_session.session_id, message_text, msg, "TEXT_INPUT"
+                    db, chat_session.session_id, _transcript_user_text, msg, "TEXT_INPUT"
                 )
                 return action
             if deny:
@@ -2844,7 +3192,7 @@ async def _handle_post_booking(
                     message=msg, widget_directive="TEXT_INPUT", is_terminal=False
                 )
                 await _save_transcript(
-                    db, chat_session.session_id, message_text, msg, "TEXT_INPUT"
+                    db, chat_session.session_id, _transcript_user_text, msg, "TEXT_INPUT"
                 )
                 return action
             if affirm:
@@ -2860,7 +3208,7 @@ async def _handle_post_booking(
                     db, chat_session, message_text
                 )
                 await _save_transcript(
-                    db, chat_session.session_id, message_text, action.message,
+                    db, chat_session.session_id, _transcript_user_text, action.message,
                     action.widget_directive or "TEXT_INPUT",
                 )
                 return action
@@ -2876,7 +3224,7 @@ async def _handle_post_booking(
                     message=msg, widget_directive="TEXT_INPUT", is_terminal=False
                 )
                 await _save_transcript(
-                    db, chat_session.session_id, message_text, msg, "TEXT_INPUT"
+                    db, chat_session.session_id, _transcript_user_text, msg, "TEXT_INPUT"
                 )
                 return action
             else:
@@ -2885,7 +3233,7 @@ async def _handle_post_booking(
                     message=msg, widget_directive="TEXT_INPUT", is_terminal=False
                 )
                 await _save_transcript(
-                    db, chat_session.session_id, message_text, msg, "TEXT_INPUT"
+                    db, chat_session.session_id, _transcript_user_text, msg, "TEXT_INPUT"
                 )
                 return action
 
@@ -2910,7 +3258,7 @@ async def _handle_post_booking(
                 message=msg, widget_directive="TEXT_INPUT", is_terminal=False
             )
             await _save_transcript(
-                db, chat_session.session_id, message_text, msg, "TEXT_INPUT"
+                db, chat_session.session_id, _transcript_user_text, msg, "TEXT_INPUT"
             )
             return action
 
@@ -2923,7 +3271,7 @@ async def _handle_post_booking(
                 db, chat_session, message_text
             )
             await _save_transcript(
-                db, chat_session.session_id, message_text, action.message,
+                db, chat_session.session_id, _transcript_user_text, action.message,
                 action.widget_directive or "TEXT_INPUT",
             )
             return action
@@ -3012,10 +3360,19 @@ Output ONLY valid JSON:"""
         }
         msg = fallback.get(status, "Is there anything else I can help you with?")
 
+    from app.engine.user_visible_text import looks_like_confirmation_claim as _looks_claim_pb
+
+    if (
+        msg
+        and _looks_claim_pb(msg)
+        and self_check.get("classification") != "INFO_QUESTION"
+    ):
+        msg = build_finished_session_reply(chat_session, status)
+
     action = ActionPayload(
         message=msg, widget_directive="TEXT_INPUT", is_terminal=False
     )
-    await _save_transcript(db, chat_session.session_id, message_text, msg, "TEXT_INPUT")
+    await _save_transcript(db, chat_session.session_id, _transcript_user_text, msg, "TEXT_INPUT")
     return action
 
 
@@ -3024,6 +3381,8 @@ async def _reschedule_booking(
     org: Organization,
     chat_session: ChatSessionState,
     background_tasks: Optional[BackgroundTasks] = None,
+    *,
+    user_message: str = "reschedule",
 ) -> ActionPayload:
     """
     Reschedule = cancel the slot + keep user data + re-enter booking flow.
@@ -3044,6 +3403,7 @@ async def _reschedule_booking(
     chat_session.session_status = "ACTIVE"
     chat_session.current_intent = "EDIT_DATA"
     chat_session.otp_verified = False
+    chat_session.phone_otp_verified = False
     chat_session.missing_fields = ["date", "time"]
     from app.engine.cancel_flow import _persist_session, SESSION_RESET_REMOVE_KEYS
 
@@ -3088,7 +3448,7 @@ async def _reschedule_booking(
     await _save_transcript(
         db,
         chat_session.session_id,
-        "reschedule",
+        user_message,
         msg,
         "REQUIRE_DATE_PICKER",
         intent="EDIT_DATA",
@@ -3209,10 +3569,16 @@ async def _cancel_confirmed_booking(
 
             if customer_email:
                 booking_details = {
+                    "booking_id": str(existing_booking.id) if existing_booking else "",
                     "name": chat_session.collected_data.get("name"),
                     "email": customer_email,
                     "date": chat_session.collected_data.get("date"),
                     "time": chat_session.collected_data.get("time"),
+                    "source_channel": {
+                        "web": "Web Widget",
+                        "whatsapp": "WhatsApp",
+                        "whatsapp_cloud": "WhatsApp",
+                    }.get(chat_session.channel, chat_session.channel.title()),
                 }
                 if existing_booking and existing_booking.meeting_type_snapshot:
                     booking_details["meeting_type_snapshot"] = (
@@ -3957,13 +4323,14 @@ async def _execute_booking(
             booking_details["timezone_fallback_used"] = True
             booking_details["timezone_fallback_reason"] = fallback_reason
             booking_details["timezone_notice"] = (
-                "We couldn't detect your timezone, so we used the business timezone for this booking."
+                
             )
 
         # Add source channel to booking details for emails
         booking_details["source_channel"] = {
             "web": "Web Widget",
             "whatsapp": "WhatsApp",
+            "whatsapp_cloud": "WhatsApp",
         }.get(chat_session.channel, chat_session.channel.title())
 
         # Add meeting-link fields from booking (D-06, D-07 from 16-CONTEXT.md)
@@ -4006,27 +4373,28 @@ async def _execute_booking(
                     "background_tasks" if background_tasks else "await",
                 )
             email_delivery_failed = False
-            try:
-                if background_tasks:
-                    background_tasks.add_task(
-                        send_confirmation_emails,
-                        customer_email,
-                        admin_email,
-                        booking_details,
-                        org_id=org.id,
+            if customer_email:
+                try:
+                    if background_tasks:
+                        background_tasks.add_task(
+                            send_confirmation_emails,
+                            customer_email,
+                            admin_email,
+                            booking_details,
+                            org_id=org.id,
+                        )
+                    else:
+                        await send_confirmation_emails(
+                            customer_email,
+                            admin_email,
+                            booking_details,
+                            org_id=org.id,
+                        )
+                except Exception as mail_err:
+                    logger.error(
+                        f"Confirmation email failed (booking still confirmed): {mail_err}"
                     )
-                else:
-                    await send_confirmation_emails(
-                        customer_email,
-                        admin_email,
-                        booking_details,
-                        org_id=org.id,
-                    )
-            except Exception as mail_err:
-                logger.error(
-                    f"Confirmation email failed (booking still confirmed): {mail_err}"
-                )
-                email_delivery_failed = True
+                    email_delivery_failed = True
 
             if email_delivery_failed:
                 return (
@@ -4125,6 +4493,7 @@ async def _lock_slot_for_booking(
             requested_time=req_time,
             duration_minutes=0,  # 0 = use schedule's slot_duration_minutes
             lock_minutes=SLOT_LOCK_MINUTES,
+            allow_existing_lock_id=chat_session.collected_data.get("locked_slot_id"),
         )
         if slot:
             lock_start_utc = (
@@ -4228,20 +4597,48 @@ def _build_edit_summary(
 def _build_confirmation_summary(
     chat_session: ChatSessionState, fd_map: Dict[str, FieldDefinition]
 ) -> Tuple[str, str]:
+    """Build the pre-booking review block.
+
+    Layout rules (applied again by app.core.wa_text.format_outbound on the way
+    out, so this stays the single place that decides structure):
+      * one blank line between blocks so the message reads in sections
+      * a bolded title line, never a bare ALL-CAPS header (those leaked from
+        prompt scaffolding into customer replies)
+      * label bolded, value plain, so the eye lands on the label first
+      * date and time carry the most weight in a booking, so they are
+        emphasised in the closing line too
+    """
     summary = []
     for key, val, fd in _iter_user_facing_summary_fields(chat_session, fd_map):
-        icon = fd.icon if fd else "📋"
+        icon = fd.icon if fd else "\U0001F4CB"
         label = fd.label if fd else key.replace("_", " ").title()
         display_val = _format_display_value(key, val, fd)
-        summary.append(f"{icon} **{label}:** {display_val}")
+        summary.append(f"{icon} *{label}:* {display_val}")
     if not summary:
-        summary.append("📋 **Details:** Please review your booking information.")
-    return (
-        f"Perfect! I have everything I need. Here's a summary of your appointment:\n\n"
-        + "\n".join(summary)
-        + "\n\nShall I go ahead and book this?",
-        "REQUEST_CONFIRMATION",
+        return (
+            "\U0001F4CB *Booking details*\n\n"
+            "I don't have all the details yet.\n\n"
+            "Could you please share your preferred date and time?",
+            "REQUEST_CONFIRMATION",
+        )
+
+    date_value = str((chat_session.collected_data or {}).get("date") or "").strip()
+    time_value = str((chat_session.collected_data or {}).get("time") or "").strip()
+    when_bits = [b for b in (date_value, time_value) if b]
+
+    lines = ["\U0001F4C5 *Please review your booking*", ""]
+    lines.extend(summary)
+    if when_bits:
+        lines.extend(["", "\U0001F552 *When:* " + " at ".join(when_bits)])
+    lines.extend(
+        [
+            "",
+            "Is everything correct?",
+            "",
+            "Tap *Confirm* to book, *Edit* to change something, or *Cancel* to stop.",
+        ]
     )
+    return ("\n".join(lines), "REQUEST_CONFIRMATION")
 
 
 async def _save_transcript(

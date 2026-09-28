@@ -207,6 +207,70 @@ async def test_no_ainvoke_confirmation_flag_uses_commit_derived_confirmation_eve
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["whatsapp", "whatsapp_cloud"])
+async def test_whatsapp_confirmation_email_uses_booking_email_and_source(
+    monkeypatch, channel
+):
+    field_defs = [
+        {"name": "email", "type": "email", "required": True},
+        {"name": "phone", "type": "phone", "required": True},
+        {"name": "date", "type": "date", "required": True},
+        {"name": "time", "type": "time", "required": True},
+    ]
+    monkeypatch.setattr(
+        "app.engine.agent.graph.AgentContextBuilder.get_field_definitions",
+        AsyncMock(return_value=field_defs),
+    )
+    monkeypatch.setattr(
+        "app.engine.agent.graph.llm",
+        SimpleNamespace(
+            ainvoke=AsyncMock(
+                return_value=AIMessage(
+                    content='{"response_text":"Ready to confirm.","extracted_fields":{},"invalid_fields":{}}'
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "app.engine.langgraph_orchestrator.crud_chat.update_chat_session",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "app.engine.langgraph_orchestrator.crud_chat.save_session_checkpoint",
+        AsyncMock(),
+    )
+
+    async def _booking_gate(_db, _org, _org_config, chat_session, *_args, **_kwargs):
+        chat_session.session_status = "CONFIRMED"
+        chat_session.collected_data["booking_id"] = "booking-whatsapp-123"
+        return ("Booking confirmed!", "BOOKING_CONFIRMED_CARD", None)
+
+    monkeypatch.setattr(
+        "app.engine.langgraph_orchestrator.message_processor._handle_booking_flow",
+        AsyncMock(side_effect=_booking_gate),
+    )
+    send_confirmation = AsyncMock()
+    monkeypatch.setattr("app.core.mail.send_confirmation_emails", send_confirmation)
+
+    session = _chat_session(session_id=f"session-{channel}")
+    session.channel = channel
+    await process_message_with_graph(
+        db=SimpleNamespace(),
+        org=SimpleNamespace(id=uuid.UUID("00000000-0000-0000-0000-000000000001")),
+        org_config=SimpleNamespace(require_otp=False),
+        chat_session=session,
+        message_text="confirm booking",
+        background_tasks=None,
+    )
+
+    assert send_confirmation.await_count == 1
+    args = send_confirmation.await_args.args
+    assert args[0] == "customer@example.com"
+    assert args[2]["booking_id"] == "booking-whatsapp-123"
+    assert args[2]["source_channel"] == "WhatsApp"
+
+
+@pytest.mark.asyncio
 async def test_idempotent_replay_prevents_duplicate_otp_and_confirmation_side_effects(monkeypatch):
     field_defs = [
         {"name": "email", "type": "email", "required": True},

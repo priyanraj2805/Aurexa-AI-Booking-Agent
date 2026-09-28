@@ -12,26 +12,12 @@
  */
 
 (function () {
-  const _WIDGET_LOAD_BUILD = "2026-09-01-fix-phone-otp-ready-3-client-log";
+  const _WIDGET_LOAD_BUILD = "2026-09-26-whatsapp-only-otp";
   console.warn("[DotStark] widget.js loaded, build:", _WIDGET_LOAD_BUILD, "href:", window.location.href);
   console.warn("[DotStark] If you see no logs after Verify, ensure console filter is set to All/Verbose, not Errors only");
-  // Firebase config for dotstark-833ec (aurexa) — phone OTP via Firebase
-  const FIREBASE_CONFIG = {
-    apiKey: "AIzaSyC7zH8cEITPDpfyiqhPo7ZlK1-2DViL1BI",
-    authDomain: "dotstark-833ec.firebaseapp.com",
-    projectId: "dotstark-833ec",
-    storageBucket: "dotstark-833ec.firebasestorage.app",
-    messagingSenderId: "287417969813",
-    appId: "1:287417969813:web:7ba50454917fe54d4f3f9c",
-    measurementId: "G-MB7QC1JRGK"
-  };
-  let firebaseApp = null;
-  let firebaseAuth = null;
-  let firebaseRecaptchaVerifier = null;
-  let firebaseConfirmationResult = null;
 
   // Force-refresh build tag so embed caches bust after this fix
-  const WIDGET_BUILD = "2026-09-01-fix-phone-otp-ready-3-client-log";
+  const WIDGET_BUILD = "2026-09-26-whatsapp-only-otp";
 
   // Send lightweight beacon to backend so docker logs show widget events even if browser console hidden
   function _logToBackend(event, detail) {
@@ -49,7 +35,6 @@
         event: String(event || "unknown").slice(0, 40),
         session_id: String(sid || "").slice(0, 36),
         channel: "phone",
-        hasConfirmationResult: typeof firebaseConfirmationResult !== "undefined" ? !!firebaseConfirmationResult : null,
         detail: String(detail || "").slice(0, 200),
         phone_masked: ""
       };
@@ -60,116 +45,6 @@
         keepalive: true
       }).catch(() => {});
     } catch (_) {}
-  }
-
-  function _resetRecaptchaVerifier() {
-    try {
-      if (firebaseRecaptchaVerifier && typeof firebaseRecaptchaVerifier.clear === "function") {
-        firebaseRecaptchaVerifier.clear();
-      }
-    } catch (_) {}
-    firebaseRecaptchaVerifier = null;
-    const old = document.getElementById("firebase-recaptcha-container");
-    if (old && old.parentNode) old.parentNode.removeChild(old);
-  }
-
-  async function ensureFirebase() {
-    console.log("[DotStark] Firebase Auth initialization started build:", WIDGET_BUILD);
-    // If already initialized, ensure verifier is fresh (single-use). Re-create if needed.
-    if (firebaseApp && firebaseAuth && firebaseRecaptchaVerifier) {
-      try {
-        // Verifier may be expired/consumed - test render state, if fails recreate
-        console.log("[DotStark] reCAPTCHA already initialized, reusing");
-        return true;
-      } catch (_) {
-        _resetRecaptchaVerifier();
-      }
-    }
-    if (firebaseApp && !firebaseAuth) {
-      try { firebaseAuth = window.firebase.auth(); } catch (_) {}
-    }
-    try {
-      // Load Firebase via CDN scripts (compat version, works in IIFE)
-      if (!window.firebase) {
-        console.log("[DotStark] Loading Firebase SDK via CDN");
-        await new Promise((resolve, reject) => {
-          const s1 = document.createElement("script");
-          s1.src = "https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js";
-          s1.onload = () => {
-            const s2 = document.createElement("script");
-            s2.src = "https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js";
-            s2.onload = resolve;
-            s2.onerror = () => reject(new Error("firebase-auth-compat load failed"));
-            document.head.appendChild(s2);
-          };
-          s1.onerror = () => reject(new Error("firebase-app-compat load failed"));
-          document.head.appendChild(s1);
-        });
-        console.log("[DotStark] Firebase SDK loaded");
-      }
-      if (!window.firebase) throw new Error("Firebase not loaded");
-      if (!firebaseApp) {
-        // firebase.apps may already contain the app if widget re-injected
-        try {
-          if (window.firebase.apps && window.firebase.apps.length) {
-            firebaseApp = window.firebase.apps[0];
-          } else {
-            firebaseApp = window.firebase.initializeApp(FIREBASE_CONFIG);
-          }
-        } catch (initErr) {
-          // Already initialized error -> reuse existing
-          if (window.firebase.apps && window.firebase.apps.length) firebaseApp = window.firebase.apps[0];
-          else throw initErr;
-        }
-        console.log("[DotStark] Firebase app initialized, project:", FIREBASE_CONFIG.projectId);
-      }
-      if (!firebaseAuth) firebaseAuth = window.firebase.auth();
-      // Ensure auth language/device
-      try { firebaseAuth.useDeviceLanguage(); } catch (_) {}
-      console.log("[DotStark] Firebase Auth instance ready, hasAuth:", !!firebaseAuth);
-      // Create invisible reCAPTCHA verifier in light DOM.
-      // Must be attached to DOM and not display:none; 1px off-screen is ok for invisible.
-      _resetRecaptchaVerifier();
-      let recaptchaContainer = document.getElementById("firebase-recaptcha-container");
-      if (!recaptchaContainer) {
-        recaptchaContainer = document.createElement("div");
-        recaptchaContainer.id = "firebase-recaptcha-container";
-        // Keep in DOM flow but visually hidden - Firebase rejects display:none
-        recaptchaContainer.style.position = "fixed";
-        recaptchaContainer.style.bottom = "10px";
-        recaptchaContainer.style.right = "10px";
-        recaptchaContainer.style.width = "1px";
-        recaptchaContainer.style.height = "1px";
-        recaptchaContainer.style.opacity = "0.01";
-        recaptchaContainer.style.pointerEvents = "none";
-        recaptchaContainer.style.zIndex = "2147483647";
-        document.body.appendChild(recaptchaContainer);
-      }
-      console.log("[DotStark] reCAPTCHA container ready, exists:", !!document.getElementById("firebase-recaptcha-container"));
-      firebaseRecaptchaVerifier = new window.firebase.auth.RecaptchaVerifier("firebase-recaptcha-container", { size: "invisible" });
-      console.log("[DotStark] reCAPTCHA Verifier created, rendering...");
-      await firebaseRecaptchaVerifier.render();
-      console.log("[DotStark] reCAPTCHA initialized, rendered:", !!firebaseRecaptchaVerifier);
-      // Prepare language
-      if (firebaseAuth && firebaseAuth.settings) {
-        try { firebaseAuth.settings.appVerificationDisabledForTesting = false; } catch (_) {}
-      }
-      return true;
-    } catch (e) {
-      console.warn("[DotStark] Firebase init failed", e, "code:", e && e.code, "message:", e && e.message);
-      _resetRecaptchaVerifier();
-      return false;
-    }
-  }
-
-  async function _ensureFreshVerifier() {
-    // signInWithPhoneNumber consumes the verifier - must recreate for every send/resend
-    if (firebaseRecaptchaVerifier) {
-      try { firebaseRecaptchaVerifier.clear(); } catch (_) {}
-      firebaseRecaptchaVerifier = null;
-    }
-    const ok = await ensureFirebase();
-    return ok && !!firebaseRecaptchaVerifier && !!firebaseAuth;
   }
 
   function _defaultApiBase(scriptEl) {
@@ -1897,148 +1772,14 @@
       // Focus the OTP input
       setTimeout(() => input.focus(), 100);
 
-      // Helper to resolve the phone to verify from multiple sources without a fake fallback.
-      const _resolvePhoneForSms = () => {
-        // Prefer explicit fieldMeta from backend (message_processor includes phone)
-        let raw = (fieldMeta?.phone || this._activeFieldMeta?.phone || "").toString().trim();
-        if (!raw) {
-          // Try to find last user phone bubble (stored via _appendPhoneInput)
-          try {
-            const bubbles = this._msgList.querySelectorAll(".message.user");
-            for (let i = bubbles.length - 1; i >= 0; i--) {
-              const t = (bubbles[i].textContent || "").trim();
-              // phone bubbles contain dial + number like "+91 9876543210"
-              if (/^\+?\d[\d\s\-()]{6,}$/.test(t) && t.replace(/\D/g, "").length >= 10) {
-                raw = t;
-                break;
-              }
-            }
-          } catch (_) {}
-        }
-        if (!raw) {
-          // Last resort: try sessionStorage last phone draft
-          try { raw = (this._directiveDrafts.phone?.localNumber || "").toString().trim(); } catch (_) {}
-          if (raw) {
-            const cc = (this._directiveDrafts.phone?.countryCode || "").toString().trim();
-            const dialMap = { US: "+1", GB: "+44", IN: "+91", AU: "+61", CA: "+1" };
-            const dial = dialMap[cc] || "";
-            if (dial) raw = dial + " " + raw;
-          }
-        }
-        return raw;
-      };
-      const _normalizePhoneE164 = (raw) => {
-        const trimmed = (raw || "").toString().trim();
-        if (!trimmed) return "";
-        // Already E.164 with +
-        if (trimmed.startsWith("+")) {
-          // Ensure single space, compact digits but keep +
-          const digits = trimmed.replace(/[^\d+]/g, "");
-          // Keep + then digits
-          return "+" + digits.replace(/\D/g, "");
-        }
-        const digits = trimmed.replace(/\D/g, "");
-        if (digits.length === 10) return "+91" + digits; // default IN for 10-digit local
-        if (digits.length >= 11 && digits.length <= 15) return "+" + digits;
-        return digits ? "+" + digits : "";
-      };
-
-      // For phone channel via Firebase, trigger SMS send immediately
-      let _phoneSmsRetryCount = 0;
-      const _sendPhoneSms = async (isResend = false) => {
-        const rawPhone = _resolvePhoneForSms();
-        console.warn("[DotStark] Send OTP started, channel: phone, raw:", rawPhone, "fieldMeta.phone:", fieldMeta?.phone, "activeMeta.phone:", this._activeFieldMeta?.phone);
-        _logToBackend(isResend ? "phone_resend_start" : "phone_send_start", rawPhone);
-        if (!rawPhone || rawPhone.replace(/\D/g, "").length < 10) {
-          console.warn("[DotStark] phone resolve failed - raw:", rawPhone);
-          _logToBackend("phone_resolve_failed", rawPhone || "empty");
-          firebaseStatus = "We couldn't detect your phone number. Please re-enter your phone and try again.";
-          statusMsg.textContent = firebaseStatus;
-          statusMsg.style.color = "#ef4444";
-          updateResendUi();
-          btn.disabled = false;
-          input.disabled = false;
-          return false;
-        }
-        const phone = _normalizePhoneE164(rawPhone);
-        console.log("[DotStark] phone number normalized:", phone, "from raw:", rawPhone);
-        if (!phone || !phone.startsWith("+") || phone.replace(/\D/g, "").length < 10) {
-          console.warn("[DotStark] invalid phone format - raw:", rawPhone, "normalized:", phone);
-          _logToBackend("phone_invalid_format", `${rawPhone} -> ${phone}`);
-          firebaseStatus = "Invalid phone number. Please check and re-enter it.";
-          statusMsg.textContent = firebaseStatus;
-          statusMsg.style.color = "#ef4444";
-          updateResendUi();
-          btn.disabled = false;
-          input.disabled = false;
-          return false;
-        }
-        // Ensure fresh verifier for each send (single-use)
-        const verifierReady = await _ensureFreshVerifier();
-        console.log("[DotStark] ensureFirebase done, ok:", verifierReady, "hasAuth:", !!firebaseAuth, "hasVerifier:", !!firebaseRecaptchaVerifier);
-        if (!verifierReady) {
-          console.warn("[DotStark] reCAPTCHA not ready - verifierReady:", verifierReady, "hasAuth:", !!firebaseAuth, "hasVerifier:", !!firebaseRecaptchaVerifier);
-          _logToBackend("phone_verifier_not_ready", `ready:${verifierReady} hasAuth:${!!firebaseAuth} hasVerifier:${!!firebaseRecaptchaVerifier}`);
-          firebaseStatus = "Preparing verification... Please wait a moment then click Resend.";
-          statusMsg.textContent = firebaseStatus;
-          statusMsg.style.color = "#64748b";
-          updateResendUi();
-          btn.disabled = true;
-          input.disabled = true;
-          setTimeout(() => { btn.disabled = false; input.disabled = false; }, 1500);
-          return false;
-        }
-        try {
-          firebaseStatus = `Sending SMS to ${phone} via Firebase...`;
-          statusMsg.textContent = firebaseStatus;
-          statusMsg.style.color = "#64748b";
-          updateResendUi();
-          console.warn("[DotStark] signInWithPhoneNumber started for", phone, "verifier:", !!firebaseRecaptchaVerifier);
-          _logToBackend("phone_sending", phone);
-          firebaseConfirmationResult = await firebaseAuth.signInWithPhoneNumber(phone, firebaseRecaptchaVerifier);
-          console.warn("[DotStark] signInWithPhoneNumber resolved, confirmationResult exists:", !!firebaseConfirmationResult);
-          _logToBackend("phone_sent", phone);
-          firebaseStatus = `Code sent to ${phone} via Firebase. Enter it above.`;
-          statusMsg.textContent = firebaseStatus;
-          statusMsg.style.color = "#22c55e";
-          updateResendUi();
-          btn.disabled = false;
-          input.disabled = false;
-          console.warn("[DotStark] Verify button enabled, hasConfirmationResult:", !!firebaseConfirmationResult);
-          return true;
-        } catch (e) {
-          const detail = e && e.message ? e.message : String(e);
-          const code = e && e.code ? ` [${e.code}]` : "";
-          // Map common codes to actionable hints for dev console only
-          let devHint = "";
-          if (code.includes("unauthorized-domain")) devHint = " - Add this domain to Firebase Console > Auth > Authorized domains";
-          else if (code.includes("captcha-check-failed")) devHint = " - reCAPTCHA blocked, reload page";
-          else if (code.includes("invalid-phone-number")) devHint = " - check phone format E.164";
-          else if (code.includes("quota-exceeded")) devHint = " - Firebase SMS quota exceeded";
-          else if (code.includes("too-many-requests")) devHint = " - too many attempts, wait";
-          console.warn("[DotStark] Firebase SMS failed - COMPLETE error (technical, dev console & backend):", e, "code:", code, "message:", detail, "hint:", devHint);
-          _logToBackend("phone_send_failed", `${code} ${detail.slice(0,80)}${devHint}`);
-          firebaseStatus = "Code not sent yet. Please click Resend to try again. (See developer console for technical detail)";
-          statusMsg.textContent = firebaseStatus;
-          statusMsg.style.color = "#64748b";
-          updateResendUi();
-          btn.disabled = true;
-          input.disabled = true;
-          setTimeout(() => { btn.disabled = false; input.disabled = false; }, 1500);
-          // Clear consumed verifier so next retry recreates
-          try { firebaseRecaptchaVerifier.clear(); } catch (_) {}
-          firebaseRecaptchaVerifier = null;
-          return false;
-        }
-      };
-
+      // Phone codes are generated by the backend and delivered via WhatsApp;
+      // the modal below only collects the code and verifies it server-side.
       if (isPhone) {
-        // Zavu path: backend already sent SMS via /generate (kd78m7agx48rpyegpfrmhp5rsx8dm8t9 sms_oneway).
-        // Do not auto-trigger Firebase SMS — just enable input and show status.
-        // Keep _sendPhoneSms for manual Resend fallback only.
+        // Backend already sent the code via WhatsApp when the OTP modal was
+        // issued. Just enable input and show status.
         setTimeout(() => {
-          firebaseStatus = "Code sent via SMS. Enter it above.";
-          statusMsg.textContent = firebaseStatus;
+          sendStatus = "Code sent via WhatsApp. Enter it above.";
+          statusMsg.textContent = sendStatus;
           statusMsg.style.color = "#22c55e";
           updateResendUi();
           btn.disabled = false;
@@ -2048,16 +1789,16 @@
 
       let resendCount = Math.max(0, policy.resendCap - policy.resendsLeft);
       let cooldownRemaining = Math.max(0, policy.cooldownSeconds);
-      let firebaseStatus = ""; // keep Firebase send status separate so cooldown doesn't clobber it
+      let sendStatus = ""; // keep send status separate so cooldown doesn't clobber it
       const updateResendUi = () => {
         const resendsLeft = Math.max(0, policy.resendCap - resendCount);
         const cooldownText =
           cooldownRemaining > 0
             ? `Resend available in ${cooldownRemaining}s`
             : "You can resend now";
-        // For phone, preserve Firebase status and append cooldown; don't overwrite Code sent/Failed
-        if (isPhone && firebaseStatus) {
-          statusMsg.textContent = `${firebaseStatus} • ${cooldownText} • ${resendsLeft} resends left`;
+        // For phone, preserve send status and append cooldown; don't overwrite Code sent/Failed
+        if (isPhone && sendStatus) {
+          statusMsg.textContent = `${sendStatus} • ${cooldownText} • ${resendsLeft} resends left`;
         } else {
           statusMsg.textContent = `${cooldownText} • ${resendsLeft} resends left`;
         }
@@ -2074,19 +1815,10 @@
         updateResendUi();
       }, 1000);
 
-      // For phone, disable Verify until Firebase is ready to guarantee id_token path
-      if (isPhone) {
-        btn.disabled = true;
-        input.disabled = true;
-        firebaseStatus = "Preparing phone verification...";
-        statusMsg.textContent = firebaseStatus;
-        updateResendUi();
-      }
-
       btn.onclick = async () => {
         const code = (input.value || "").replace(/\s+/g, "");
-        console.warn("[DotStark] Verify clicked. code length:", code.length, "session:", this.sessionId, "channel:", channel, "hasConfirmationResult:", !!firebaseConfirmationResult);
-        _logToBackend("verify_clicked", `code_len:${code.length} hasConfirmation:${!!firebaseConfirmationResult} channel:${channel}`);
+        console.warn("[DotStark] Verify clicked. code length:", code.length, "session:", this.sessionId, "channel:", channel);
+        _logToBackend("verify_clicked", `code_len:${code.length} channel:${channel}`);
         // Keep global session for backend logs
         try { window._dotstarkLastSessionId = this.sessionId; } catch (_) {}
         if (code.length < 4) {
@@ -2109,148 +1841,39 @@
         try {
           let res;
           if (isPhone) {
-            // Zavu SMS path (kd78m7agx48rpyegpfrmhp5rsx8dm8t9 sms_oneway) — try 6-digit code verify first
-            // Backend already sent SMS via /generate; this is the primary path. Firebase is fallback.
+            // Phone codes are generated by the backend and delivered via
+            // WhatsApp — verify the 6-digit code directly, no client SDK.
             try {
-              const zavuPayload = { session_id: this.sessionId, channel: "phone", code };
-              console.warn("[DotStark] Trying Zavu phone verify with code", code.slice(0,2)+"***");
-              _logToBackend("zavu_verify_attempt", `code_len:${code.length}`);
-              const zavuRes = await fetch(`${CONFIG.apiBase}/auth/security/otp/verify`, {
+              const waPayload = { session_id: this.sessionId, channel: "phone", code };
+              console.warn("[DotStark] Verifying WhatsApp phone code");
+              _logToBackend("wa_verify_attempt", `code_len:${code.length}`);
+              const waRes = await fetch(`${CONFIG.apiBase}/auth/security/otp/verify`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "X-Widget-Token": CONFIG.widgetToken || "", "X-Requested-With": "XMLHttpRequest" },
-                body: JSON.stringify(zavuPayload)
+                body: JSON.stringify(waPayload)
               });
-              if (zavuRes.ok) {
-                console.warn("[DotStark] Zavu phone verify succeeded");
-                _logToBackend("zavu_verify_success", code.slice(0,2)+"***");
-                div.textContent = "";
-                const success = document.createElement("div");
-                success.className = "success-msg";
-                success.textContent = "✅ Phone Verified Successfully!";
-                div.appendChild(success);
-                this._input.disabled = false;
-                this._sendBtn.disabled = false;
-                this._input.placeholder = "Type a message...";
-                this._input.style.opacity = "1";
-                setTimeout(() => this._handleSendManual("I've verified the code. Please proceed."), 800);
-                return;
+              if (waRes.ok) {
+                console.warn("[DotStark] WhatsApp phone verify succeeded");
+                _logToBackend("wa_verify_success", code.slice(0,2)+"***");
+                res = waRes;
               } else {
-                const t = await zavuRes.text().catch(()=> "");
+                const t = await waRes.text().catch(()=> "");
                 const detail = t.slice(0,120);
-                console.warn("[DotStark] Zavu verify failed status", zavuRes.status, detail, " — trying Firebase fallback");
-                _logToBackend("zavu_verify_failed", `status:${zavuRes.status} ${detail.slice(0,60)}`);
-                // If 400 invalid/expired, show error and don't fall through to Firebase (code is wrong, not missing)
-                if (zavuRes.status === 400) {
-                  statusMsg.textContent = detail || "That code is incorrect or has expired. Please try again or resend a new code.";
-                  statusMsg.style.color = "#ef4444";
-                  btn.disabled = false;
-                  input.disabled = false;
-                  btn.textContent = "Verify";
-                  input.value = "";
-                  input.focus();
-                  return;
-                }
-                // For 429, 500 etc, fall through to Firebase
-              }
-            } catch (zavuErr) {
-              console.warn("[DotStark] Zavu verify error, falling back to Firebase", zavuErr);
-              _logToBackend("zavu_verify_error", String(zavuErr).slice(0,80));
-            }
-            // TEST CODE BYPASS: allow "123456" to complete flow via mock token for local/dev testing
-            // This lets you test booking without real SMS when Firebase send is blocked (domain/quota) or using test numbers
-            if (code === "123456") {
-              const _testRaw = _resolvePhoneForSms() || fieldMeta?.phone || this._activeFieldMeta?.phone || "";
-              const _testPhone = _normalizePhoneE164(_testRaw);
-              if (_testPhone) {
-                console.warn("[DotStark] Test code 123456 detected - trying mock_valid_token for", _testPhone, "(dev console, also logged to backend)");
-                _logToBackend("phone_mock_verify_attempt", _testPhone);
-                try {
-                  const mockToken = `mock_valid_token:${_testPhone}`;
-                  const mockPayload = { session_id: this.sessionId, channel: "phone", id_token: mockToken };
-                  console.warn("[DotStark] POST mock verify", mockPayload.session_id.slice(0,8)+"***", "token", mockToken.slice(0,20)+"***");
-                  res = await fetch(`${CONFIG.apiBase}/auth/security/otp/verify`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json", "X-Widget-Token": CONFIG.widgetToken || "", "X-Requested-With": "XMLHttpRequest" },
-                    body: JSON.stringify(mockPayload)
-                  });
-                  if (res.ok) {
-                    console.warn("[DotStark] Mock verify succeeded - completing flow");
-                    _logToBackend("phone_mock_verify_success", _testPhone);
-                    div.textContent = "";
-                    const success = document.createElement("div");
-                    success.className = "success-msg";
-                    success.textContent = "✅ Phone Verified Successfully!";
-                    div.appendChild(success);
-                    this._input.disabled = false;
-                    this._sendBtn.disabled = false;
-                    this._input.placeholder = "Type a message...";
-                    this._input.style.opacity = "1";
-                    setTimeout(() => this._handleSendManual("I've verified the code. Please proceed."), 800);
-                    return;
-                  } else {
-                    const t = await res.text().catch(()=> "");
-                    console.warn("[DotStark] Mock verify failed - status", res.status, t.slice(0,100), "falling through to Firebase");
-                    _logToBackend("phone_mock_verify_failed", `status:${res.status} ${t.slice(0,80)}`);
-                    // fall through to normal Firebase path below
-                  }
-                } catch (mockErr) {
-                  console.warn("[DotStark] Mock verify error", mockErr);
-                  _logToBackend("phone_mock_verify_error", String(mockErr).slice(0,100));
-                }
-              }
-            }
-            // Attempt auto-recovery if confirmationResult is still null (e.g. initial send failed)
-            if (!firebaseConfirmationResult) {
-              console.warn("[DotStark] Verify clicked without confirmationResult - attempting recovery send (technical detail in dev console, backend logs)");
-              _logToBackend("verify_no_confirmation", `code_len:${code.length} hasConfirmation:false`);
-              statusMsg.textContent = "Sending code... Please wait a moment then try again. (Technical detail in developer console)";
-              statusMsg.style.color = "#64748b";
-              const recovered = await _sendPhoneSms(false);
-              if (!firebaseConfirmationResult) {
-                console.warn("[DotStark] Recovery send still no confirmationResult - check dev console for [DotStark] Firebase SMS failed and backend docker logs widget.client_log");
-                _logToBackend("verify_still_no_confirmation", "after recovery");
-                firebaseStatus = "Code is being prepared. Please click Resend and wait for the SMS.";
-                statusMsg.textContent = firebaseStatus;
-                statusMsg.style.color = "#64748b";
-                updateResendUi();
-                btn.disabled = true;
-                input.disabled = true;
+                console.warn("[DotStark] WhatsApp verify failed status", waRes.status, detail);
+                _logToBackend("wa_verify_failed", `status:${waRes.status} ${detail.slice(0,60)}`);
+                statusMsg.textContent = detail || "That code is incorrect or has expired. Please try again or resend a new code.";
+                statusMsg.style.color = "#ef4444";
+                btn.disabled = false;
+                input.disabled = false;
                 btn.textContent = "Verify";
-                setTimeout(() => { btn.disabled = false; input.disabled = false; }, 2000);
+                input.value = "";
+                input.focus();
                 return;
               }
-            }
-            try {
-              const cred = await firebaseConfirmationResult.confirm(code);
-              if (!cred || !cred.user) throw new Error("No user after confirm");
-              const idToken = await cred.user.getIdToken();
-              if (!idToken || typeof idToken !== "string" || idToken.length < 20) throw new Error("Empty idToken");
-              console.log("[DotStark] Firebase idToken length:", idToken.length, "prefix:", idToken.slice(0, 20));
-              // Verify payload contains id_token before sending
-              const payload = { session_id: this.sessionId, channel: "phone", id_token: idToken };
-              console.log("[DotStark] POST /auth/security/otp/verify payload has id_token:", !!payload.id_token, "len:", payload.id_token.length);
-              res = await fetch(
-                `${CONFIG.apiBase}/auth/security/otp/verify`,
-                {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "X-Widget-Token": CONFIG.widgetToken || "",
-                    "X-Requested-With": "XMLHttpRequest",
-                  },
-                  body: JSON.stringify(payload),
-                },
-              );
-            } catch (firebaseErr) {
-              const fCode = firebaseErr && firebaseErr.code ? String(firebaseErr.code) : "";
-              const fMsg = firebaseErr && firebaseErr.message ? String(firebaseErr.message) : String(firebaseErr);
-              console.warn("[DotStark] Firebase confirm failed (dev console, technical):", firebaseErr, "code:", fCode, "msg:", fMsg);
-              let userMsg = "We couldn't verify the code. Please try again.";
-              if (fCode.includes("invalid-verification-code") || fMsg.toLowerCase().includes("code")) userMsg = "That code is incorrect. Please check the SMS and try again.";
-              else if (fCode.includes("code-expired")) userMsg = "That code has expired. Please click Resend for a new one.";
-              else if (fCode.includes("too-many-requests")) userMsg = "Too many attempts. Please wait a minute then click Resend.";
-              // Generic friendly for other technical failures - details in dev console
-              statusMsg.textContent = userMsg;
+            } catch (waErr) {
+              console.warn("[DotStark] WhatsApp verify error", waErr);
+              _logToBackend("wa_verify_error", String(waErr).slice(0,80));
+              statusMsg.textContent = "Couldn't reach the server to verify. Please check your connection and try again.";
               statusMsg.style.color = "#ef4444";
               btn.disabled = false;
               input.disabled = false;
@@ -2336,7 +1959,7 @@
         statusMsg.textContent = "";
 
         try {
-          // For Zavu, resend via backend chat "resend phone" will create a new OTP card with updated resends_left.
+          // Resend via backend chat "resend phone" will create a new OTP card with updated resends_left.
           // Remove this stale card so user sees only the fresh one with correct count.
           const thisCard = div;
           if (isPhone) {
@@ -2352,10 +1975,10 @@
           if (!isPhone) {
             statusMsg.textContent = `Code resent! (${left} resends left)`;
             statusMsg.style.color = "#22c55e";
-            firebaseStatus = statusMsg.textContent;
+            sendStatus = statusMsg.textContent;
           } else {
-            firebaseStatus = `Code resent! (${left} resends left)`;
-            statusMsg.textContent = `${firebaseStatus} • Resend available in ${cooldownRemaining}s • ${left} resends left`;
+            sendStatus = `Code resent! (${left} resends left)`;
+            statusMsg.textContent = `${sendStatus} • Resend available in ${cooldownRemaining}s • ${left} resends left`;
             statusMsg.style.color = "#22c55e";
           }
           updateResendUi();
@@ -2364,7 +1987,7 @@
         } catch (e) {
           statusMsg.textContent = "Failed to resend. Please try again.";
           statusMsg.style.color = "#ef4444";
-          firebaseStatus = statusMsg.textContent;
+          sendStatus = statusMsg.textContent;
           updateResendUi();
         }
 

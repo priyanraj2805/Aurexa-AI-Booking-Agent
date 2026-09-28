@@ -3,8 +3,15 @@ import re
 from typing import Any, Dict, Tuple
 
 
-_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*? response", flags=re.IGNORECASE | re.DOTALL)
+_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", flags=re.IGNORECASE | re.DOTALL)
 _THINK_TAG_RE = re.compile(r"</?think\b[^>]*>", flags=re.IGNORECASE)
+_REASONING_LEAK_RE = re.compile(
+    r"(?:here\s+is\s+my\s+analysis|let's\s+reason|reason\s+step\s+by\s+step|"
+    r"internal\s+reasoning|chain\s+of\s+thought|first\s+i['’]?ll\s+reason|"
+    r"before\s+giving\s+(?:a\s+)?final\s+answer|final\s+answer\s*:)",
+    flags=re.IGNORECASE,
+)
+_FALLBACK_TEXT = "I'm here to help with your booking."
 
 # Structural keys of our LLM contract. Their presence means "this was meant
 # to be a machine payload" — never business content, safe to key on.
@@ -65,6 +72,25 @@ CONFIRMATION_CLAIM_PATTERN = re.compile(
     r"(?:(?:has\s+been|was|is)\s+)?(?:now\s+|successfully\s+)?"
     r"(?:confirmed|booked|reserved|scheduled|finalized)|"
     r"(?:booking|appointment|reservation)\s+(?:is\s+)?confirmed|"
+    # A date/slot detail wedged between the noun and the verb used to defeat
+    # the whole truthfulness guard:
+    #     "Your booking for September 30, 2026 at 10:30 AM is confirmed."
+    # scored False, so the model told a customer they were booked while no
+    # Booking row existed. Allow a bounded detail clause between the noun and
+    # the verb. Commas are allowed (dates read "September 30, 2026") but the
+    # clause still stops at a period, semicolon or full stop, so it can never
+    # span into the next sentence.
+    r"(?:booking|appointment|reservation|slot)\s+"
+    r"(?:(?:for|on|at|to)\s+[^.;!?]{0,60}?)?"
+    r"(?:(?:has\s+been|have\s+been|was|were|is|are)\s+)?"
+    r"(?:still\s+|now\s+|already\s+|successfully\s+)*"
+    r"(?:confirmed|booked|reserved|scheduled|finalized)\b|"
+    # "your appointment is set for ..." asserts completion just as strongly as
+    # "confirmed" and previously slipped through, so a customer was told the
+    # slot was taken with no Booking row ever written. Only the booking nouns
+    # qualify, so mid-flow phrasing like "the date is set" is not affected.
+    r"(?:booking|appointment|reservation|slot)\s+(?:is\s+|are\s+|has\s+been\s+|have\s+been\s+|was\s+|were\s+)?(?:set|locked\s+in)\b|"
+    r"(?:we|i)\s+(?:have\s+|has\s+)?(?:booked|confirmed|reserved|scheduled)\s+(?:your|the)\b|"
     r"successfully\s+(?:booked|confirmed|reserved|scheduled)|"
     r"(?:booked|confirmed|reserved|scheduled)\s+successfully|"
     r"\bdone!\s*(?:your|.)?\s*(?:booking|appointment|slot)"
@@ -137,8 +163,10 @@ def looks_like_field_saved_claim(message: str, field_name: str) -> bool:
 def sanitize_user_visible_text(raw_message: Any) -> str:
     text = str(raw_message or "")
     text = _THINK_BLOCK_RE.sub("", text)
-    text = _THINK_TAG_RE.sub("", text)
-    return text.strip() or "I'm here to help with your booking."
+    text = _THINK_TAG_RE.sub("", text).strip()
+    if not text or _REASONING_LEAK_RE.search(text):
+        return _FALLBACK_TEXT
+    return text
 
 
 def _extract_embedded_json_object(text: str) -> Dict[str, Any]:

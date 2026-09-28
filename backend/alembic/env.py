@@ -6,6 +6,9 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
+import sqlalchemy as sa
+from sqlalchemy import Column, Table
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -29,7 +32,8 @@ from app.models.organization import Organization
 from app.models.config import OrgConfig
 from app.models.session import ChatSession
 from app.models.booking import TimeSlot, Booking
-from app.models.otp import OTPRecord
+from app.models.service_unit import ServiceUnit, Provider, UnitProvider, ProviderFee
+from app.models.otp import OTPRecord, AuthOTPRecord
 from app.models.user import User
 from app.models.message import ChatMessage
 from app.models.audit_log import AuditLog
@@ -39,9 +43,39 @@ from app.models.payment import PaymentAttempt, RazorpayWebhookEvent
 from app.models.razorpay_route import RazorpayLinkedAccount, RazorpayTransfer
 from app.models.whatsapp_connection import WhatsAppConnection
 from app.models.booking_directive import BookingDirective
+from app.models.broadcast import BroadcastDelivery, BroadcastRead
+from app.models.impersonation import ImpersonationSession
+from app.models.document_chunk import DocumentChunk
+from app.models.escalation_policy import EscalationPolicy, EscalationRoutingTarget, EscalationRotationWindow
+from app.models.login_code import LoginCode
+from app.models.org_notification import OrgNotification
+from app.models.rbac import Permission, Role, RolePermission, UserRole, DenyRule
 from app.core.config import settings
 
 target_metadata = Base.metadata
+Table(
+    "broadcast_notifications",
+    Base.metadata,
+    Column("id", PG_UUID(as_uuid=True), primary_key=True),
+    schema="super_admin",
+    info={"skip_autogenerate": True},
+)
+
+
+def include_object(object, name, type_, reflected, compare_to):
+    if type_ == "table" and object.info.get("skip_autogenerate"):
+        return False
+    return True
+
+
+def compare_type(context, inspected_column, metadata_column, inspected_type, metadata_type):
+    if (
+        isinstance(metadata_type, sa.Enum)
+        and metadata_type.native_enum is False
+        and isinstance(inspected_type, (sa.String, sa.Text))
+    ):
+        return False
+    return None
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
@@ -67,6 +101,8 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
+        compare_type=compare_type,
     )
 
     with context.begin_transaction():
@@ -74,7 +110,12 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        include_object=include_object,
+        compare_type=compare_type,
+    )
 
     with context.begin_transaction():
         context.run_migrations()

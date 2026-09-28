@@ -220,6 +220,9 @@ async def send_email_with_failover(
     payload: Optional[dict] = None,
     attempt_count: int = 1,
 ) -> UUID:
+    to_email = str(to_email or "").strip()
+    if not to_email:
+        raise ValueError("Email recipient is required")
     max_attempts = max(1, settings.EMAIL_RETRY_MAX_ATTEMPTS)
     idempotency_key = None
     if isinstance(payload, dict):
@@ -236,15 +239,16 @@ async def send_email_with_failover(
                     EmailDeliveryLog.recipient_email == to_email,
                 )
                 .order_by(EmailDeliveryLog.created_at.desc())
-                .limit(25)
             )
             for row in existing_rows.scalars().all():
                 row_payload = row.payload if isinstance(row.payload, dict) else {}
-                if (
-                    row_payload.get("idempotency_key") == idempotency_key
-                    and row.status in {"pending", "sent"}
-                ):
+                if row_payload.get("idempotency_key") != idempotency_key:
+                    continue
+                if row.status == "sent":
                     return row.id
+                if row.status == "pending":
+                    delivery_id = row.id
+                    break
         if delivery_id:
             existing = await get_delivery_by_id(db, delivery_id)
             if existing:

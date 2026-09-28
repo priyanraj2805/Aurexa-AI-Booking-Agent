@@ -19,7 +19,7 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-VALID_INTENTS = ["START_BOOKING", "PROVIDE_DATA", "EDIT_DATA", "CANCEL_BOOKING", "CHECK_BOOKING", "ASK_QUESTION", "CONFIRM_BOOKING", "CHITCHAT"]
+VALID_INTENTS = ["START_BOOKING", "PROVIDE_DATA", "EDIT_DATA", "CANCEL_BOOKING", "CHECK_BOOKING", "ASK_QUESTION", "CONFIRM_BOOKING"]
 REQUIRED_RESPONSE_KEYS = {"intent", "extracted_entities", "response_message"}
 
 ProviderOutcomeStatus = Literal["success", "retryable_failure", "terminal_failure"]
@@ -305,7 +305,7 @@ class LLMOrchestrator:
             json_mode=False
         )
         
-        valid_intents = ["START_BOOKING", "PROVIDE_DATA", "EDIT_DATA", "CANCEL_BOOKING", "CHECK_BOOKING", "ASK_QUESTION", "CONFIRM_BOOKING", "CHITCHAT"]
+        valid_intents = ["START_BOOKING", "PROVIDE_DATA", "EDIT_DATA", "CANCEL_BOOKING", "CHECK_BOOKING", "ASK_QUESTION", "CONFIRM_BOOKING"]
         
         if not result or result not in valid_intents:
             # Fallback heuristic if LLM fails or hallucinates
