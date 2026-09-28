@@ -1239,6 +1239,42 @@ async def process_message_with_graph(
         return await decline_flow.start_decline(
             db, org, chat_session, message_text, inbound_message_id=_inbound_id
         )
+    # Off-topic cooldown: after a run of questions the assistant cannot help
+    # with, pause the session briefly. Checked before anything else so the
+    # message is answered without burning an LLM call or advancing the
+    # booking, and so a customer mid-booking is told the wait plainly rather
+    # than having their message silently swallowed.
+    try:
+        from app.engine import offtopic_cooldown as _cooldown
+
+        _cd_remaining = _cooldown.cooldown_remaining(chat_session.collected_data)
+    except Exception:
+        _cooldown = None
+        _cd_remaining = 0
+    if _cd_remaining > 0:
+        _cd_msg = (
+            _cooldown.cooldown_message(_cd_remaining)
+            if _cooldown
+            else "You're still in cooldown. Please try again in a moment."
+        )
+        try:
+            await _persist_transcript_best_effort(
+                db,
+                session_id=session_id,
+                user_message=_transcript_user_text,
+                user_external_id=_inbound_id,
+                assistant_message=_cd_msg,
+                directive="TEXT_INPUT",
+                intent=chat_session.current_intent,
+            )
+        except Exception:
+            pass
+        return ActionPayload(
+            message=_cd_msg,
+            widget_directive="TEXT_INPUT",
+            field_meta={"cooldown_remaining_seconds": _cd_remaining},
+        )
+
     # Re-engagement clears a recorded decline (values or book-words).
     await decline_flow.maybe_reengage(db, chat_session, message_text)
 
@@ -2704,6 +2740,17 @@ async def process_message_with_graph(
         if isinstance(booking_field_meta, dict):
             field_meta.update(booking_field_meta)
         booking_gate_handled = True
+        # An on-topic turn resets the off-topic strike counter, so a customer
+        # who came back to actually book is never held in cooldown by
+        # questions they asked earlier in the conversation.
+        if _cooldown is not None:
+            try:
+                _cd_strikes = _cooldown.strike_count(chat_session.collected_data)
+                if _cd_strikes:
+                    _cooldown.clear(chat_session.collected_data)
+                    await crud_chat.update_chat_session(db, session_id, chat_session)
+            except Exception:
+                logger.warning("off-topic counter reset failed", exc_info=True)
 
     if not booking_gate_handled and otp_required:
         effect_state = _active_effect_state(chat_session)
@@ -2821,9 +2868,15 @@ async def process_message_with_graph(
     _is_knowledge_turn = bool(result.get("knowledge_answer") or field_meta.get("knowledge_answer")) or str(
         current_intent
     ) == "ASK_QUESTION" or _behavior_knowledge
-    if not booking_gate_handled and _is_knowledge_turn and phone_otp_required:
-        # Return the LLM's knowledge answer (already in assistant_message) with TEXT_INPUT
-        # and keep OTP pending (don't clear). Add gentle OTP reminder.
+    if not booking_gate_handled and _is_knowledge_turn:
+        # Deliberately NOT gated on a pending OTP. This branch is the single
+        # place an off-topic answer is produced, so gating it on
+        # phone_otp_required meant the off-topic guardrail only ran mid-booking:
+        # a customer with no booking in progress could ask the assistant
+        # anything indefinitely and it never counted towards a cooldown.
+        # A pending code is still not re-sent here; it is only left untouched.
+        # Return the LLM's knowledge answer with TEXT_INPUT and keep any
+        # pending OTP as it is.
         _knowledge_reply = str(assistant_message or "").strip()
         # Don't re-send OTP on knowledge turn; just remind
         try:
@@ -2843,6 +2896,35 @@ async def process_message_with_graph(
         # that") which read as a brush-off and mention internal machinery the
         # customer has never heard of.
         _knowledge_reply = _normalise_offtopic_decline(_knowledge_reply)
+
+        # A genuine knowledge ANSWER clears the strike counter: the customer
+        # is engaged and being served. Only an actual decline counts, so a
+        # question the knowledgebase answered never pushes anyone closer to a
+        # cooldown. Company questions are exempt from counting in the first
+        # place, since declining those is the assistant's failure, not theirs.
+        if _cooldown is not None:
+            try:
+                _was_decline = _knowledge_reply == _OFFTOPIC_REPLY
+                if not _was_decline:
+                    if _cooldown.strike_count(chat_session.collected_data):
+                        _cooldown.clear(chat_session.collected_data)
+                        await crud_chat.update_chat_session(
+                            db, session_id, chat_session
+                        )
+                elif not _cooldown.looks_like_asking_about_us(message_text):
+                    _strikes = _cooldown.record_offtopic(chat_session.collected_data)
+                    if _strikes >= _cooldown.STRIKE_LIMIT:
+                        logger.info(
+                            "offtopic_cooldown_opened strikes=%s session=%s",
+                            _strikes,
+                            str(session_id)[:8],
+                        )
+                    await crud_chat.update_chat_session(
+                        db, session_id, chat_session
+                    )
+            except Exception:
+                logger.warning("off-topic strike recording failed", exc_info=True)
+
         # Return early, bypassing OTP generation for this knowledge turn.
         #
         # The OTP reminder is deliberately NOT appended. A customer asking an
