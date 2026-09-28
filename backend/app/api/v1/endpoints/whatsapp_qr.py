@@ -1193,7 +1193,24 @@ async def qr_inbound(    payload: QrInboundPayload,
             _reply_text = str(getattr(action, "message", "") or "")
             if _cd.looks_like_decline(_reply_text):
                 if not _cd.looks_like_asking_about_us(text):
+                    # If the window was not open before this turn, this strike
+                    # just opened it: the customer hears the plain opening
+                    # line, not another decline. Anything they send after
+                    # this gets the "still in cooldown" line from the early
+                    # gate instead.
+                    _already_cooling = _cd.is_cooling_down(
+                        chat_session.collected_data
+                    )
                     _cd.record_offtopic(chat_session.collected_data)
+                    if (
+                        not _already_cooling
+                        and _cd.is_cooling_down(chat_session.collected_data)
+                    ):
+                        action.message = _cd.cooldown_opening_message()
+                        logger.info(
+                            "offtopic_cooldown_opened session=%s",
+                            str(chat_session.session_id)[:8],
+                        )
             else:
                 _cd.clear(chat_session.collected_data)
             await _crud_chat.update_chat_session(

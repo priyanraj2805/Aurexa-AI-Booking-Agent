@@ -143,6 +143,21 @@ def test_cooldown_is_fifteen_minutes() -> None:
     assert COOLDOWN_SECONDS == 900
 
 
+def test_opening_and_ongoing_messages_are_distinct() -> None:
+    """The turn that OPENS the cooldown says it plainly, with no "still".
+    Every later turn says "still", so the customer can tell new from ongoing."""
+    from app.engine.offtopic_cooldown import cooldown_opening_message
+
+    opening = cooldown_opening_message()
+    assert "still" not in opening.lower()
+    assert "cooldown" in opening.lower()
+    assert "15 minutes" in opening
+
+    ongoing = cooldown_message(899)
+    assert "still" in ongoing.lower()
+    assert "cooldown" in ongoing.lower()
+
+
 def test_cooldown_message_states_the_wait_in_minutes() -> None:
     # A raw seconds count on a 15 minute pause reads like a malfunction.
     assert "15 minutes" in cooldown_message(900)

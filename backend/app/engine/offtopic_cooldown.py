@@ -286,12 +286,12 @@ def looks_like_decline(reply: str) -> bool:
 
 
 def cooldown_message(remaining: int) -> str:
-    """The single reply sent while cooling down.
+    """The reply sent for any message DURING the cooldown.
 
-    States the wait plainly and does not process the message, so the customer
-    is not left thinking their question was silently swallowed. The wait is
-    reported in whole minutes, because a raw seconds count on a 15 minute
-    pause reads like a malfunction rather than a deliberate wait.
+    Deliberately different from the opening line: "still" tells the customer
+    this is ongoing, not new. The wait is reported in whole minutes, because
+    a raw seconds count on a 15 minute pause reads like a malfunction rather
+    than a deliberate wait.
     """
     seconds = max(1, int(remaining or 0))
     minutes = (seconds + _SECONDS_PER_MINUTE - 1) // _SECONDS_PER_MINUTE
@@ -300,3 +300,14 @@ def cooldown_message(remaining: int) -> str:
     return (
         f"You're still in cooldown. Please try again in about {minutes} minutes."
     )
+
+
+def cooldown_opening_message() -> str:
+    """The reply sent ONCE, on the turn that opens the cooldown.
+
+    Deliberately has no "still": this is the first the customer hears of it.
+    Kept short and plain so it reads as a notice, not a punishment.
+    """
+    minutes = max(1, int(COOLDOWN_SECONDS // _SECONDS_PER_MINUTE))
+    unit = "minute" if minutes == 1 else "minutes"
+    return f"You are in cooldown. You can continue after {minutes} {unit}."
