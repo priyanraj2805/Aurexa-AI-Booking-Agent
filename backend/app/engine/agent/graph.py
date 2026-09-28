@@ -663,8 +663,18 @@ async def call_model(
                     f"RAG_DEBUG injecting chunks={len(rag_chunks)} overview={overview_mode}"
                 )
                 knowledge_lines = []
+                _skipped_fragments = 0
                 for i, ch in enumerate(rag_chunks, 1):
                     content = (ch.get("content") or "").strip()
+                    # Drop chunks that begin mid-sentence. The crawler
+                    # occasionally splits a page and captures a fragment like
+                    # "that person stacks, we use. NET, Azure..." from "...Do
+                    # NOT be that person." Those fragments read as corruption
+                    # and the model repeats them verbatim, so they are removed
+                    # rather than shown as if they were company content.
+                    if not content or not content[0].isupper():
+                        _skipped_fragments += 1
+                        continue
                     source = ch.get("source_type") or "document"
                     ctx_label = format_source_context_line(ch.get("metadata"))
                     if ctx_label:
@@ -673,11 +683,29 @@ async def call_model(
                         source += f" ({ch['source_url']})"
                     snippet = content[:1000]
                     knowledge_lines.append(f"[{i}] (source: {source})\n{snippet}")
+                if _skipped_fragments:
+                    logger.info(
+                        "RAG_DEBUG skipped %s mid-sentence chunk fragment(s)",
+                        _skipped_fragments,
+                    )
                 knowledge = "\n\n".join(knowledge_lines)
+                # These chunks WERE retrieved for this question, so treat them
+                # as the answer rather than as a hint to second-guess. The
+                # previous wording ("if the answer is NOT contained in these
+                # materials, say you don't have it") made a cautious model
+                # hedge on questions its own search had just answered, because
+                # the excerpt was a partial page rather than the full sentence.
+                # Anti-hallucination is kept, but aimed at facts with no
+                # support anywhere in the chunks.
                 grounding = (
-                    " If the answer is NOT contained in these materials, say "
-                    "plainly that you don't have that information — NEVER guess "
-                    "or invent names, authors, dates or facts."
+                    " These excerpts were retrieved because they are the most "
+                    "relevant material the company has for this question. If "
+                    "they cover the topic, answer directly from them — a "
+                    "relevant excerpt counts as an answer even when the page "
+                    "did not repeat your exact question. If they genuinely do "
+                    "not cover it, say so plainly. Either way, state only "
+                    "things supported by these excerpts; never invent names, "
+                    "dates, prices or details."
                 )
                 if overview_mode:
                     header = (
