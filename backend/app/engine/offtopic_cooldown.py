@@ -26,7 +26,11 @@ _UNTIL_KEY = "_offtopic_cooldown_until"
 # real customer is not left waiting through repeated failures.
 STRIKE_LIMIT = 3
 
-COOLDOWN_SECONDS = 15
+COOLDOWN_SECONDS = 15 * 60  # 15 minutes
+
+# Reply in whole minutes rather than counting down 900 seconds, which reads
+# like a system error. Reported as "14 minutes", then "13 minutes", etc.
+_SECONDS_PER_MINUTE = 60
 
 # Seconds are stored as wall-clock floats. A message arriving after the window
 # is simply allowed through, so there is no background job to run.
@@ -140,13 +144,14 @@ def cooldown_message(remaining: int) -> str:
     """The single reply sent while cooling down.
 
     States the wait plainly and does not process the message, so the customer
-    is not left thinking their question was silently swallowed.
+    is not left thinking their question was silently swallowed. The wait is
+    reported in whole minutes, because a raw seconds count on a 15 minute
+    pause reads like a malfunction rather than a deliberate wait.
     """
     seconds = max(1, int(remaining or 0))
-    if seconds <= 1:
-        return (
-            "You're still in cooldown. Please try again in a moment."
-        )
+    minutes = (seconds + _SECONDS_PER_MINUTE - 1) // _SECONDS_PER_MINUTE
+    if minutes <= 1:
+        return "You're still in cooldown. Please try again in about a minute."
     return (
-        f"You're still in cooldown. Please try again in {seconds} seconds."
+        f"You're still in cooldown. Please try again in about {minutes} minutes."
     )

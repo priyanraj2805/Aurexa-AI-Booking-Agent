@@ -137,14 +137,20 @@ def test_off_topic_questions_are_not_mistaken_for_company_questions(question: st
 
 # ── the message ────────────────────────────────────────────────────────
 
-def test_cooldown_message_states_the_wait() -> None:
-    msg = cooldown_message(12)
-    assert "cooldown" in msg.lower()
-    assert "12" in msg
+def test_cooldown_is_fifteen_minutes() -> None:
+    """Requested change: the pause is 15 minutes, not 15 seconds."""
+    assert COOLDOWN_SECONDS == 900
+
+
+def test_cooldown_message_states_the_wait_in_minutes() -> None:
+    # A raw seconds count on a 15 minute pause reads like a malfunction.
+    assert "15 minutes" in cooldown_message(900)
+    assert "13 minutes" in cooldown_message(780)
+    assert "about a minute" in cooldown_message(30)
 
 
 def test_cooldown_message_never_goes_negative() -> None:
     for bad in (0, -5, None):
         msg = cooldown_message(bad)
         assert "cooldown" in msg.lower()
-        assert "-" not in msg.replace("still in cooldown", "")
+        assert "in about a minute" in msg
