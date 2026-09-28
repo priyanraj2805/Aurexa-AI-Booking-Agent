@@ -1,4 +1,4 @@
-"""Off-topic cooldown guardrail.
+﻿"""Off-topic cooldown guardrail.
 
 Three off-topic questions in a row pause the session for 15 seconds. While
 paused, any message gets one short line and nothing else is processed. A real
@@ -17,12 +17,13 @@ from app.engine.offtopic_cooldown import (
     cooldown_remaining,
     is_cooling_down,
     looks_like_asking_about_us,
+    looks_like_decline,
     record_offtopic,
     strike_count,
 )
 
 
-# ── the counter ────────────────────────────────────────────────────────
+# â”€â”€ the counter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def test_no_cooldown_on_a_fresh_session() -> None:
     data: dict = {}
@@ -101,7 +102,7 @@ def test_malformed_state_does_not_raise() -> None:
         assert is_cooling_down(bad) is False
 
 
-# ── company questions are never punished ───────────────────────────────
+# â”€â”€ company questions are never punished â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @pytest.mark.parametrize(
     "question",
@@ -135,7 +136,7 @@ def test_off_topic_questions_are_not_mistaken_for_company_questions(question: st
     assert looks_like_asking_about_us(question) is False
 
 
-# ── the message ────────────────────────────────────────────────────────
+# â”€â”€ the message â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def test_cooldown_is_fifteen_minutes() -> None:
     """Requested change: the pause is 15 minutes, not 15 seconds."""
@@ -154,3 +155,69 @@ def test_cooldown_message_never_goes_negative() -> None:
         msg = cooldown_message(bad)
         assert "cooldown" in msg.lower()
         assert "in about a minute" in msg
+
+
+# â”€â”€ decline detection: the shapes the model actually produces â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "I didn't quite catch that one, but no problem â€” we can keep going. "
+        "Please share your full name.",
+        "To get back to booking your appointment, could you please share your "
+        "full name? I'm a booking assistant, so I can only help with "
+        "appointments.",
+        "I'm a booking assistant, so I can only help with appointments â€” "
+        "I don't have information about that.",
+        "I can help you book an appointment though. Could you please share "
+        "your full name?",
+        "Sorry, I don't have that information.",
+    ],
+)
+def test_real_declines_are_detected(reply: str) -> None:
+    """These are the exact shapes observed in production.
+
+    An earlier version compared the reply to one canonical string, so two of
+    these three recorded no strike at all, the counter never reached three,
+    and the cooldown never opened.
+    """
+    assert looks_like_decline(reply) is True
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Hi there! To get started, could you please share your full name?",
+        "Sure! Please share your email address.",
+        "Could you please provide your phone number?",
+        "Got it. What date would you like to book?",
+        "What time would you like to book?",
+    ],
+)
+def test_ordinary_booking_progress_is_not_a_decline(reply: str) -> None:
+    """A reply that moves the booking forward must never be counted.
+
+    These were being read as refusals, which struck genuine customers
+    mid-booking: a single company question was enough to register a strike.
+    """
+    assert looks_like_decline(reply) is False
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Yes, we do. Dotstark offers dedicated Kentico developers for custom "
+        "development, upgrades, and integrations. Would you like to book?",
+        "We offer Azure Development Services plus Kentico CMS.",
+        "We specialize in Azure Development Services. We also provide "
+        "Dynamics 365 Field Service expertise.",
+    ],
+)
+def test_real_knowledge_answers_are_not_declines(reply: str) -> None:
+    """A correct answer almost always trails 'Would you like to book?'.
+
+    Judging the booking wording first discarded a correct Kentico answer and
+    left the customer one question away from an unwanted cooldown.
+    """
+    assert looks_like_decline(reply) is False
+

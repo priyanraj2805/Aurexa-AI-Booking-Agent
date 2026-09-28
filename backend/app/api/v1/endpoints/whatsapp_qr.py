@@ -1172,6 +1172,36 @@ async def qr_inbound(    payload: QrInboundPayload,
             logger.exception("qr inbound engine raised")
             release_message(f"qr:{payload.messageId}")
             raise
+
+        # Off-topic strike accounting, applied here because the engine has
+        # now returned and the reply is final.
+        #
+        # Accounting inside the orchestrator did not work: the declines
+        # customers actually receive are produced by the presenter/LLM layer
+        # on paths that return before the orchestrator's own checks, so a live
+        # test produced three clean declines and recorded zero strikes. Doing
+        # it after the engine returns is the only point every path passes
+        # through, and it is the last point before the message is sent.
+        try:
+            from app.crud import chat as _crud_chat
+            from app.engine import offtopic_cooldown as _cd
+
+            # Judge the reply by what it DOES, not by exact wording. The model
+            # phrases the same refusal several ways and an equality check on one
+            # canonical string missed most of them, so no strike was ever
+            # recorded and the cooldown never opened.
+            _reply_text = str(getattr(action, "message", "") or "")
+            if _cd.looks_like_decline(_reply_text):
+                if not _cd.looks_like_asking_about_us(text):
+                    _cd.record_offtopic(chat_session.collected_data)
+            else:
+                _cd.clear(chat_session.collected_data)
+            await _crud_chat.update_chat_session(
+                db, chat_session.session_id, chat_session
+            )
+        except Exception:
+            logger.warning("off-topic accounting failed", exc_info=True)
+
         _dt = _time.monotonic() - _t0
         # Human handover won the race after the early check, or the engine
         # stayed silent on empty input: send nothing back.

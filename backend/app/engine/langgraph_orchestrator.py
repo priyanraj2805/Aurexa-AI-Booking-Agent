@@ -2838,17 +2838,9 @@ async def process_message_with_graph(
         if isinstance(booking_field_meta, dict):
             field_meta.update(booking_field_meta)
         booking_gate_handled = True
-        # An on-topic turn resets the off-topic strike counter, so a customer
-        # who came back to actually book is never held in cooldown by
-        # questions they asked earlier in the conversation.
-        if _cooldown is not None:
-            try:
-                _cd_strikes = _cooldown.strike_count(chat_session.collected_data)
-                if _cd_strikes:
-                    _cooldown.clear(chat_session.collected_data)
-                    await crud_chat.update_chat_session(db, session_id, chat_session)
-            except Exception:
-                logger.warning("off-topic counter reset failed", exc_info=True)
+        # The off-topic strike counter is cleared once, at the final authority
+        # point, so every path (booking, knowledge, decline) is accounted for
+        # exactly once instead of risking double counting.
 
     if not booking_gate_handled and otp_required:
         effect_state = _active_effect_state(chat_session)
@@ -2995,33 +2987,11 @@ async def process_message_with_graph(
         # customer has never heard of.
         _knowledge_reply = _normalise_offtopic_decline(_knowledge_reply)
 
-        # A genuine knowledge ANSWER clears the strike counter: the customer
-        # is engaged and being served. Only an actual decline counts, so a
-        # question the knowledgebase answered never pushes anyone closer to a
-        # cooldown. Company questions are exempt from counting in the first
-        # place, since declining those is the assistant's failure, not theirs.
-        if _cooldown is not None:
-            try:
-                _was_decline = _knowledge_reply == _OFFTOPIC_REPLY
-                if not _was_decline:
-                    if _cooldown.strike_count(chat_session.collected_data):
-                        _cooldown.clear(chat_session.collected_data)
-                        await crud_chat.update_chat_session(
-                            db, session_id, chat_session
-                        )
-                elif not _cooldown.looks_like_asking_about_us(message_text):
-                    _strikes = _cooldown.record_offtopic(chat_session.collected_data)
-                    if _strikes >= _cooldown.STRIKE_LIMIT:
-                        logger.info(
-                            "offtopic_cooldown_opened strikes=%s session=%s",
-                            _strikes,
-                            str(session_id)[:8],
-                        )
-                    await crud_chat.update_chat_session(
-                        db, session_id, chat_session
-                    )
-            except Exception:
-                logger.warning("off-topic strike recording failed", exc_info=True)
+        # Strike accounting is deliberately NOT done here. This branch returns
+        # early, and a live test showed the declines that customers actually
+        # receive are produced by other paths, so counting here recorded zero
+        # strikes and no cooldown ever opened. Counting now happens once, at
+        # the final authority point after every path has run.
 
         # Return early, bypassing OTP generation for this knowledge turn.
         #
