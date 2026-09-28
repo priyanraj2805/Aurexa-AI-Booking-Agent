@@ -176,6 +176,60 @@ async def _persist_transcript_best_effort(
 _TERMINAL_SESSION_STATUSES = frozenset({"CONFIRMED", "CANCELLED", "EXPIRED"})
 
 
+def _unmatched_time_choice(message_text: str, offered_labels) -> str:
+    """Return the customer's rejected time wording, or "" if this is not a time.
+
+    Used to say "that time isn't valid" rather than silently repeating the
+    option list. Deliberately conservative: it only speaks up when the message
+    clearly *is* a clock time and clearly is none of the options offered, so
+    ordinary replies ("thanks", "3 of us") are never second-guessed.
+    """
+    raw = str(message_text or "").strip()
+    if not raw or not offered_labels:
+        return ""
+    # Must contain a time token.
+    _norm = raw.replace(".", ":")
+    if not (
+        re.search(r"\b\d{1,2}\s*[ap]\.?m\.?\b", _norm, flags=re.IGNORECASE)
+        or re.fullmatch(r"\d{1,2}:\d{2}", raw)
+    ):
+        return ""
+
+    def _canon(value: str) -> str:
+        """Normalise a clock time so '12pm', '12:00' and '12:00 PM' all agree.
+
+        A bare '12:00' carries no meridiem, so it is compared against BOTH
+        interpretations of every offered slot. Otherwise a customer who types
+        '12:00' for a 12:00 PM slot would be told the time was invalid.
+        """
+        v = str(value or "").strip().lower().replace(".", "")
+        v = re.sub(r"\s*([ap])\.?\s*m\.?\b", r"\1m", v)
+        m = re.fullmatch(r"(\d{1,2}):?(\d{2})?(am|pm)?", v)
+        if not m:
+            return re.sub(r"\s+", "", v)
+        hour = int(m.group(1))
+        minute = int(m.group(2) or 0)
+        meridiem = m.group(3)
+        if meridiem is None:
+            # Ambiguous: 12 could be noon or midnight, 7 could be AM or PM.
+            if hour == 12:
+                return f"{hour:02d}{minute:02d}am/{hour:02d}{minute:02d}pm"
+            return f"{hour:02d}{minute:02d}am/{hour:02d}{minute:02d}pm"
+        return f"{hour:02d}{minute:02d}{meridiem}"
+
+    offered = set()
+    for label in offered_labels:
+        canon = _canon(label)
+        offered.add(canon)
+        # An ambiguous entry is stored as "hhmmam/hhmnpm" so it can match
+        # either meridiem spelling of the same clock time.
+        offered.update(part for part in canon.split("/") if part)
+    chosen = _canon(raw)
+    if chosen in offered or any(part in offered for part in chosen.split("/") if part):
+        return ""
+    return raw
+
+
 def _active_effect_state(chat_session: ChatSessionState) -> Dict[str, Any]:
     data = dict(chat_session.collected_data or {})
     state = data.get("_active_path_effects")
@@ -2039,7 +2093,18 @@ async def process_message_with_graph(
                             # attach helpful description with format + availability
                             if _raw and not directive_meta.get("description"):
                                 try:
-                                    directive_meta["description"] = _format_available_dates_for_prompt(_tz, _max, count=min(7, len(_raw)))
+                                    from app.engine.message_processor import (
+                                        fetch_closed_weekdays as _fetch_closed,
+                                    )
+
+                                    _closed = await _fetch_closed(db, org.id)
+                                    directive_meta["description"] = (
+                                        _format_available_dates_for_prompt(
+                                            _tz, _max,
+                                            count=min(7, len(_raw)),
+                                            closed_weekdays=_closed,
+                                        )
+                                    )
                                 except Exception:
                                     pass
                         elif _dtype == _DT.SELECT_SLOT:
@@ -2108,7 +2173,28 @@ async def process_message_with_graph(
                                     # Build plain-text slots list for WhatsApp (no interactive)
                                     if _slot_labels:
                                         slots_text = "\n".join([f"• {label}" for label in _slot_labels])
-                                        assistant_message = f"Available slots for {str(_target)}:\n{slots_text}\n\nPlease reply with your preferred time (e.g., {_slot_labels[0]})"
+                                        # If the customer already replied with a time
+                                        # that is not on this list, say so plainly
+                                        # instead of silently re-listing the same
+                                        # options as if they had said nothing.
+                                        _rejected = _unmatched_time_choice(
+                                            message_text, _slot_labels
+                                        )
+                                        _prefix = (
+                                            f"{_rejected} is not a valid time. "
+                                            if _rejected
+                                            else ""
+                                        )
+                                        assistant_message = (
+                                            f"{_prefix}Available slots for {str(_target)}:\n"
+                                            f"{slots_text}\n\nPlease reply with your "
+                                            f"preferred time (e.g., {_slot_labels[0]})"
+                                        )
+                                        # Remember what was offered so a typed
+                                        # time can be checked against THIS list
+                                        # on the next turn, when the slot
+                                        # options are not being re-rendered.
+                                        field_meta["available_slots"] = _slot_labels
                                     else:
                                         assistant_message = f"No available slots for {str(_target)}. Please try another date (e.g., tomorrow)."
                                     directive = "TEXT_INPUT"

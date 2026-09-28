@@ -652,8 +652,105 @@ def _upcoming_date_options(
     return days
 
 
+_WEEKDAY_NAMES = (
+    "Monday", "Tuesday", "Wednesday", "Thursday",
+    "Friday", "Saturday", "Sunday",
+)
+
+
+def format_closed_days_note(closed_weekdays) -> str:
+    """Human sentence naming the days the business does not open.
+
+    Reads the admin's own schedule (ScheduleDay.is_active), so the message can
+    never drift from the hours the admin configured. Returns "" when the
+    business is open every day, so nothing is claimed that is not true.
+    """
+    try:
+        # Out-of-range values are dropped rather than wrapped with %7, so bad
+        # data can never turn into a confident claim that the shop is shut.
+        days = sorted({int(d) for d in (closed_weekdays or []) if 0 <= int(d) <= 6})
+    except (TypeError, ValueError):
+        return ""
+    if not days:
+        return ""
+    names = [_WEEKDAY_NAMES[d] for d in days if 0 <= d <= 6]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return f"We are closed on {names[0]}."
+    if len(names) == 2:
+        return f"We are closed on {names[0]} and {names[1]}."
+    return "We are closed on " + ", ".join(names[:-1]) + f" and {names[-1]}."
+
+
+async def fetch_closed_weekdays(db, org_id) -> list:
+    """Weekday indices (0=Mon) the business is closed, per the admin schedule.
+
+    A weekday counts as closed when it is either explicitly inactive or has no
+    row at all. If the admin has not configured any schedule, nothing is
+    reported rather than guessing that the business is shut.
+    """
+    try:
+        from sqlalchemy.future import select as sa_select
+
+        from app.models.booking import ScheduleDay
+
+        rows = (
+            await db.execute(
+                sa_select(ScheduleDay.day_of_week, ScheduleDay.is_active).where(
+                    ScheduleDay.org_id == org_id
+                )
+            )
+        ).all()
+        if not rows:
+            return []
+        return [
+            int(day)
+            for day, is_active in rows
+            if day is not None and not bool(is_active)
+        ]
+    except Exception:
+        logger.warning("Failed to read closed weekdays", exc_info=True)
+        return []
+
+
+def _offered_slot_labels(chat_session, field_meta=None) -> list:
+    """The slot labels the customer was last shown, in order.
+
+    Read from the session (the list we actually rendered) with the directive
+    meta as a fallback. When nothing was offered we return an empty list, and
+    the caller must then skip the check rather than reject every time.
+    """
+    labels = []
+    if isinstance(field_meta, dict):
+        for key in ("available_slots", "options"):
+            raw = field_meta.get(key)
+            if isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, dict):
+                        value = item.get("label") or item.get("value")
+                        if value:
+                            labels.append(str(value))
+                    elif isinstance(item, str) and item.strip():
+                        labels.append(item)
+            if labels:
+                break
+    if labels:
+        return labels
+    try:
+        stored = (chat_session.collected_data or {}).get("offered_time_slots")
+    except Exception:
+        stored = None
+    if isinstance(stored, list) and stored:
+        return [str(x) for x in stored if str(x).strip()]
+    return []
+
+
 def _format_available_dates_for_prompt(
-    org_timezone: str, max_booking_days: int, count: int = 7
+    org_timezone: str,
+    max_booking_days: int,
+    count: int = 7,
+    closed_weekdays=None,
 ) -> str:
     """Horizon-based date prompt as requested: 'We are available from 15 September to 15 November...'"""
     try:
@@ -672,6 +769,11 @@ def _format_available_dates_for_prompt(
         start_str = f"{start_str} {today.year}"
         end_str = f"{end_str} {end.year}"
     horizon = f"We are available from {start_str} to {end_str}, please choose a date within this horizon."
+    # Tell the customer up front which days are shut, so they don't pick one
+    # and get bounced back. Driven by the admin's configured hours.
+    closed_note = format_closed_days_note(closed_weekdays)
+    if closed_note:
+        horizon += f" {closed_note}"
     if (org_timezone or "").strip():
         horizon += f" (All dates in {org_timezone.strip()}.)"
     return horizon
@@ -1779,6 +1881,39 @@ async def process_message(
     if errors:
         logger.warning(f"Validation Errors: {list(errors.keys())}")
 
+    # A typed time must be one we actually offered. Format validation alone
+    # accepts any well-formed clock time, so "11:11 PM" passed as a valid time
+    # and the customer reached the summary with a slot that does not exist —
+    # only to fail at the booking step with no explanation.
+    #
+    # Reject it here, where the time is stored, and re-offer the real options.
+    _time_rejection = ""
+    if valid_data.get("time") and not errors.get("time"):
+        from app.engine.langgraph_orchestrator import _unmatched_time_choice as _utc
+
+        _offered = _offered_slot_labels(chat_session, field_meta)
+        if _offered:
+            _rejected = _utc(message_text, _offered)
+            if _rejected:
+                _time_rejection = _rejected
+                valid_data.pop("time", None)
+                valid_data.pop("selected_slot_id", None)
+                errors["time"] = "time_not_offered"
+        else:
+            # Nothing was offered on this turn (for example the customer typed
+            # a time before any list existed). Fall back to the last list we
+            # rendered for this session so a stale choice is still caught.
+            _offered = _offered_slot_labels(chat_session, None)
+            if _offered:
+                _rejected = _utc(message_text, _offered)
+                if _rejected:
+                    _time_rejection = _rejected
+                    valid_data.pop("time", None)
+                    valid_data.pop("selected_slot_id", None)
+                    errors["time"] = "time_not_offered"
+                else:
+                    _time_rejection = ""
+
     # Update session state with validated data
     chat_session.collected_data.update(valid_data)
 
@@ -1787,6 +1922,44 @@ async def process_message(
     chat_session.missing_fields = StateEvaluator.calculate_missing_fields(
         tenant_required_fields, chat_session.collected_data
     )
+
+    if _time_rejection:
+        # Ask for the time again and put the real options back in front of the
+        # customer, instead of silently re-listing them as if nothing happened.
+        chat_session.missing_fields = ["time"] + [
+            f for f in (chat_session.missing_fields or []) if f != "time"
+        ]
+        chat_session.current_intent = "START_BOOKING"
+        _offered_now = _offered_slot_labels(chat_session, field_meta)
+        if _offered_now:
+            chat_session.collected_data["offered_time_slots"] = _offered_now
+            _reject_msg = (
+                f"{_time_rejection} is not a valid time.\n\n"
+                f"Please choose from the available slots:\n"
+                + "\n".join(f"• {label}" for label in _offered_now)
+                + f"\n\nReply with one of these (e.g., {_offered_now[0]})"
+            )
+            _reject_directive = "REQUIRE_TIME_SLOT_GRID"
+        else:
+            _reject_msg = (
+                f"{_time_rejection} is not a valid time. Please share one of the "
+                f"available slots."
+            )
+            _reject_directive = "REQUIRE_TIME_SLOT_GRID"
+        await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+        _reject_meta = {
+            "name": "time",
+            "type": "time",
+            "label": "Preferred Time",
+            "invalid_choice": _time_rejection,
+        }
+        if _offered_now:
+            _reject_meta["available_slots"] = _offered_now
+        return ActionPayload(
+            message=_reject_msg,
+            widget_directive=_reject_directive,
+            field_meta=_reject_meta,
+        )
 
     # Persist
     await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
