@@ -14,7 +14,9 @@ def test_the_screenshot_phrasings_are_normalised() -> None:
 
     Both the wording and the reminder are wrong: "knowledge materials" is
     internal machinery the customer never heard of, and a verification-code
-    demand bolted onto a refusal reads as nagging.
+    demand bolted onto a refusal reads as nagging. The trailing "Is there
+    anything else I can help you with?" may be kept, so this asserts the
+    parts that must be gone rather than exact equality.
     """
     screenshot = (
         "I don't have that information in our knowledge materials. "
@@ -22,10 +24,10 @@ def test_the_screenshot_phrasings_are_normalised() -> None:
     )
     out = _normalise_offtopic_decline(screenshot)
 
-    assert out == _OFFTOPIC_REPLY
     assert "knowledge materials" not in out
     assert "verification code" not in out.lower()
     assert "resend" not in out.lower()
+    assert "booking assistant" in out.lower()
 
 
 @pytest.mark.parametrize(
@@ -43,6 +45,53 @@ def test_the_screenshot_phrasings_are_normalised() -> None:
 )
 def test_every_cold_decline_becomes_the_one_warm_reply(cold: str) -> None:
     assert _normalise_offtopic_decline(cold) == _OFFTOPIC_REPLY
+
+
+@pytest.mark.parametrize(
+    "reply, must_keep",
+    [
+        (
+            "We offer Azure and Kentico development. Pricing is not mentioned in "
+            "our materials, but I can help you book a consultation.",
+            "Kentico",
+        ),
+        (
+            "Our consulting fee is 500 rupees. Discounts are not covered in the "
+            "documents I have.",
+            "500",
+        ),
+        (
+            "We do Kentico development across all versions. I do not have "
+            "information about timelines.",
+            "Kentico",
+        ),
+        (
+            "We use .NET, C#, ASP.NET Core and Azure. Pricing is not in our "
+            "knowledge base.",
+            "ASP.NET",
+        ),
+    ],
+)
+def test_a_partial_answer_keeps_its_facts(reply: str, must_keep: str) -> None:
+    """Regression: the decline matcher fired on a trailing caveat and threw
+    away the real answer that preceded it.
+
+    "We do Kentico development. I do not have information about timelines."
+    was replaced wholesale with the decline, so a customer who asked about
+    Kentico was told the assistant knew nothing about Kentico.
+    """
+    out = _normalise_offtopic_decline(reply)
+    assert must_keep in out, (
+        f"real content was discarded: expected {must_keep!r} in {out!r}"
+    )
+    # The kept half must not open by telling the customer it knows nothing,
+    # which is the bug this guards: the reply must lead with the real content.
+    assert not out.lower().startswith("i don't have")
+    assert not out.lower().startswith("i do not have")
+
+
+def test_a_pure_decline_is_still_replaced_wholesale() -> None:
+    assert _normalise_offtopic_decline("I do not have that information.") == _OFFTOPIC_REPLY
 
 
 def test_a_real_knowledge_answer_is_never_rewritten() -> None:

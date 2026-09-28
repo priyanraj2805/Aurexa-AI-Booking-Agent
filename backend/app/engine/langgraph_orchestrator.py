@@ -179,20 +179,29 @@ _TERMINAL_SESSION_STATUSES = frozenset({"CONFIRMED", "CANCELLED", "EXPIRED"})
 # Signs that the model is declining rather than answering from the knowledge
 # base. Any of these means "we don't have this", whatever words it used.
 _OFFTOPIC_DECLINE_RE = re.compile(
-    # "I don't have / don't know / can't find ...", "I couldn't find ..."
-    r"(?:don'?t|do\s+not|can'?t|cannot|couldn'?t|won'?t)\s+"
-    r"(?:have|know|find|be\s+able|answer|help|provide|see|contain)"
-    r"|no\s+(?:information|details?|record|mention|data)\s+(?:about|on|of|for)"
-    r"|not\s+(?:available|found|mentioned|include|includes|included|cover|covers|"
-    r"covered|contain|contains|listed|documented|specified)"
-    r"|(?:is|are|was|were)\s+not\s+(?:in|covered|listed|documented|part\s+of|mentioned)"
-    r"|(?:isn'?t|aren'?t|wasn'?t|weren'?t)\s+"
-    r"(?:in|covered|listed|documented|mentioned|part\s+of|available|true)\b"
-    r"|unable\s+to\s+(?:find|answer|help|provide)"
-    r"|outside\s+(?:my|our|the)\s+(?:scope|knowledge|remit)"
-    r"|i'?m\s+(?:just\s+)?a\s+booking\s+assistant"
-    r"|no\s+et\s+information|knowledge\s+(?:materials|base|documents)\s+don'?t"
-    r"|not\s+something\s+i\s+(?:can|have|know)",
+    # A decline must OPEN the reply, or open a clause after a real sentence.
+    # Matching anywhere discarded real answers: in "We do Kentico
+    # development. I do not have information about timelines." an unanchored
+    # pattern fired on the trailing caveat and the Kentico fact was thrown
+    # away. Variable-length lookbehind is not available in `re`, so the
+    # boundary is matched as a prefix and stripped by the caller.
+    r"(?:^|(?<=[.!?])\s+|(?<=,)\s+|\bbut\s+|\bhowever,?\s+)"
+    r"(?:"
+    r"(?:i\s+)?(?:don'?t|do\s+not|can'?t|cannot|couldn'?t|won'?t)\s+"
+    r"(?:have|know|find|be\s+able|answer|help|provide|contain)"
+    r"|(?:i\s+)?(?:am|'m)\s+(?:just\s+)?a\s+booking\s+assistant"
+    r"|there\s+(?:is|are)\s+no\s+information"
+    r"|no\s+(?:information|details?|record|data)\s+(?:about|on|of|for)\s+that"
+    r"|(?:this|that|it|this\s+information)\s+is\s+not\s+"
+    r"|it\s+isn'?t\s+(?:in|covered|listed|available|part\s+of|mentioned)"
+    r"|this\s+isn'?t\s+(?:in|covered|listed|available|mentioned)"
+    r"|that\s+isn'?t\s+(?:in|covered|listed|available|mentioned)"
+    r"|(?:not|isn'?t|aren'?t)\s+listed"
+    r"|unable\s+to\s+(?:find|answer|help|provide)\s+that"
+    r"|outside\s+(?:my|our|the)\s+(?:scope|remit)"
+    r"|knowledge\s+(?:materials|base|documents)\s+don'?t"
+    r"|not\s+something\s+i\s+(?:can|have|know)"
+    r")",
     flags=re.IGNORECASE,
 )
 
@@ -201,6 +210,67 @@ _OFFTOPIC_REPLY = (
     "I don't have information about that.\n\n"
     "Is there anything I can help you book, check or reschedule?"
 )
+
+# How much real content must appear before a decline marker for the reply to
+# count as a PARTIAL answer. Long enough that a throwaway clause like "I don't
+# have that" never qualifies, short enough that one useful sentence does.
+_MIN_ANSWER_CHARS = 40
+
+# Phrases that open a refusal. Kept as plain substrings and applied to the
+# WHOLE reply, never per-clause: trying to locate "the refusal" inside a
+# partially correct answer was exactly the bug that deleted real content.
+_REFUSAL_OPENERS = (
+    "i don't have", "i do not have", "i cannot", "i can't", "i couldn't",
+    "i'm unable", "i am unable", "i can't find", "i cannot find",
+    "i couldn't find", "i don't know", "i do not know",
+    "i'm just a booking assistant", "i am just a booking assistant",
+    "i'm a booking assistant", "i am a booking assistant",
+    "there is no information", "there are no details",
+    "this isn't", "this is not", "that isn't covered", "that's not covered",
+    "unfortunately", "regrettably",
+    "knowledge materials don't", "knowledgebase doesn't",
+    "knowledge base doesn't", "the materials don't", "the materials do not",
+    "the documents don't", "the documents do not",
+    "that's outside", "that is outside",
+    # Subject-first refusals: "That is not available in our documents.",
+    # "The company knowledge materials don't include...". The model uses
+    # these often enough that omitting them let the cold wording through.
+    "that is not", "that's not", "that is unavailable", "that is not available",
+    "that isn't", "these materials don't", "these materials do not",
+    "this material doesn't", "our knowledge materials", "the company knowledge",
+    # The model very often prefixes the refusal with a courtesy word, which
+    # made "Sorry, I don't have information about this." read as an answer and
+    # reach the customer verbatim.
+    "sorry,", "sorry!", "unfortunately,", "unfortunately.",
+    "i'm sorry", "i am sorry", "afraid not",
+)
+
+# Courtesy prefixes that are not themselves part of the refusal, so the
+# remaining text can be judged on its own content.
+_COURTESY_PREFIX_RE = re.compile(
+    r"^(?:sorry|unfortunately|afraid\s+not|regrettably)[,!.\s]+",
+    flags=re.IGNORECASE,
+)
+
+# Internal vocabulary never shown to a customer. Removed from whatever
+# material is kept, so a partial answer loses the reference but not the fact.
+_SCAFFOLDING_RE = re.compile(
+    r"\b(?:knowledge\s*(?:base|materials?|documents?|sources?)|"
+    r"our\s+(?:documents?|materials?|website\s+content)|the\s+materials?|"
+    r"the\s+documents?|retrieved\s+(?:content|chunks?)|excerpts?|"
+    r"materials?\s+(?:don't|do\s+not)|documents?\s+(?:don't|do\s+not))\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _strip_internal_scaffolding(text: str) -> str:
+    """Drop references to the retrieval machinery, keep the facts."""
+    cleaned = _SCAFFOLDING_RE.sub("", str(text or ""))
+    # Tidy the seams left by the removal.
+    cleaned = re.sub(r"\s*,\s*,+", ", ", cleaned)
+    cleaned = re.sub(r"[\s,;.]+([.!?])", r"\1", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip()
 
 
 def _normalise_offtopic_decline(reply: str) -> str:
@@ -211,12 +281,40 @@ def _normalise_offtopic_decline(reply: str) -> str:
     Those mention internal machinery the customer has never heard of and read
     as a brush-off. A genuine knowledge ANSWER is left untouched — only a
     decline is rewritten, so nothing that was actually looked up is lost.
+
+    A PARTIAL answer keeps its facts. "We offer Kentico development. I don't
+    have information about timelines." contains a real answer plus a caveat,
+    and replacing the whole thing threw away the Kentico part. Earlier this
+    function matched the caveat anywhere in the text and discarded
+    everything, which is worse for the customer than the cold phrasing it was
+    meant to fix.
     """
     text = str(reply or "").strip()
     if not text:
         return _OFFTOPIC_REPLY
-    if not _OFFTOPIC_DECLINE_RE.search(text):
+
+    # A courtesy opener is not itself part of the refusal, so it is removed
+    # before judging. "Sorry, I don't have information about this." otherwise
+    # reads as an answer and reaches the customer verbatim.
+    text = _COURTESY_PREFIX_RE.sub("", text).strip()
+    if not text:
+        return _OFFTOPIC_REPLY
+
+    # A refusal is a reply that OPENS with one. A partial answer also
+    # contains a refusal, but only after the useful part, and the useful part
+    # is what the customer came for.
+    lowered = text.lower()
+    opens_with_refusal = any(lowered.startswith(p) for p in _REFUSAL_OPENERS)
+    if not opens_with_refusal:
         return text  # a real answer, leave it exactly as it is
+
+    # Strip the refusal sentence, and see whether real content remains.
+    _split = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)
+    remainder = _split[1] if len(_split) > 1 else ""
+    cleaned = _strip_internal_scaffolding(remainder)
+    if len(cleaned) >= _MIN_ANSWER_CHARS:
+        return f"{cleaned}\n\n{_OFFTOPIC_REPLY}"
+
     return _OFFTOPIC_REPLY
 
 
@@ -3726,6 +3824,44 @@ async def process_message_with_graph(
 
     if session_state_dirty:
         await crud_chat.update_chat_session(db, session_id, chat_session)
+
+    # Final authority on confirmation wording. Placed immediately before the
+    # payload is built so it covers EVERY path above, including the ones that
+    # return early.
+    #
+    # Observed failure: "Thanks Will. Your appointment is confirmed for
+    # October 5th at 3 PM. We look forward to seeing you." was sent while the
+    # OTP was still pending and no Booking row existed. The earlier guard
+    # either did not run on that path or downgraded too late, and a customer
+    # was told they were booked before verification. Nothing may say
+    # "confirmed" unless a Booking row is actually on disk.
+    if isinstance(assistant_message, str) and assistant_message.strip():
+        try:
+            from app.engine.user_visible_text import looks_like_confirmation_claim
+
+            _final_claims = looks_like_confirmation_claim(assistant_message)
+        except Exception:
+            _final_claims = False
+        # A booking genuinely created this turn is the only thing that
+        # authorises confirmation wording.
+        if _final_claims and not await _session_has_persisted_booking(
+            db,
+            session_id,
+            org_id=getattr(org, "id", None),
+            collected_data=dict(chat_session.collected_data or {}),
+        ):
+            logger.warning(
+                "final_confirmation_guard_blocked_claim session=%s directive=%s",
+                str(session_id)[:8],
+                directive,
+            )
+            # A completed-but-unconfirmed booking always falls back to the
+            # review card, which restores the required order:
+            # details -> summary -> confirm -> OTP -> booking.
+            assistant_message, directive = (
+                message_processor._build_confirmation_summary(chat_session, fd_map)
+            )
+            field_meta.pop("knowledge_answer", None)
 
     # 3. Create ActionPayload to emulate traditional response
     action = ActionPayload(

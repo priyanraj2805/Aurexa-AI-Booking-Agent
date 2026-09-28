@@ -93,6 +93,12 @@ CONFIRMATION_CLAIM_PATTERN = re.compile(
     r"(?:we|i)\s+(?:have\s+|has\s+)?(?:booked|confirmed|reserved|scheduled)\s+(?:your|the)\b|"
     r"successfully\s+(?:booked|confirmed|reserved|scheduled)|"
     r"(?:booked|confirmed|reserved|scheduled)\s+successfully|"
+    # "All confirmed!", "All set, you're booked", "That's confirmed" — short
+    # affirmative confirmations that carry no noun, so the patterns above
+    # missed them and they reached customers before the booking existed.
+    r"\ball\s+(?:set|confirmed|booked|done)\b|"
+    r"that'?s\s+(?:confirmed|booked|reserved)\b|"
+    r"(?:you'?re|you\s+are)\s+(?:all\s+)?(?:confirmed|booked|reserved)\b|"
     r"\bdone!\s*(?:your|.)?\s*(?:booking|appointment|slot)"
     r")\b",
     flags=re.IGNORECASE,
