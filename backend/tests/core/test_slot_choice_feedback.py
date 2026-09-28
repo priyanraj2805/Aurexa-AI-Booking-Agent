@@ -84,3 +84,74 @@ def test_closing_days_are_deduplicated_and_ordered() -> None:
 
 def test_out_of_range_weekdays_are_ignored() -> None:
     assert format_closed_days_note([99]) == ""
+
+
+# ── edit then confirm ──────────────────────────────────────────────────
+
+def test_edit_summary_returns_after_a_change() -> None:
+    """Regression from chat 0d15f17d.
+
+    The customer edited the time and got "Your appointment time is now
+    updated... anything else?" with no summary and no way to confirm. The
+    booking only completed by luck on a later turn.
+
+    The EDIT_DATA re-summary lived solely in the non-PROCESS_BOOKING branch,
+    so when the LLM read a complete edited booking as PROCESS_BOOKING the
+    summary was skipped entirely.
+    """
+    from app.engine.message_processor import _build_edit_summary
+
+    def _fd(icon, label, ftype):
+        return type(
+            "F", (),
+            {"icon": icon, "label": label, "type": ftype, "unit": None, "options": None},
+        )()
+
+    # fd_map drives which fields the summary renders, so the test must supply
+    # the same field definitions the real flow passes in.
+    fd_map = {
+        "name": _fd("\U0001f468", "Full Name", "text"),
+        "email": _fd("\U0001f4e7", "Email Address", "email"),
+        "phone": _fd("\U0001f4de", "Phone Number", "phone"),
+        "date": _fd("\U0001f4c5", "Preferred Date", "date"),
+        "time": _fd("\u23f0", "Preferred Time", "time"),
+    }
+
+    class _Session:
+        collected_data = {
+            "name": "alexa",
+            "email": "alexa@yopmail.com",
+            "phone": "+916350063338",
+            "date": "2026-09-30",
+            "time": "3:00 PM",
+        }
+        session_status = "ACTIVE"
+
+    msg, directive = _build_edit_summary(_Session(), {"time": "3:00 PM"}, fd_map)
+
+    assert directive == "REQUEST_CONFIRMATION", (
+        "after an edit the customer must land back on the confirmation step, "
+        "never straight into booking or a generic 'anything else'"
+    )
+    # The revised value must be visible, and the edit marked.
+    assert "3:00 PM" in msg
+    assert "\u270f\ufe0f" in msg  # edited-field marker
+
+
+def test_edit_does_not_reconfirm_an_already_booked_session() -> None:
+    """A reschedule of a real booking is a different flow and must not be
+    downgraded into a pre-confirmation summary."""
+    from app.engine.message_processor import _is_unverified_booking_claim
+
+    class _Active:
+        session_status = "ACTIVE"
+
+    class _Confirmed:
+        session_status = "CONFIRMED"
+
+    class _Confirming:
+        session_status = "CONFIRMING"
+
+    assert _is_unverified_booking_claim(_Active()) is False
+    assert _is_unverified_booking_claim(_Confirmed()) is True
+    assert _is_unverified_booking_claim(_Confirming()) is True

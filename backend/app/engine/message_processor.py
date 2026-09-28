@@ -2150,17 +2150,36 @@ async def process_message(
                 directive = next_step.get("directive", "TEXT_INPUT")
                 msg = llm_generated_msg
     elif next_step["directive"] == "PROCESS_BOOKING":
-        msg, directive, booking_field_meta = await _handle_booking_flow(
-            db,
-            org,
-            org_config,
-            chat_session,
-            intent,
-            require_otp,
-            fd_map,
-            background_tasks,
-            require_phone_otp=require_phone_otp,
-        )
+        # A field the customer explicitly asked to change was just updated.
+        # The LLM quite reasonably reads a complete, edited booking as
+        # "PROCESS_BOOKING" — but that must NOT book it. The customer has not
+        # seen the change yet and has not confirmed it, so the revised summary
+        # is shown first and only a later confirmation may authorise a booking.
+        #
+        # Previously the EDIT_DATA re-summary lived only in the `else` branch
+        # below and was skipped here, so the customer changed the time and got
+        # "Your appointment time is now updated... anything else?" with no
+        # summary and no way to confirm. The booking then only completed by
+        # luck on a later turn.
+        if (
+            intent == "EDIT_DATA"
+            and valid_data
+            and not chat_session.missing_fields
+            and not _is_unverified_booking_claim(chat_session)
+        ):
+            msg, directive = _build_edit_summary(chat_session, valid_data, fd_map)
+        else:
+            msg, directive, booking_field_meta = await _handle_booking_flow(
+                db,
+                org,
+                org_config,
+                chat_session,
+                intent,
+                require_otp,
+                fd_map,
+                background_tasks,
+                require_phone_otp=require_phone_otp,
+            )
     else:
         directive = next_step["directive"]
 
@@ -4744,6 +4763,19 @@ def _build_summary_card(
         + "\n\nShall I go ahead and book this for you?"
     )
     return summary_text, "REQUEST_CONFIRMATION"
+
+
+def _is_unverified_booking_claim(chat_session) -> bool:
+    """True when the session already has a real confirmed booking.
+
+    Guards the edit-re-summary: if a genuine booking exists, an edit request
+    is a reschedule and must be handled by the booking flow, not by showing a
+    pre-confirmation summary for an appointment that is already booked.
+    """
+    return str(getattr(chat_session, "session_status", "") or "").upper() in (
+        "CONFIRMING",
+        "CONFIRMED",
+    )
 
 
 def _build_edit_summary(

@@ -88,6 +88,26 @@ def _sanitize_user_message(text: str) -> str:
     return cleaned.strip()[:2000]
 
 
+# A bare calendar date, e.g. "30 September", "1 October", "2026-10-01",
+# "Wednesday". These are booking field values, never knowledge questions, but
+# the skip patterns below only listed US month names, so "30 September" fell
+# through to the "rerank" tier and paid for a full LLM rerank round-trip on
+# every date the customer picked.
+_BARE_DATE_RE = re.compile(
+    r"^\s*(?:"
+    r"\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?"
+    r"|\d{4}-\d{2}-\d{2}"
+    r"|\d{1,2}\s+"
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"
+    r"(?:\s+\d{4})?"
+    r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2}"
+    r"(?:,?\s+\d{4})?"
+    r"|(?:mon|tues|wednes|thurs|fri|satur|sun)day"
+    r")\s*$",
+    flags=re.IGNORECASE,
+)
+
+
 def _looks_like_booking_field_value(message_text: str) -> bool:
     """True when a user message is a bare field value or short confirmation.
 
@@ -99,6 +119,8 @@ def _looks_like_booking_field_value(message_text: str) -> bool:
         return True
     if "?" in text:
         return False
+    if _BARE_DATE_RE.match(text):
+        return True
     if len(text.split()) <= 6 and _CONFIRMATION_STARTER_RE.match(text):
         return True
     return len(text.split()) <= 4 and any(
