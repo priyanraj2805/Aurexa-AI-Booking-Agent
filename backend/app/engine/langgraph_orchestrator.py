@@ -3,7 +3,7 @@ import logging
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from fastapi import BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -47,11 +47,24 @@ async def _whatsapp_hours_prefix(db: AsyncSession, org: Organization) -> str:
         _full = await load_weekly_hours_block(db, str(org.id))
         if not _full or "Monday" not in _full:
             return ""
-        _first = _full.split("\n")[0].replace("## ", "").replace(" (authoritative — answer timing questions from this)", "")
-        _first = _first.strip()
-        if not _first or len(_first) >= 120:
-            return ""
-        return _first
+        # First CONTENT line, never a section header. When the block opened
+        # with "## BUSINESS HOURS", stripping the markers left the bare header,
+        # which was then prepended to the customer message verbatim.
+        # Production: "The capital of Japan is Tokyo. BUSINESS HOURS Thanks!
+        # Could you please share your preferred date?"
+        for _raw_line in _full.split("\n"):
+            _candidate = _raw_line.replace("## ", "").replace(
+                " (authoritative — answer timing questions from this)", ""
+            ).strip()
+            if not _candidate or len(_candidate) >= 120:
+                continue
+            if _candidate.upper() in (
+                "BUSINESS HOURS", "OUR SERVICES", "OPENING HOURS",
+                "WORKING HOURS", "HOURS",
+            ):
+                continue
+            return _candidate
+        return ""
     except Exception:
         logger.warning("whatsapp hours prefix failed", exc_info=True)
         return ""
@@ -251,6 +264,58 @@ _COURTESY_PREFIX_RE = re.compile(
     r"^(?:sorry|unfortunately|afraid\s+not|regrettably)[,!.\s]+",
     flags=re.IGNORECASE,
 )
+
+# A booking redirect glued onto the end of an answer. Production symptom: a
+# customer asked what the capital of Japan is and got
+#   "The capital of Japan is Tokyo. Back to your booking, could you please
+#    share a preferred date?"
+# The answer arrived, and was immediately buried under a push. Asking one
+# question should not read as an attempt to resume the booking. The step is
+# still re-asked on the next turn, which is enough.
+_BOOKING_REDIRECT_SENTENCE_RE = re.compile(
+    r"(?:(?<=^)|(?<=[.!?]))\s*"
+    r"(?:"
+    r"(?:back|getting)\s+to\s+(?:your|the)\s+booking"
+    r"|for\s+your\s+booking"
+    r"|(?:continue|proceed|resume)\s+(?:with\s+)?(?:the\s+|your\s+)?booking"
+    r"|(?:would|do)\s+you\s+like\s+to\s+(?:book|schedule|continue|proceed)"
+    r"|(?:let'?s|shall\s+we)\s+(?:get|set)\s+(?:your\s+\w+\s+)?(?:set\s+up|going|booked)"
+    r"|which\s+date\s+works\s+for\s+you"
+    r"|do\s+you\s+want\s+to\s+(?:book|schedule|proceed)"
+    r"|(?:could|can|would)\s+you\s+please\s+share\s+(?:your\s+)?"
+    r"(?:preferred\s+|booking\s+|appointment\s+)?(?:date|time)"
+    r"|what\s+date\s+would\s+you\s+(?:like|prefer)"
+    r"|please\s+(?:share|provide)\s+your\s+(?:preferred\s+)?(?:date|time)"
+    r"|please\s+choose\s+your\s+preferred\s+date"
+    r"|please\s+share\s+a\s+preferred\s+(?:date|time)"
+    r"|share\s+your\s+(?:preferred\s+)?(?:date|time)"
+    r")"
+    r"[^.!?]*[.!?]?",
+    flags=re.IGNORECASE,
+)
+
+
+def _strip_booking_redirect(text: str) -> str:
+    """Remove a trailing "back to your booking" push from an answer.
+
+    Only the redirect is removed, and only when it is a separate sentence.
+    A reply whose entire content IS the redirect is left alone, because the
+    caller then substitutes the standard step prompt instead -- removing it
+    there would leave the customer with nothing.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return raw
+    cleaned = _BOOKING_REDIRECT_SENTENCE_RE.sub("", raw)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    # A short answer plus a push is still an answer. The length floor here is
+    # deliberately much lower than the refusal path's: a complete answer can
+    # be one sentence ("The capital of Japan is Tokyo."), and falling back to
+    # the original would put the push straight back in front of the customer.
+    if len(cleaned) < 20:
+        return raw
+    return cleaned
+
 
 # Internal vocabulary never shown to a customer. Removed from whatever
 # material is kept, so a partial answer loses the reference but not the fact.
@@ -1057,6 +1122,33 @@ _CONFIRM_FILLER_WORDS = frozenset({
 })
 
 
+def may_send_otp_standalone(
+    *,
+    booking_gate_handled: bool,
+    otp_required: bool,
+    user_confirmed: Optional[bool],
+) -> bool:
+    """May the standalone OTP path send a code on this turn?
+
+    Invariant: a verification code is never sent before the customer has
+    explicitly confirmed the booking. The gate (`should_run_booking_gate`)
+    already refused to run the booking flow, but a second, independent OTP
+    path went ahead and sent the code anyway -- so a customer who filled in
+    their details and then asked a question was sent a code for a booking
+    they had not agreed to.
+
+    `user_confirmed=None` means the caller cannot report a confirmation, and
+    keeps the previous behaviour rather than silently suppressing the code.
+    """
+    if booking_gate_handled:
+        return False
+    if not otp_required:
+        return False
+    if user_confirmed is None:
+        return True
+    return bool(user_confirmed)
+
+
 def _is_user_confirmation(message_text: str) -> bool:
     """True when the customer's own words confirm the booking.
 
@@ -1276,6 +1368,60 @@ async def _session_has_persisted_booking(
     return False
 
 
+async def _guard_confirmation_claim(
+    db: AsyncSession,
+    session_id: str,
+    assistant_message: str,
+    directive: str,
+    chat_session: Any,
+    field_meta: Dict[str, Any],
+    org: Any,
+    fd_map: Dict[str, Any],
+) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+    """Block a confirmation claim unless a Booking row actually exists.
+
+    Required order is details -> summary -> confirm -> OTP -> booking, and
+    nothing may say "booked" or "confirmed" until a Booking row is on disk.
+
+    This lives as a helper because the guard used to sit only near the end of
+    `process_turn`, where its own comment claimed it covered "every path,
+    including the ones that return early". It did not. Production evidence:
+    with zero Booking rows for a session, the agent sent "Your appointment is
+    booked for October 2, 2026 at 3:00 PM" and then, once the code arrived,
+    "Your booking is already processed." Both came from paths that return
+    before the old guard could run.
+
+    Every early return of a model-authored message must call this. Returns
+    ``(message, directive, field_meta)`` when it downgraded, else ``None``.
+    """
+    if not isinstance(assistant_message, str) or not assistant_message.strip():
+        return None
+    try:
+        from app.engine.user_visible_text import looks_like_confirmation_claim
+
+        _claims = looks_like_confirmation_claim(assistant_message)
+    except Exception:
+        _claims = False
+    if not _claims:
+        return None
+    if await _session_has_persisted_booking(
+        db,
+        session_id,
+        org_id=getattr(org, "id", None),
+        collected_data=dict(chat_session.collected_data or {}),
+    ):
+        return None
+    logger.warning(
+        "confirmation_claim_downgraded_no_booking session=%s directive=%s",
+        str(session_id)[:8],
+        directive,
+    )
+    _msg, _dir = message_processor._build_confirmation_summary(chat_session, fd_map)
+    field_meta.pop("knowledge_answer", None)
+    return _msg, _dir, field_meta
+
+
+
 async def process_message_with_graph(
     db: AsyncSession,
     org: Organization,
@@ -1375,6 +1521,38 @@ async def process_message_with_graph(
 
     # Re-engagement clears a recorded decline (values or book-words).
     await decline_flow.maybe_reengage(db, chat_session, message_text)
+
+    # Opening greeting: a customer whose FIRST message is their name ("Hi
+    # Yash", "Amanpreet Kaur") was told "Hello! Could you please share your
+    # full name?" -- the name they had just given was ignored and they were
+    # asked for it again. Capture it, acknowledge them by name, and move on
+    # to the next missing field.
+    #
+    # Placed after the cancel / post-booking / decline / cooldown gates so
+    # none of those can be bypassed, and before the LLM so the salutation is
+    # deterministic and cannot greet the customer by the wrong name.
+    try:
+        _opening_fds = order_field_definitions(
+            parse_field_definitions(
+                getattr(org_config, "field_definitions", None)
+                or getattr(org_config, "required_fields", None)
+            )
+        )
+        _greeting_action = await message_processor.maybe_greet_opening_name(
+            db,
+            org,
+            org_config,
+            chat_session,
+            message_text,
+            field_definitions=_opening_fds,
+            inbound_message_id=_inbound_id,
+            background_tasks=background_tasks,
+        )
+    except Exception as _greet_err:
+        logger.warning("opening greeting failed, falling through: %s", _greet_err)
+        _greeting_action = None
+    if _greeting_action is not None:
+        return _greeting_action
 
     # Field refusal: "no" / "don't want to share X" aimed at the current
     # missing field gets a soft re-ask of the SAME field — never a jump
@@ -1896,7 +2074,12 @@ async def process_message_with_graph(
                     current_intent = "CONFIRM_BOOKING"
     chat_session.current_intent = current_intent
     if current_intent == "CONFIRM_BOOKING" and not follow_up_fields:
-        directive = "PROCESS_BOOKING"
+        # current_intent is carried across turns, so a CONFIRM_BOOKING left
+        # over from a previous turn would otherwise authorise a booking on
+        # whatever the customer says next. The booking must be authorised by
+        # a confirmation in THIS turn.
+        if _is_user_confirmation(message_text):
+            directive = "PROCESS_BOOKING"
 
     if isinstance(follow_up_fields, list):
         chat_session.missing_fields = follow_up_fields
@@ -2236,10 +2419,8 @@ async def process_message_with_graph(
     # (WhatsApp-only, behind no flag for now as requested — widget keeps its own path)
     # whatsapp_cloud (Meta Cloud API) is WhatsApp-class: same directives/IDs/handler.
     _is_whatsapp = str(getattr(chat_session, "channel", "")).lower() in ("whatsapp", "whatsapp_cloud")
-    _directive_created = None
     if _is_whatsapp and directive in ("REQUIRE_DATE_PICKER", "REQUIRE_TIME_SLOT_GRID", "REQUIRE_SELECT", "SELECT_DROPDOWN", "REQUEST_CONFIRMATION", "BOOKING_SUMMARY_CARD"):
         try:
-            from app.engine.booking_directive.service import create_directive as _create_dir
             from app.engine.booking_directive.service import DirectiveType as _DT
 
             _type_map = {
@@ -2286,12 +2467,19 @@ async def process_message_with_graph(
                                 except Exception:
                                     pass
                         elif _dtype == _DT.SELECT_SLOT:
-                            # Generate real slots for the current booking date
-                            _target = None
-                            if isinstance(directive_meta, dict):
+                            # Generate real slots for the current booking date.
+                            # collected_data is merged from the graph's output
+                            # before this block runs, so it always holds the
+                            # date the customer most recently gave -- including
+                            # on the very turn they gave it. directive_meta may
+                            # still carry the previous turn's target, and using
+                            # that showed slots for the OLD date after the
+                            # customer picked a new one. Production: "28
+                            # September 2027" was stored correctly while the
+                            # reply listed slots for 2026-10-02.
+                            _target = (chat_session.collected_data or {}).get("date")
+                            if not _target and isinstance(directive_meta, dict):
                                 _target = directive_meta.get("target_date") or directive_meta.get("date")
-                            if not _target:
-                                _target = (chat_session.collected_data or {}).get("date")
                             if _target:
                                 from dateutil.parser import parse as _parse
                                 from app.engine.slot_engine import compute_slot_inventory, format_slot_time
@@ -2358,12 +2546,61 @@ async def process_message_with_graph(
                                         _rejected = _unmatched_time_choice(
                                             message_text, _slot_labels
                                         )
-                                        _prefix = (
-                                            f"{_rejected} is not a valid time. "
-                                            if _rejected
-                                            else ""
-                                        )
-                                        assistant_message = (
+                                        # If this turn is not a time attempt at all
+                                        # (a question, chatter, gibberish), the
+                                        # graph above has already answered it --
+                                        # re-rendering the grid here would discard
+                                        # that answer and trap the customer in a
+                                        # loop of identical slot lists.
+                                        # Production: six turns of the same list
+                                        # for "do you have parking?" and friends.
+                                        _is_time_attempt = bool(_rejected)
+                                        try:
+                                            from app.engine.validators import (
+                                                DataValidator as _time_val,
+                                            )
+                                            _tnorm, _ = _time_val._validate_time(
+                                                str(message_text or "")
+                                            )
+                                            _is_time_attempt = _is_time_attempt or bool(_tnorm)
+                                        except Exception:
+                                            pass
+                                        # A turn that PROVIDED the date must still
+                                        # render its slots, even though the
+                                        # message is not a time. Only a turn
+                                        # that provided nothing (a question,
+                                        # chatter) keeps the graph's answer.
+                                        _provided_this_turn = False
+                                        try:
+                                            from dateutil.parser import (
+                                                parse as _this_turn_parse,
+                                            )
+                                            _turn_date = _this_turn_parse(
+                                                str(message_text or "")
+                                            ).date().isoformat()
+                                            _provided_this_turn = bool(
+                                                _turn_date
+                                                and str(_target or "").strip()
+                                                and _turn_date == str(_target).strip()[:10]
+                                            )
+                                        except Exception:
+                                            pass
+                                        if (
+                                            not _is_time_attempt
+                                            and not _provided_this_turn
+                                            and str(
+                                            getattr(chat_session, "current_intent", "")
+                                        ) in ("ASK_QUESTION", "PROVIDE_DATA")
+                                        ):
+                                            # Leave the graph's answer intact.
+                                            pass
+                                        else:
+                                            _prefix = (
+                                                f"{_rejected} is not a valid time. "
+                                                if _rejected
+                                                else ""
+                                            )
+                                            assistant_message = (
                                             f"{_prefix}Available slots for {str(_target)}:\n"
                                             f"{slots_text}\n\nPlease reply with your "
                                             f"preferred time (e.g., {_slot_labels[0]})"
@@ -2469,80 +2706,82 @@ async def process_message_with_graph(
                     _opts.append({"id": _oid, "label": _label, "value": _value})
                 if _dtype == _DT.CONFIRM_BOOKING and not _opts:
                     _opts = [{"id": "confirm_booking", "label": "CONFIRM", "value": "confirm"}, {"id": "change_booking", "label": "CHANGE", "value": "change"}]
-                if _opts or _dtype == _DT.CONFIRM_BOOKING:
-                    # Use stable WhatsApp sender identity (channel_user_id) as customer_id
-                    # Do NOT fallback to session_id — booking_directives.customer_id must equal whatsapp from_phone
-                    _customer_id = str(getattr(chat_session, "channel_user_id", "") or "").strip()
-                    if not _customer_id:
-                        # Fallback: try to derive from collected_data phone if channel_user_id not yet set (first turn race)
-                        _phone_from_data = str((chat_session.collected_data or {}).get("phone") or "").strip()
-                        import re as _re2
-                        _digits = _re2.sub(r"\D", "", _phone_from_data)
-                        _customer_id = _digits if len(_digits) >= 7 else ""
-                    if not _customer_id:
-                        logger.warning(f"Directive create skipped: no customer_id for session {str(chat_session.session_id)[:8]} channel={getattr(chat_session, 'channel', '')}")
-                    else:
-                        # Build rich description: business hours + availability (date) or times (slot)
-                        _desc_for_create = ""
-                        if isinstance(directive_meta, dict) and directive_meta.get("description"):
-                            _desc_for_create = str(directive_meta.get("description") or "")
-                        # For SELECT_DATE without description, horizon only (as requested)
-                        if not _desc_for_create and _dtype == _DT.SELECT_DATE:
+                if _opts:
+                    # No BookingDirective row is written on WhatsApp. The computed
+                    # options flow straight into field_meta for the text-only
+                    # render, and the ActionPayload widget_directive drives flow
+                    # control. The date step offers slot-checked days rather than
+                    # the raw calendar list, so a closed or fully-booked day is
+                    # never put in front of the customer.
+                    if _opts and isinstance(directive_meta, dict):
+                        if _dtype == _DT.SELECT_DATE:
                             try:
-                                from app.engine.message_processor import _format_available_dates_for_prompt as _fmt_avail
-                                _tz4 = str(getattr(org_config, "timezone", None) or "UTC")
-                                from app.engine.scheduling_policy import resolve_booking_horizon_days as _resolve_horizon
-                                _max4 = (await _resolve_horizon(db, org.id, org_config))[0]
-                                _desc_for_create = _fmt_avail(_tz4, _max4, count=7)
+                                from app.engine.scheduling_policy import (
+                                    select_date_option_labels as _sel_dates,
+                                )
+
+                                _bookable = await _sel_dates(
+                                    db=db,
+                                    org_id=str(org.id),
+                                    org_timezone=str(
+                                        getattr(org_config, "timezone", None) or "UTC"
+                                    ),
+                                )
+                                if _bookable:
+                                    _opts = _bookable
                             except Exception:
                                 pass
-                        _directive_created = await _create_dir(
-                            db,
-                            org_id=org.id,
-                            customer_id=_customer_id,
-                            session_id=chat_session.session_id,
-                            type=_dtype,
-                            title="Select your preferred date" if _dtype == _DT.SELECT_DATE else "Select your preferred time" if _dtype in (_DT.SELECT_SLOT, "SELECT_TIME") else "Please confirm your booking",
-                            description=_desc_for_create,
-                            options=_opts,
-                            required=True,
-                            expires_in_seconds=300 if _dtype in (_DT.SELECT_SLOT, "SELECT_TIME") else 600,
-                            meta={"field_name": directive_meta.get("name") if isinstance(directive_meta, dict) else None, "directive": directive, **(directive_meta if isinstance(directive_meta, dict) else {})},
+                        directive_meta["options"] = (
+                            [dict(o) for o in _opts]
+                            if _opts and isinstance(_opts[0], dict)
+                            else _opts
                         )
-                        # Persist active_directive_id synchronously before response
-                        _cd = dict(chat_session.collected_data or {})
-                        _cd["active_directive_id"] = str(_directive_created.id)
-                        chat_session.collected_data = _cd
-                        await db.flush()
-                        await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
-                        await db.flush()
-                        logger.info(f"Directive persisted: id={str(_directive_created.id)[:8]} type={_dtype} customer={_customer_id[-4:]} session={str(chat_session.session_id)[:8]}")
-                        # Ensure the rendered reply uses the persisted directive's stable IDs/values
-                        if isinstance(directive_meta, dict):
-                            directive_meta["options"] = [dict(o) for o in _directive_created.options]
-                        if isinstance(field_meta, dict) and isinstance(directive_meta, dict):
-                            for _k, _v in directive_meta.items():
-                                field_meta[_k] = _v
+                    if isinstance(field_meta, dict) and isinstance(directive_meta, dict):
+                        for _k, _v in directive_meta.items():
+                            field_meta[_k] = _v
         except Exception as _e:
             logger.exception(f"Directive create failed: {_e}")
-    # WhatsApp parity: date picker needs tappable options just like the widget's
-    # calendar. The widget ignores field_meta.options for dates, but WhatsApp
-    # renders them as a list — ensure 7 upcoming days are present.
-    if directive == "REQUIRE_DATE_PICKER" and isinstance(directive_meta, dict) and not directive_meta.get("options"):
+    # WhatsApp date step presentation.
+    #
+    # The customer is told the booking window in words, not shown a list of day
+    # names:
+    #
+    #   Select your preferred date
+    #
+    #   We are available from 29 September 2026 to 29 September 2027, please
+    #   choose a date within this horizon. (All dates in Africa/Algiers.)
+    #
+    # A "Available dates: Thu, Oct 01 ..." line was tried and reverted. It
+    # reads as a menu, and any day on it can turn out to be full, so the
+    # customer picks from it and is then told the day is unavailable. The
+    # horizon plus the closed-day note is what they need, and it cannot go
+    # stale between being sent and being used.
+    if _is_whatsapp and directive == "REQUIRE_DATE_PICKER":
         try:
-            from app.engine.message_processor import _upcoming_date_options
+            from app.engine.message_processor import (
+                _format_available_dates_for_prompt as _fmt_wa_date,
+            )
+            from app.engine.scheduling_policy import (
+                resolve_booking_horizon_days as _wa_horizon,
+            )
 
-            _org_tz = str(getattr(org_config, "timezone", None) or "UTC")
-            from app.engine.scheduling_policy import resolve_booking_horizon_days as _resolve_horizon
-            _max_days = (await _resolve_horizon(db, org.id, org_config))[0]
-            _opts = _upcoming_date_options(_org_tz, _max_days)
-            directive_meta["options"] = _opts
-            field_meta.update(directive_meta)
-            logger.info(f"DATE_LIST_INJECTED directive={directive} opts={len(_opts)}")
-        except Exception as _e:
-            logger.warning(f"DATE_LIST_INJECT failed: {_e}")
-    elif directive == "REQUIRE_DATE_PICKER":
-        logger.info(f"DATE_LIST_SKIP directive={directive} has_options={bool(directive_meta.get('options')) if isinstance(directive_meta, dict) else 'no_meta'}")
+            _wa_tz = str(getattr(org_config, "timezone", None) or "UTC")
+            try:
+                _wa_max = (await _wa_horizon(db, org.id, org_config))[0]
+            except Exception:
+                _wa_max = 90
+            _wa_desc = _fmt_wa_date(_wa_tz, _wa_max)
+            if _wa_desc and isinstance(assistant_message, str) and assistant_message.strip():
+                _wa_head = "Select your preferred date"
+                if _wa_desc not in assistant_message:
+                    assistant_message = (
+                        f"{assistant_message.rstrip()}\n\n{_wa_head}\n\n{_wa_desc}"
+                        if _wa_head.lower() not in assistant_message.lower()
+                        else f"{assistant_message.rstrip()}\n\n{_wa_desc}"
+                    )
+                logger.info("DATE_STEP_FORMAT_APPLIED tz=%s", _wa_tz)
+        except Exception as _wa_date_err:
+            logger.warning("date step format failed: %s", _wa_date_err)
     is_valid_directive, validation_error = StateEvaluator.validate_directive_payload(
         directive,
         directive_meta,
@@ -2842,116 +3081,120 @@ async def process_message_with_graph(
         # point, so every path (booking, knowledge, decline) is accounted for
         # exactly once instead of risking double counting.
 
-    if not booking_gate_handled and otp_required:
-        effect_state = _active_effect_state(chat_session)
-        sent_keys = effect_state.get("otp_sent_keys")
-        if not isinstance(sent_keys, list):
-            sent_keys = []
-            effect_state["otp_sent_keys"] = sent_keys
+        if may_send_otp_standalone(
+            booking_gate_handled=booking_gate_handled,
+            otp_required=otp_required,
+            user_confirmed=_user_confirmed,
+        ):
+            effect_state = _active_effect_state(chat_session)
+            sent_keys = effect_state.get("otp_sent_keys")
+            if not isinstance(sent_keys, list):
+                sent_keys = []
+                effect_state["otp_sent_keys"] = sent_keys
 
-        otp_error: Optional[str] = None
-        recipient_email = resolve_email_from_collected_data(
-            chat_session.collected_data,
-            list(fd_map.values()),
-        )
-        # Stale-key guard: otp_sent_keys persists even after OTPRecord expired/deleted
-        # (cleanup every 5m). If the record is gone, allow regeneration even if the
-        # key is still in sent_keys. Without this, users get stuck on
-        # "I've sent..." with no code actually deliverable.
-        _otp_exists = False
-        try:
-            import uuid as _uuid_exist
-            from sqlalchemy.future import select as _sel_exist
-
-            from app.models.otp import OTPRecord as _OTPExist
-
-            try:
-                _sid_uuid = _uuid_exist.UUID(str(session_id))
-            except Exception:
-                _sid_uuid = session_id
-            _otp_row = (
-                await db.execute(
-                    _sel_exist(_OTPExist).where(
-                        _OTPExist.session_id == _sid_uuid, _OTPExist.channel == "email"
-                    )
-                )
-            ).scalars().first()
-            _otp_exists = _otp_row is not None
-            # Also check expiry - if expired, treat as not exists (will be cleaned)
-            if _otp_exists:
-                from datetime import datetime, timezone as _tz
-
-                _now = datetime.now(_tz.utc)
-                _exp = _otp_row.expires_at
-                if _exp.tzinfo is None:
-                    _exp = _exp.replace(tzinfo=_tz.utc)
-                if _now > _exp:
-                    _otp_exists = False
-                    # remove stale key so next turn regenerates
-                    if otp_event_key in sent_keys:
-                        sent_keys.remove(otp_event_key)
-        except Exception:
+            otp_error: Optional[str] = None
+            recipient_email = resolve_email_from_collected_data(
+                chat_session.collected_data,
+                list(fd_map.values()),
+            )
+            # Stale-key guard: otp_sent_keys persists even after OTPRecord expired/deleted
+            # (cleanup every 5m). If the record is gone, allow regeneration even if the
+            # key is still in sent_keys. Without this, users get stuck on
+            # "I've sent..." with no code actually deliverable.
             _otp_exists = False
-            if otp_event_key in sent_keys:
-                sent_keys.remove(otp_event_key)
-        if otp_event_key not in sent_keys or not _otp_exists:
             try:
-                if not recipient_email:
-                    raise ValueError("We couldn't find an email address to send the code to.")
-                otp_code = await otp_crud.generate_otp(
-                    db,
-                    chat_session.session_id,
-                    resend=False,
-                )
-                _result = await mailer.send_otp_email(
-                    recipient_email,
-                    otp_code,
-                    org_id=org.id,
-                    idempotency_key=otp_event_key,
-                )
-                if not delivery_succeeded(
-                    _result,
-                    allow_mock=bool(
-                        getattr(_otp_delivery_settings, "OTP_ALLOW_MOCK_DELIVERY", False)
-                    ),
-                ):
-                    await invalidate_otp_delivery(
+                import uuid as _uuid_exist
+                from sqlalchemy.future import select as _sel_exist
+
+                from app.models.otp import OTPRecord as _OTPExist
+
+                try:
+                    _sid_uuid = _uuid_exist.UUID(str(session_id))
+                except Exception:
+                    _sid_uuid = session_id
+                _otp_row = (
+                    await db.execute(
+                        _sel_exist(_OTPExist).where(
+                            _OTPExist.session_id == _sid_uuid, _OTPExist.channel == "email"
+                        )
+                    )
+                ).scalars().first()
+                _otp_exists = _otp_row is not None
+                # Also check expiry - if expired, treat as not exists (will be cleaned)
+                if _otp_exists:
+                    from datetime import datetime, timezone as _tz
+
+                    _now = datetime.now(_tz.utc)
+                    _exp = _otp_row.expires_at
+                    if _exp.tzinfo is None:
+                        _exp = _exp.replace(tzinfo=_tz.utc)
+                    if _now > _exp:
+                        _otp_exists = False
+                        # remove stale key so next turn regenerates
+                        if otp_event_key in sent_keys:
+                            sent_keys.remove(otp_event_key)
+            except Exception:
+                _otp_exists = False
+                if otp_event_key in sent_keys:
+                    sent_keys.remove(otp_event_key)
+            if otp_event_key not in sent_keys or not _otp_exists:
+                try:
+                    if not recipient_email:
+                        raise ValueError("We couldn't find an email address to send the code to.")
+                    otp_code = await otp_crud.generate_otp(
                         db,
                         chat_session.session_id,
-                        "email",
-                        context_key=otp_event_key,
+                        resend=False,
                     )
-                    raise RuntimeError(delivery_error(_result))
-                sent_keys.append(otp_event_key)
-                await crud_chat.update_chat_session(db, session_id, chat_session)
-            except Exception as otp_send_error:
-                otp_error = str(otp_send_error)
+                    _result = await mailer.send_otp_email(
+                        recipient_email,
+                        otp_code,
+                        org_id=org.id,
+                        idempotency_key=otp_event_key,
+                    )
+                    if not delivery_succeeded(
+                        _result,
+                        allow_mock=bool(
+                            getattr(_otp_delivery_settings, "OTP_ALLOW_MOCK_DELIVERY", False)
+                        ),
+                    ):
+                        await invalidate_otp_delivery(
+                            db,
+                            chat_session.session_id,
+                            "email",
+                            context_key=otp_event_key,
+                        )
+                        raise RuntimeError(delivery_error(_result))
+                    sent_keys.append(otp_event_key)
+                    await crud_chat.update_chat_session(db, session_id, chat_session)
+                except Exception as otp_send_error:
+                    otp_error = str(otp_send_error)
 
-        try:
-            otp_policy_meta = await otp_crud.get_otp_policy_metadata(
-                db, chat_session.session_id
-            )
-        except Exception:
-            otp_policy_meta = {}
+            try:
+                otp_policy_meta = await otp_crud.get_otp_policy_metadata(
+                    db, chat_session.session_id
+                )
+            except Exception:
+                otp_policy_meta = {}
 
-        directive = "REQUIRE_OTP_MODAL"
-        field_meta.update(otp_policy_meta)
-        field_meta["otp_required"] = True
-        field_meta["otp_event_key"] = otp_event_key
-        field_meta["channel"] = "email"
-        if otp_error:
-            field_meta["validation_error"] = otp_error
-            assistant_message = (
-                "I couldn't send the verification code right now. "
-                "Please check your contact details and try again."
-            )
-        elif recipient_email:
-            assistant_message = (
-                f"Excellent! I have all your details. I've sent a verification code to {recipient_email}. "
-                "Please enter it here to continue."
-            )
-        else:
-            assistant_message = "Please verify your OTP code to continue."
+            directive = "REQUIRE_OTP_MODAL"
+            field_meta.update(otp_policy_meta)
+            field_meta["otp_required"] = True
+            field_meta["otp_event_key"] = otp_event_key
+            field_meta["channel"] = "email"
+            if otp_error:
+                field_meta["validation_error"] = otp_error
+                assistant_message = (
+                    "I couldn't send the verification code right now. "
+                    "Please check your contact details and try again."
+                )
+            elif recipient_email:
+                assistant_message = (
+                    f"Excellent! I have all your details. I've sent a verification code to {recipient_email}. "
+                    "Please enter it here to continue."
+                )
+            else:
+                assistant_message = "Please verify your OTP code to continue."
     # Knowledge question while OTP pending — answer it, don't spam OTP.
     # The graph injected knowledge (knowledge_answer) for ASK_QUESTION;
     # forcing OTP here would ignore the user's actual question and loop.
@@ -2986,6 +3229,10 @@ async def process_message_with_graph(
         # that") which read as a brush-off and mention internal machinery the
         # customer has never heard of.
         _knowledge_reply = _normalise_offtopic_decline(_knowledge_reply)
+        # A question between booking steps is answered on its own terms. The
+        # "back to your booking" push is removed so the answer stands alone;
+        # the pending step is re-asked on the next turn.
+        _knowledge_reply = _strip_booking_redirect(_knowledge_reply)
 
         # Strike accounting is deliberately NOT done here. This branch returns
         # early, and a live test showed the declines that customers actually
@@ -3002,11 +3249,26 @@ async def process_message_with_graph(
         # bot look like it is nagging rather than helping. The code is not
         # lost: once a code is actually pending, the next turn prompts for it,
         # and 'resend' always works. Keep the reply to the question asked.
-        _action = ActionPayload(
-            message=_knowledge_reply or
+        #
+        # A confirmation claim is still blocked here. This path returns before
+        # the end-of-turn guard, and it is exactly where production sent "Your
+        # appointment is booked for October 2, 2026 at 3:00 PM" with no Booking
+        # row on disk.
+        _k_final_msg = _knowledge_reply or (
             "I'm a booking assistant, so I can only help with appointments — "
-            "I don't have information about that.",
-            widget_directive="TEXT_INPUT",
+            "I don't have information about that."
+        )
+        _k_guarded = await _guard_confirmation_claim(
+            db, session_id, _k_final_msg, "TEXT_INPUT",
+            chat_session, field_meta, org, fd_map,
+        )
+        if _k_guarded is not None:
+            _k_final_msg, _k_dir, field_meta = _k_guarded
+        else:
+            _k_dir = "TEXT_INPUT"
+        _action = ActionPayload(
+            message=_k_final_msg,
+            widget_directive=_k_dir,
             field_meta=field_meta,
         )
         await _persist_transcript_best_effort(
@@ -3014,7 +3276,7 @@ async def process_message_with_graph(
             session_id=session_id,
             user_message=_transcript_user_text, user_external_id=_inbound_id,
             assistant_message=_action.message,
-            directive="TEXT_INPUT",
+            directive=_k_dir,
             intent=current_intent,
         )
         return _action
@@ -3025,20 +3287,33 @@ async def process_message_with_graph(
             for frag in ("internal error", "trouble connecting", "hard to process")
         ):
             field_meta["knowledge_answer"] = True
+            # Same early-return hole as the knowledge path above.
+            _k2_guarded = await _guard_confirmation_claim(
+                db, session_id, _k_answer, "TEXT_INPUT",
+                chat_session, field_meta, org, fd_map,
+            )
+            if _k2_guarded is not None:
+                _k_answer, _k2_dir, field_meta = _k2_guarded
+            else:
+                _k2_dir = "TEXT_INPUT"
             _k_action = ActionPayload(
-                message=_k_answer, widget_directive="TEXT_INPUT", field_meta=field_meta
+                message=_k_answer, widget_directive=_k2_dir, field_meta=field_meta
             )
             await _persist_transcript_best_effort(
                 db,
                 session_id=session_id,
                 user_message=_transcript_user_text, user_external_id=_inbound_id,
                 assistant_message=_k_answer,
-                directive="TEXT_INPUT",
+                directive=_k2_dir,
                 intent=current_intent,
             )
             return _k_action
         directive = "TEXT_INPUT"
-    elif not booking_gate_handled and phone_otp_required:
+    elif may_send_otp_standalone(
+        booking_gate_handled=booking_gate_handled,
+        otp_required=phone_otp_required,
+        user_confirmed=_user_confirmed,
+    ):
         # Phone verification to confirm booking — provider abstraction
         # (WhatsApp active, SMS fallback), same as legacy path + /generate.
         phone = str(chat_session.collected_data.get("phone") or "").strip()
@@ -3805,33 +4080,20 @@ async def process_message_with_graph(
     # either did not run on that path or downgraded too late, and a customer
     # was told they were booked before verification. Nothing may say
     # "confirmed" unless a Booking row is actually on disk.
-    if isinstance(assistant_message, str) and assistant_message.strip():
-        try:
-            from app.engine.user_visible_text import looks_like_confirmation_claim
-
-            _final_claims = looks_like_confirmation_claim(assistant_message)
-        except Exception:
-            _final_claims = False
-        # A booking genuinely created this turn is the only thing that
-        # authorises confirmation wording.
-        if _final_claims and not await _session_has_persisted_booking(
-            db,
-            session_id,
-            org_id=getattr(org, "id", None),
-            collected_data=dict(chat_session.collected_data or {}),
-        ):
-            logger.warning(
-                "final_confirmation_guard_blocked_claim session=%s directive=%s",
-                str(session_id)[:8],
-                directive,
-            )
-            # A completed-but-unconfirmed booking always falls back to the
-            # review card, which restores the required order:
-            # details -> summary -> confirm -> OTP -> booking.
-            assistant_message, directive = (
-                message_processor._build_confirmation_summary(chat_session, fd_map)
-            )
-            field_meta.pop("knowledge_answer", None)
+    # Final authority on confirmation wording, for the paths that fall through
+    # to here. The early-return paths call the same helper themselves.
+    _guarded = await _guard_confirmation_claim(
+        db,
+        session_id,
+        assistant_message,
+        directive,
+        chat_session,
+        field_meta,
+        org,
+        fd_map,
+    )
+    if _guarded is not None:
+        assistant_message, directive, field_meta = _guarded
 
     # 3. Create ActionPayload to emulate traditional response
     action = ActionPayload(

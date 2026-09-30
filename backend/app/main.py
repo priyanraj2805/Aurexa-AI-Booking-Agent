@@ -40,6 +40,27 @@ async def lifespan(app: FastAPI):
         pass
     cleanup_task = asyncio.create_task(run_cleanup_loop())
     start_debouncer()
+    # The WhatsApp dedup map, per-conversation lock and flood window are
+    # per-process dicts. That is correct for the single-worker deployment this
+    # service is started with, but it would silently weaken if someone adds
+    # `workers=`. Say so explicitly instead of inheriting it quietly.
+    try:
+        from app.core.whatsapp_debouncer import (
+            detect_configured_worker_count,
+            multi_process_risk_report,
+        )
+
+        _report = multi_process_risk_report(
+            worker_count=detect_configured_worker_count(),
+            acknowledged=os.environ.get("WHATSAPP_MULTI_PROCESS_ACK", "").strip().lower()
+            in ("1", "true", "yes"),
+        )
+        if _report:
+            import logging as _lg
+
+            _lg.getLogger(__name__).warning("WHATSAPP MULTI-PROCESS WARNING\n%s", _report)
+    except Exception:
+        pass
     yield
     cleanup_task.cancel()
     stop_debouncer()

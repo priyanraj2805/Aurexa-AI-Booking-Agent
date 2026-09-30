@@ -58,8 +58,14 @@ def test_the_guard_runs_at_the_last_point_before_the_reply_leaves() -> None:
     with open(path, "r", encoding="utf-8") as handle:
         lines = handle.readlines()
 
+    # Anchor on the end-of-turn guard's call site, not the helper definition
+    # or the earlier knowledge-path calls.
     guard_line = next(
-        (i for i, ln in enumerate(lines) if "final_confirmation_guard_blocked_claim" in ln),
+        (
+            i
+            for i, ln in enumerate(lines)
+            if "_guarded = await _guard_confirmation_claim(" in ln
+        ),
         None,
     )
     assert guard_line is not None, "the final confirmation guard is missing"
@@ -81,14 +87,30 @@ def test_the_guard_runs_at_the_last_point_before_the_reply_leaves() -> None:
     assert guard_line < payload_line
 
 
+def test_every_early_return_of_model_text_also_calls_the_guard() -> None:
+    """The guard used to exist only here, while its own comment claimed it
+    covered "every path, including the ones that return early". It did not:
+    production sent "Your appointment is booked for October 2, 2026 at 3:00 PM"
+    with zero Booking rows. Every path that returns a model-authored message
+    must now call the guard itself.
+    """
+    import app.engine.langgraph_orchestrator as orch
+
+    src = inspect.getsource(orch)
+    # The two knowledge paths, plus the end-of-turn path.
+    assert src.count("await _guard_confirmation_claim(") >= 3, (
+        "expected the guard on both knowledge early-return paths and the "
+        "end-of-turn path"
+    )
+
+
 def test_the_guard_requires_a_persisted_booking_not_just_a_flag() -> None:
     """A verification flag is not a booking. The check must consult the
     database for a Booking row, which is the only real evidence."""
     import app.engine.langgraph_orchestrator as orch
 
-    src = inspect.getsource(orch)
-    tail = src[src.find("final_confirmation_guard_blocked_claim") - 2000 :]
-    assert "_session_has_persisted_booking" in tail, (
+    src = inspect.getsource(orch._guard_confirmation_claim)
+    assert "_session_has_persisted_booking" in src, (
         "the guard must verify a persisted Booking row, not trust an "
         "in-memory flag that a later turn can set without booking anything"
     )
@@ -99,9 +121,8 @@ def test_the_guard_restores_the_review_card() -> None:
     given the review card so they can still confirm and complete the booking."""
     import app.engine.langgraph_orchestrator as orch
 
-    src = inspect.getsource(orch)
-    tail = src[src.find("final_confirmation_guard_blocked_claim") :]
-    assert "_build_confirmation_summary" in tail, (
+    src = inspect.getsource(orch._guard_confirmation_claim)
+    assert "_build_confirmation_summary" in src, (
         "a blocked confirmation must fall back to the summary, otherwise the "
         "customer is left with no way to confirm"
     )

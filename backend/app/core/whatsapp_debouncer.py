@@ -9,6 +9,7 @@ Handles out-of-order and duplicate inbound messages:
 
 import asyncio
 import logging
+import os
 import time
 from typing import Dict, Optional
 
@@ -205,3 +206,86 @@ def session_lock_key(session_id: str) -> str:
                 key = key[len(prefix):]
                 changed = True
     return key or "__unknown_session__"
+
+
+# ── Multi-process safety ───────────────────────────────────────────────────
+# Everything above this section is plain module-level dicts, so it is scoped to
+# ONE OS process. The deployment is currently single-process (uvicorn is
+# started without `workers=`), which is why this is correct today.
+#
+# Classification of the process-local state:
+#
+#   A. Must be distributed if this ever runs multi-process
+#      - message deduplication: a Meta retry (or a Baileys redelivery) landing
+#        on a second worker is not recognised, so the turn runs twice.
+#      - per-conversation session lock: two messages from one customer can be
+#        processed concurrently on two workers, and collected_data is a
+#        read-modify-write JSONB merge, so one turn's fields can overwrite the
+#        other's.
+#      - flood window: the effective limit becomes N x RATE_LIMIT_MAX_MESSAGES.
+#
+#   B. Safe to leave process-local
+#      - _lock_timestamps / _processed_task / the cleanup loop: bookkeeping for
+#        the local maps only.
+#      - the in-process LangGraph MemorySaver: not used for state. Messages and
+#        the durable checkpoint are rebuilt from Postgres every turn
+#        (chat_sessions.state_data["runtime_checkpoint"]).
+#
+#   C. Already protected by PostgreSQL -- NOT replaced by anything above
+#      - duplicate bookings: attempt_booking takes
+#        `SELECT ... FOR UPDATE NOWAIT` on the slot, checks is_booked, and
+#        bookings.slot_id is UNIQUE.
+#      - double OTP verification: otp_records is UNIQUE(session_id, channel)
+#        and verify_otp locks the row NOWAIT.
+#      - session status races: atomic_set_confirming does ACTIVE -> CONFIRMING
+#        under NOWAIT.
+#
+# Nothing here is moved to Redis. Redis is declared in docker-compose but has no
+# client code at all, so adopting it would mean adding a dependency and a new
+# failure mode to the booking path, and the test suite runs on SQLite and
+# cannot verify Postgres advisory-lock semantics.
+#
+# Instead the risk is made LOUD at startup, so a multi-process deployment
+# cannot silently inherit weaker guarantees than single-process.
+_PROCESS_LOCAL_MECHANISMS = (
+    "WhatsApp message deduplication (_processed_message_ids)",
+    "per-conversation session lock (_session_locks)",
+    "per-sender flood window (_sender_message_times)",
+)
+
+
+def detect_configured_worker_count() -> int:
+    """Worker count the process was configured with. 1 when unknown/single."""
+    for var in ("WEB_CONCURRENCY", "UVICORN_WORKERS", "APP_WORKERS"):
+        raw = os.environ.get(var)
+        if raw and raw.strip().isdigit():
+            try:
+                count = int(raw.strip())
+            except ValueError:
+                continue
+            if count > 0:
+                return count
+    return 1
+
+
+def multi_process_risk_report(
+    *, worker_count: int, acknowledged: bool = False
+) -> Optional[str]:
+    """Describe the process-local mechanisms that weaken with >1 worker.
+
+    Returns None when the deployment is single-process (or the operator has
+    explicitly acknowledged the trade-off), otherwise a single log-ready
+    string naming every affected mechanism.
+    """
+    if worker_count <= 1 or acknowledged:
+        return None
+    listed = "\n".join(f"    - {item}" for item in _PROCESS_LOCAL_MECHANISMS)
+    return (
+        f"WhatsApp inbound is running with {worker_count} workers. The following "
+        "are per-process in-memory only and will NOT be shared between "
+        f"workers:\n{listed}\n"
+        "Duplicate-booking safety is unaffected: it is enforced in PostgreSQL "
+        "(slot row lock + UNIQUE(bookings.slot_id)). Set "
+        "WHATSAPP_MULTI_PROCESS_ACK=true to acknowledge this, or run a single "
+        "worker."
+    )

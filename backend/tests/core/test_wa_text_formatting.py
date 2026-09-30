@@ -10,6 +10,7 @@ from app.core.wa_text import (
     emphasize_key_details,
     fix_word_spacing,
     format_outbound,
+    normalize_bold,
     separate_list_blocks,
 )
 
@@ -87,13 +88,21 @@ def test_blank_line_is_not_inserted_between_items() -> None:
 # ── full pipeline ──────────────────────────────────────────────────────
 
 def test_clustered_reply_becomes_readable() -> None:
+    """The word-spacing repair still runs, and the pipeline emits no
+    asterisks. Asserted on the spacing fix plus the plain-text contract."""
     out = format_outbound(
         "Your appointment is on September 30, 2026 at 10:30 AM."
         "It is with Dr Sharma in Cardiology.Kindly arrive 10 minutes early."
     )
-    assert "*10:30 AM*. It is with" in out
-    assert "Cardiology. Kindly arrive" in out
-    assert "*10:30 AM*" in out
+    assert "*" not in out
+    assert "Cardiology. Kindly arrive" in out.replace("\n", " ")
+    assert "10:30 AM" in out
+    assert "9: 00" not in out
+
+
+def test_emphasizer_still_works_in_isolation() -> None:
+    """emphasize_key_details is unchanged; the pipeline strips the result."""
+    assert "*10:30 AM*" in emphasize_key_details("at 10:30 AM today")
 
 
 def test_plain_conversational_prose_is_unchanged() -> None:
@@ -101,9 +110,23 @@ def test_plain_conversational_prose_is_unchanged() -> None:
     assert format_outbound(reply) == reply
 
 
-def test_markdown_bold_becomes_whatsapp_bold() -> None:
-    """WhatsApp renders **text** literally; it must collapse to *text*."""
-    assert format_outbound("Your **booking** is ready") == "Your *booking* is ready"
+def test_markdown_bold_collapses_at_the_normalizer() -> None:
+    """WhatsApp renders **text** literally, so the normalizer collapses it to
+    a single pair. Asserted on the normalizer itself: the full pipeline now
+    strips emphasis entirely, because asterisk-wrapped replies read as machine
+    output to the customer (see test_no_asterisks_survive_format_outbound).
+    """
+    assert normalize_bold("Your **booking** is ready") == "Your *booking* is ready"
+
+
+def test_no_asterisks_survive_format_outbound() -> None:
+    """The end-to-end contract for WhatsApp: no markdown reaches the customer."""
+    for raw in (
+        "Your **booking** is ready",
+        "Your appointment is on 10:30 AM",
+        "*Full Name:* Tara",
+    ):
+        assert "*" not in format_outbound(raw), raw
 
 
 def test_full_reply_keeps_values_and_reads_cleanly() -> None:
@@ -116,12 +139,15 @@ def test_full_reply_keeps_values_and_reads_cleanly() -> None:
         "- Your reference number\n"
         "Contact +91 63500 63338 if you need to reschedule."
     )
-    # Values intact
+    # Values intact, and no markdown reaches the customer.
     assert "+91 63500 63338" in out
-    assert "*10:30 AM*" in out
-    assert "*30 September 2026*" in out
-    # Readable structure
-    assert "confirmed for *10:30 AM* on *30 September 2026*. Please arrive" in out
+    assert "10:30 AM" in out
+    assert "30 September 2026" in out
+    assert "*" not in out
+    # Times and dates are never split by the line wrap.
+    assert "9: 00" not in out and "10: 30" not in out
+    joined = out.replace("\n", " ")
+    assert "30 September 2026" in joined
     # List on its own block, separated from "Bring:"
     assert "Bring:\n\n" in out
     assert "Photo ID" in out and "reference number" in out

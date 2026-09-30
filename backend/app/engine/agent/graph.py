@@ -654,6 +654,37 @@ async def call_model(
                     if _dropped_all:
                         logger.info("RAG relevance gate dropped all chunks")
                     rag_chunks = _gated
+                    # Distinctive-term check: the gate above can pass chunks on
+                    # a generic verb ("offer", "provide", "services") while none
+                    # of them mentions what the customer actually asked about.
+                    # Production: "do you offer physiotherapy?" kept Azure
+                    # chunks via "offer", and the answer read as yes. A
+                    # distinctive query word (6+ chars) must appear in the kept
+                    # material, or this is treated as no-knowledge and the
+                    # honesty block below answers instead.
+                    if rag_chunks:
+                        try:
+                            from app.engine.knowledge_guards import (
+                                content_words as _kb_words,
+                            )
+
+                            _distinctive = {
+                                w for w in _kb_words(retrieval_query) if len(w) >= 6
+                            }
+                            if _distinctive:
+                                _pooled = " ".join(
+                                    f"{c.get('content') or ''} {c.get('snippet') or ''}"
+                                    for c in rag_chunks
+                                )
+                                if not (_distinctive & _kb_words(_pooled)):
+                                    logger.info(
+                                        "RAG distinctive-term check dropped all chunks"
+                                    )
+                                    rag_chunks = []
+                        except Exception:
+                            logger.warning(
+                                "RAG distinctive-term check failed open", exc_info=True
+                            )
                 except Exception:
                     logger.warning("RAG relevance gating failed", exc_info=True)
 
@@ -1054,6 +1085,42 @@ async def call_model(
                         )
                     data["response_text"] = _current_text
                     response = AIMessage(content=json.dumps(data))
+            # Answer-level grounding check: the composed reply must share
+            # topical overlap with the chunks it claims to come from, or be an
+            # explicit honest decline. Production: "do you offer
+            # physiotherapy?" was answered "We specialize in Azure development
+            # ..." from Azure chunks that never mention physiotherapy -- the
+            # retrieval gate passed them on the generic verb "offer", and
+            # nothing downstream ever checked the answer itself.
+            try:
+                from app.engine.knowledge_guards import (
+                    verify_knowledge_answer as _verify_kb_answer,
+                )
+
+                _verify_chunks = locals().get("rag_chunks") or []
+                if _verify_chunks and not _otp_pending_now:
+                    _verify_visible, _ = _extract_visible(str(response.content))
+                    _verify_ok, _verify_reason = _verify_kb_answer(
+                        _verify_visible, _verify_chunks
+                    )
+                    if not _verify_ok:
+                        logger.warning(
+                            "knowledge_answer_ungrounded",
+                            extra={
+                                "session_id": state.get("session_id"),
+                                "reason": _verify_reason,
+                            },
+                        )
+                        _verify_data = json.loads(str(response.content))
+                        _verify_data["response_text"] = (
+                            "I don't have information about that. "
+                            "Is there anything I can help you book, check or "
+                            "reschedule?"
+                        )
+                        _verify_data["knowledge_answer"] = True
+                        response = AIMessage(content=json.dumps(_verify_data))
+            except Exception:
+                logger.warning("knowledge_answer_verify_failed_open", exc_info=True)
         except Exception:
             logger.warning("knowledge_name_gate_failed_open", exc_info=True)
 

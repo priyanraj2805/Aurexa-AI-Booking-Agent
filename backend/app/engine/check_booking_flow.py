@@ -369,7 +369,15 @@ async def should_bypass_step_guard(message_text: str) -> bool:
     Used by WhatsApp SELECT_DATE / SELECT_SLOT guards so lookup, cancel,
     change, objection or question turns fall through to the engine instead
     of being trapped behind a date-format correction. No keyword lists —
-    the model reads the actual meaning. Fail-open to False (keep correction).
+    the model reads the actual meaning.
+
+    Fails open to True (bypass to the engine) when the model cannot be
+    reached. It used to fail closed, and that is what made the date step
+    intermittently useless: with the LLM slow or down, "go on" and "still
+    there?" were answered with "That doesn't look like a valid date ❌" and
+    no dates at all. Telling someone their message is not a date when the
+    check simply failed is worse than letting the engine decide, and the
+    engine re-asks the same field for genuine gibberish anyway.
     """
     text = (message_text or "").strip()
     if not text:
@@ -410,5 +418,5 @@ async def should_bypass_step_guard(message_text: str) -> bool:
         # provides_datetime True -> it IS a date attempt -> do NOT bypass.
         return not bool(provides)
     except Exception:
-        logger.warning("step-guard LLM bypass check failed", exc_info=True)
-        return False
+        logger.warning("step-guard LLM bypass check failed, routing to engine", exc_info=True)
+        return True

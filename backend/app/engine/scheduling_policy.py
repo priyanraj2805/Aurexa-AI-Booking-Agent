@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Sequence
 
 try:
     from zoneinfo import ZoneInfo
@@ -772,27 +772,27 @@ def is_available_dates_query(user_message: str) -> bool:
     return any(lead in text for lead in _INQUIRY_LEAD_PATTERNS)
 
 
-async def lookup_available_dates_answer(
+async def lookup_available_dates(
     *,
     db: Any,
     org_id: str,
-    user_message: str,
     effective_timezone: str,
     org_timezone: Optional[str] = None,
     max_dates: int = 7,
     scan_cap_days: int = 21,
 ) -> Optional[dict[str, Any]]:
-    """Answer 'which dates can I book?' from the live slot inventory.
+    """Return the next bookable days from the live slot inventory.
 
-    Returns None when the message is not an availability inquiry. Otherwise
-    scans upcoming days (horizon from the single-source resolver) and keeps
-    only days with at least one genuinely free slot — closed days, CLOSED
-    exceptions, past-cutoff and fully-booked days are all excluded. External
-    calendar busy-periods are intentionally not consulted here (bounded,
-    DB-local scan); the time-step path still enforces them per date.
+    Deliberately has NO question gate. The date step needs this list even
+    when the customer never asked for it — "What date would you prefer?" is
+    unanswerable without knowing what is open. Callers that DO want the
+    "which dates can I book?" behaviour should use
+    `lookup_available_dates_answer`, which gates on the question first.
+
+    Returns None when availability cannot be determined at all (no usable
+    db handle, malformed org id, schedule row unreadable) so callers can fall
+    back rather than telling the customer there are no dates.
     """
-    if not is_available_dates_query(user_message):
-        return None
     if db is None or not hasattr(db, "execute"):
         return None
 
@@ -882,5 +882,77 @@ async def lookup_available_dates_answer(
         "status": "ok",
         "source": "availability",
         "available_dates": [d.isoformat() for d in found],
+        # Same labels the customer is meant to tap/retype. The WhatsApp
+        # transports render these inline in the date step instead of sending
+        # the whole response_text as a separate message.
+        "available_date_labels": labels,
         "effective_timezone": biz_tz,
     }
+
+
+async def select_date_option_labels(
+    *,
+    db: Any,
+    org_id: str,
+    org_timezone: Optional[str] = None,
+    directive_options: Optional[Sequence[Any]] = None,
+    max_dates: int = 7,
+) -> list[str]:
+    """Labels to show the customer at the SELECT_DATE step.
+
+    The stored directive options are plain upcoming calendar days, so they can
+    include days the business is closed or fully booked. Showing those would
+    send the customer to a day that cannot be booked, so the live scan wins
+    whenever it can answer. The directive options are the fallback so a
+    database hiccup degrades to the old behaviour instead of silence.
+    """
+    fallback = [
+        str(o).strip()
+        for o in (directive_options or [])
+        if isinstance(o, str) and str(o).strip()
+    ]
+    try:
+        answer = await lookup_available_dates(
+            db=db,
+            org_id=org_id,
+            effective_timezone=str(org_timezone or "UTC"),
+            org_timezone=str(org_timezone or "UTC"),
+            max_dates=max_dates,
+        )
+    except Exception:
+        return fallback[:max_dates]
+    if not answer or str(answer.get("status") or "") != "ok":
+        return fallback[:max_dates]
+    labels = [str(x).strip() for x in (answer.get("available_date_labels") or [])]
+    return (labels or fallback)[:max_dates]
+
+
+async def lookup_available_dates_answer(
+    *,
+    db: Any,
+    org_id: str,
+    user_message: str,
+    effective_timezone: str,
+    org_timezone: Optional[str] = None,
+    max_dates: int = 7,
+    scan_cap_days: int = 21,
+) -> Optional[dict[str, Any]]:
+    """Answer 'which dates can I book?' from the live slot inventory.
+
+    Returns None when the message is not an availability inquiry. Otherwise
+    scans upcoming days (horizon from the single-source resolver) and keeps
+    only days with at least one genuinely free slot — closed days, CLOSED
+    exceptions, past-cutoff and fully-booked days are all excluded. External
+    calendar busy-periods are intentionally not consulted here (bounded,
+    DB-local scan); the time-step path still enforces them per date.
+    """
+    if not is_available_dates_query(user_message):
+        return None
+    return await lookup_available_dates(
+        db=db,
+        org_id=org_id,
+        effective_timezone=effective_timezone,
+        org_timezone=org_timezone,
+        max_dates=max_dates,
+        scan_cap_days=scan_cap_days,
+    )

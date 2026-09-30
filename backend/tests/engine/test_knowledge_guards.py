@@ -123,3 +123,30 @@ def test_no_hardcoded_business_content_in_module():
     text = src.read_text(encoding="utf-8")
     for literal in ("98765", "reediff", "example.com", "Dr. ", "Rs 500", "9 AM to 6 PM"):
         assert literal not in text, f"hardcoded business content leaked: {literal}"
+
+
+def test_distinctive_term_logic_physio_vs_azure() -> None:
+    """The production failure: "do you offer physiotherapy?" kept Azure
+    chunks via the generic verb "offer". A distinctive query word (6+ chars)
+    must appear in the kept material."""
+    from app.engine.knowledge_guards import content_words
+
+    query_words = content_words("do you offer physiotherapy?")
+    distinctive = {w for w in query_words if len(w) >= 6}
+    assert "physiotherapy" in distinctive
+    azure = content_words(
+        "Dotstark offers Azure development and Kentico content migration services."
+    )
+    assert not (distinctive & azure)
+
+
+def test_distinctive_term_logic_hours_question_passes() -> None:
+    """A legitimate question must keep its chunks: "opening" appears in the
+    hours material."""
+    from app.engine.knowledge_guards import content_words
+
+    query_words = content_words("what are your opening hours?")
+    distinctive = {w for w in query_words if len(w) >= 6}
+    assert "opening" in distinctive
+    hours = content_words("Our hours are Monday to Friday 9 to 5. Opening at 9.")
+    assert distinctive & hours

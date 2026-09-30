@@ -159,6 +159,12 @@ class Settings(BaseSettings):
     # Webhook verification token for Meta's GET handshake (hub.verify_token).
     # Never the Meta access token. Fail-closed when empty.
     META_WHATSAPP_WEBHOOK_VERIFY_TOKEN: str = os.getenv("META_WHATSAPP_WEBHOOK_VERIFY_TOKEN", "")
+    # Meta App Secret, used to verify the X-Hub-Signature-256 HMAC on inbound
+    # webhook POSTs. This is a DIFFERENT credential from the access token and
+    # from the GET verify token above. Fail-closed: when empty, inbound
+    # webhook POSTs are rejected, because an unverified webhook lets anyone
+    # who can reach the endpoint inject booking turns.
+    META_WHATSAPP_APP_SECRET: str = os.getenv("META_WHATSAPP_APP_SECRET", "")
 
     # ── WhatsApp QR gateway (Baileys transport, per-org sessions) ─────────
     # Shared secret for backend<->wa-gateway HTTP auth (both sides must match).

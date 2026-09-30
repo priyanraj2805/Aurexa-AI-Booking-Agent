@@ -341,13 +341,29 @@ export const MAX_DOCS_PER_ORG = 10;
 
 // ── Generic fetch hook ───────────────────────────
 
+// Max backoff multiplier applied to the poll interval while a request is
+// failing. The backend is slow (not the database -- that answers in ~5ms), so
+// hammering it makes it slower still. Backing off breaks that feedback loop.
+const MAX_POLL_BACKOFF = 8;
+
 function useApi<T>(path: string, deps: unknown[] = [], pollMs?: number) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Guards against overlapping requests. A previous version used
+  // setInterval, which fired every pollMs regardless of whether the last
+  // request had finished. With a 3s poll and a 15s response, ~5 copies of the
+  // same request were in flight at once -- they queued behind each other,
+  // which is exactly what produced the 3-16 second responses and the 502s.
+  const inFlightRef = useRef(false);
+  const backoffRef = useRef(1);
+
   const refetch = useCallback(async (silent = false) => {
     if (!path) { setLoading(false); return; }
+    // Never start a second request while one is outstanding.
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     // Silent background refreshes (polling) must not flash the loading
     // skeleton when data is already on screen.
     if (!silent) setLoading(true);
@@ -355,9 +371,12 @@ function useApi<T>(path: string, deps: unknown[] = [], pollMs?: number) {
     try {
       const result = await api.get<T>(path);
       setData(result);
+      backoffRef.current = 1;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to fetch");
+      backoffRef.current = Math.min(backoffRef.current * 2, MAX_POLL_BACKOFF);
     } finally {
+      inFlightRef.current = false;
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -369,13 +388,25 @@ function useApi<T>(path: string, deps: unknown[] = [], pollMs?: number) {
 
   // Live polling: silent background refresh so new user messages appear
   // without a full page refresh. Paused when the tab is hidden.
+  //
+  // Self-scheduling rather than setInterval: the next poll is only scheduled
+  // once the previous one has completed, so the interval measures "time
+  // between finished requests" instead of "time between starts".
   useEffect(() => {
     if (!pollMs || pollMs <= 0 || !path) return;
-    const id = setInterval(() => {
-      if (document.hidden) return;
-      refetch(true);
-    }, pollMs);
-    return () => clearInterval(id);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      if (cancelled) return;
+      if (!document.hidden) await refetch(true);
+      if (cancelled) return;
+      timer = setTimeout(tick, Math.round(pollMs * backoffRef.current));
+    };
+    timer = setTimeout(tick, pollMs);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [refetch, pollMs, path]);
 
   return { data, loading, error, refetch, setData };
@@ -499,7 +530,10 @@ export function useSlotPreview(startDate: string, days = 14) {
 }
 
 export function useOnboardingStatus() {
-  return useApi<OnboardingStatus>("/dashboard/onboarding-status");
+  // Path must match the backend route exactly: /dashboard/onboarding/status
+  // (slash). The hyphenated form 404'd, and because this hook fails open the
+  // onboarding gate was silently never applied.
+  return useApi<OnboardingStatus>("/dashboard/onboarding/status");
 }
 
 export function useTranscript(sessionId: string | null, pollMs = 3000) {

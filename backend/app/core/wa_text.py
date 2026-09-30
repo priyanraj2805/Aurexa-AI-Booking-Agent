@@ -58,6 +58,12 @@ def strip_leaked_headers(text: str) -> str:
     Only a leading ALL-CAPS line is treated as a leaked header, and only when
     it matches a known section name or looks like a bare section label. Real
     sentences keep their capitals, so normal replies are untouched.
+
+    A section name may carry a trailing parenthetical note, e.g.
+    "BUSINESS HOURS (authoritative, answer timing questions from this)". That
+    annotation is aimed at the model, not the customer, and it used to defeat
+    the ALL-CAPS check entirely -- the whole line was then sent to the
+    customer as the opening line of the reply.
     """
     if not text:
         return text
@@ -69,11 +75,22 @@ def strip_leaked_headers(text: str) -> str:
     if not lines:
         return text
     first = lines[0].strip()
-    if not first or not _ALL_CAPS_HEADER_RE.match(first):
+    if not first:
         return text
     upper = first.upper()
     if upper in _LEAKED_HEADERS or first.replace("'", "").upper() in _LEAKED_HEADERS:
         lines.pop(0)
+        return "\n".join(lines)
+    # Section name plus a model-facing annotation in parentheses.
+    annotation = re.match(r"^([A-Z][A-Z0-9 &'/,\-]{2,})\s*\([^()]*\)\s*$", first)
+    if annotation:
+        # The character class is greedy and swallows the space before "(".
+        name = annotation.group(1).strip().upper()
+        if name in _LEAKED_HEADERS or name.replace("'", "") in _LEAKED_HEADERS:
+            lines.pop(0)
+            return "\n".join(lines)
+    if not _ALL_CAPS_HEADER_RE.match(first):
+        return text
     return "\n".join(lines)
 
 
@@ -280,6 +297,106 @@ def separate_list_blocks(text: str) -> str:
     return "\n".join(out)
 
 
+def _unbold_line(line: str) -> str:
+    """Drop bold markers but keep the line readable as plain text.
+
+    A span like ``*Full Name:* Tara`` becomes ``Full Name: Tara``. The colon
+    already carries the label/value break, so the emphasis was adding nothing
+    the customer could act on -- and a line that is half asterisks reads as
+    machine output rather than a person replying.
+    """
+    if "*" not in line:
+        return line
+    out = re.sub(r"\*+", "", line)
+    # ``*Label:* value`` -> ``Label: value``. The colon must be followed by a
+    # letter, which keeps a value's own colon intact -- without this guard a
+    # time like 9:00 became "9: 00" and a URL lost its scheme separator.
+    out = re.sub(r"([A-Za-z0-9)])\s{0,2}:(?=[A-Za-z])", r"\1: ", out)
+    return re.sub(r"[ \t]{2,}", " ", out).rstrip()
+
+
+def _soft_wrap_line(line: str, width: int) -> list:
+    """Wrap one logical line to ``width`` at word boundaries.
+
+    Only applied to prose. Anything that must stay on one line to make sense
+    -- bullet items, ``Label: value`` pairs, a URL, a date or time range --
+    is left alone, because wrapping those makes them harder to read.
+
+    A phone number or e-mail address does *not* block wrapping: a phone number
+    is a single whitespace-free token, so it moves to the next line whole. Only
+    a URL or an e-mail is truly unsplittable, and those are excluded.
+    """
+    if len(line) <= width:
+        return [line]
+    stripped = line.strip()
+    # Structural lines are never wrapped.
+    if re.match(r"^[-*+•]\s+\S", stripped):
+        return [line]
+    if re.match(r"^[\w][\w ()/&.'-]{0,40}:\s*\S", stripped):
+        return [line]
+    # A URL or e-mail must not be split; a phone number is safe to move whole.
+    if "://" in stripped or re.search(r"\S+@\S+\.\S+", stripped):
+        return [line]
+    # A label:value line with several pairs on one row (a booking summary).
+    if stripped.count(": ") >= 2:
+        return [line]
+    # No spaces to break on: leave it, splitting a URL or a token is worse.
+    if " " not in stripped:
+        return [line]
+
+    # Wrap between words, but keep a value that belongs together whole: a
+    # time (9:00), an ISO date (2026-10-07) or a written date (29 September
+    # 2026) moves to the next line as a unit. Splitting "29 September" from
+    # "2027" leaves the customer reading a date that looks truncated.
+    _GLUED = re.compile(
+        r"(\d{4}-\d{2}-\d{2}"
+        r"|\d{1,2}:\d{2}"
+        r"|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+        r"|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2})"
+        r"$",
+        re.IGNORECASE,
+    )
+    units: list = []
+    for word in stripped.split():
+        if units and _GLUED.search(units[-1]):
+            units[-1] = f"{units[-1]} {word}"
+        else:
+            units.append(word)
+
+    lines: list = []
+    current = ""
+    for unit in units:
+        candidate = f"{current} {unit}".strip()
+        if current and len(candidate) > width:
+            lines.append(current)
+            current = unit
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
+def plain_text_finalize(text: str, *, width: int = 58) -> str:
+    """Final pass: remove bold markers and wrap long prose lines.
+
+    Runs last in the pipeline so it also cleans up the asterisks that
+    ``emphasize_key_details`` adds, which is the main source of them.
+
+    Wrapping is deliberately conservative -- a narrower limit than a web page
+    because a phone shows about 40-45 characters per line, and a bullet or a
+    ``Label: value`` row is left intact because breaking it would make it
+    harder to read, not easier.
+    """
+    if not text:
+        return text
+    out_lines: list = []
+    for raw_line in text.split("\n"):
+        line = _unbold_line(raw_line)
+        out_lines.extend(_soft_wrap_line(line, width))
+    return "\n".join(out_lines)
+
+
 def format_outbound(raw: Optional[str]) -> str:
     """Full outbound formatting pipeline. Safe on None and on plain prose."""
     if raw is None:
@@ -303,4 +420,5 @@ def format_outbound(raw: Optional[str]) -> str:
     text = emphasize_key_details(text)
     text = normalize_spacing(text)
     text = split_long_paragraph(text)
+    text = plain_text_finalize(text)
     return text.strip()

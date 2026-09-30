@@ -1,15 +1,19 @@
 ﻿"""Off-topic cooldown guardrail.
 
-Three off-topic questions in a row pause the session for 15 seconds. While
-paused, any message gets one short line and nothing else is processed. A real
-booking step or a real knowledge answer clears the counter, so a customer who
-comes back to actually book is never punished for earlier questions.
+Three off-topic questions in a row pause the session for 15 MINUTES (the module
+docstring used to say 15 seconds). While paused, any message gets one short
+line and nothing else is processed. A real booking step or a real knowledge
+answer resets the strike counter, so a customer who comes back to actually book
+is never punished for earlier questions -- but an ACTIVE pause is ended by the
+clock, never by a single good turn.
 """
 import time
 
 import pytest
 
 from app.engine.offtopic_cooldown import (
+    _COUNT_KEY,
+    _UNTIL_KEY,
     COOLDOWN_SECONDS,
     STRIKE_LIMIT,
     clear,
@@ -74,14 +78,31 @@ def test_remaining_counts_down() -> None:
     assert 3 <= cooldown_remaining(data) <= 6
 
 
-def test_clear_resets_everything() -> None:
+def test_clear_resets_the_counter_but_not_an_active_window() -> None:
+    """Resetting the counter and ending the pause are different decisions.
+
+    This previously asserted the opposite -- that `clear()` also ended an
+    active cooldown. That let the guardrail be switched off by the very reply
+    it sends while cooling down ("You're still in cooldown...", a non-decline),
+    so one message was enough to walk back in.
+    """
     data: dict = {}
     for _ in range(STRIKE_LIMIT):
         record_offtopic(data)
     assert is_cooling_down(data) is True
+    deadline = data[_UNTIL_KEY]
     clear(data)
     assert strike_count(data) == 0
-    assert is_cooling_down(data) is False
+    assert is_cooling_down(data) is True
+    assert data[_UNTIL_KEY] == deadline
+
+
+def test_clear_drops_an_expired_window() -> None:
+    """An elapsed deadline is still cleaned up, so the key does not linger."""
+    data: dict = {_UNTIL_KEY: 1.0, _COUNT_KEY: 3}
+    clear(data)
+    assert _UNTIL_KEY not in data
+    assert strike_count(data) == 0
 
 
 def test_strikes_survive_arbitrary_session_data() -> None:
@@ -237,12 +258,12 @@ def test_cooldown_message_never_goes_negative() -> None:
 @pytest.mark.parametrize(
     "reply",
     [
-        "I didn't quite catch that one, but no problem â€” we can keep going. "
+        "I didn't quite catch that one, but no problem — we can keep going. "
         "Please share your full name.",
         "To get back to booking your appointment, could you please share your "
         "full name? I'm a booking assistant, so I can only help with "
         "appointments.",
-        "I'm a booking assistant, so I can only help with appointments â€” "
+        "I'm a booking assistant, so I can only help with appointments — "
         "I don't have information about that.",
         "I can help you book an appointment though. Could you please share "
         "your full name?",

@@ -1,9 +1,18 @@
-"""Meta WhatsApp Cloud API webhook foundation — receive-only, no engine calls.
+"""Meta WhatsApp Cloud API webhook — receive-only, no engine calls.
 
 Covers: GET handshake (ok / wrong token / wrong mode), POST text,
 button_reply, list_reply, status-only, malformed, wrong phone_number_id,
 multi-entry payloads, and duplicate message_id via the shared debouncer.
+
+Every POST here is signed with the App Secret. Inbound POSTs are
+authenticated (X-Hub-Signature-256, verified against the raw body), so an
+unsigned request is rejected before normalisation. The auth layer itself is
+covered in test_whatsapp_webhook_signature.py; these tests deliberately sign so
+they keep exercising the pipeline rather than the guard.
 """
+import hashlib
+import hmac
+import json
 import uuid
 
 import pytest
@@ -12,6 +21,19 @@ from app.core.config import settings
 
 PATH = "/api/v1/whatsapp/webhook"
 PNID = "1288066011058334"
+APP_SECRET = "test-app-secret-123"
+
+
+def _signed(payload):
+    """(raw_body, headers) for a correctly signed webhook POST."""
+    raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+    digest = hmac.new(APP_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+    return raw, {"Content-Type": "application/json", "X-Hub-Signature-256": f"sha256={digest}"}
+
+
+async def _post(client, payload):
+    raw, headers = _signed(payload)
+    return await client.post(PATH, content=raw, headers=headers)
 
 
 def _msg(msg_id, msg, pnid=PNID):
@@ -61,6 +83,7 @@ def _list_msg(mid="wamid.list1"):
 def _token(monkeypatch):
     monkeypatch.setattr(settings, "META_WHATSAPP_WEBHOOK_VERIFY_TOKEN", "test-verify-token-123")
     monkeypatch.setattr(settings, "META_WHATSAPP_PHONE_NUMBER_ID", PNID)
+    monkeypatch.setattr(settings, "META_WHATSAPP_APP_SECRET", APP_SECRET, raising=False)
     return "test-verify-token-123"
 
 
@@ -92,7 +115,7 @@ async def test_get_verify_wrong_mode(client, _token):
 @pytest.mark.asyncio
 async def test_post_text(client, _token):
     mid = f"wamid.text.{uuid.uuid4().hex[:8]}"
-    r = await client.post(PATH, json=_msg(mid, _text_msg(mid)))
+    r = await _post(client, _msg(mid, _text_msg(mid)))
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "ok" and body["provider"] == "meta_cloud"
@@ -105,7 +128,7 @@ async def test_post_text(client, _token):
 @pytest.mark.asyncio
 async def test_post_button_reply(client, _token):
     mid = f"wamid.btn.{uuid.uuid4().hex[:8]}"
-    r = await client.post(PATH, json=_msg(mid, _button_msg(mid)))
+    r = await _post(client, _msg(mid, _button_msg(mid)))
     assert r.status_code == 200
     ev = r.json()["events"][0]
     assert ev["message_type"] == "interactive" and ev["option_id"] == "confirm_booking"
@@ -115,7 +138,7 @@ async def test_post_button_reply(client, _token):
 @pytest.mark.asyncio
 async def test_post_list_reply(client, _token):
     mid = f"wamid.list.{uuid.uuid4().hex[:8]}"
-    r = await client.post(PATH, json=_msg(mid, _list_msg(mid)))
+    r = await _post(client, _msg(mid, _list_msg(mid)))
     assert r.status_code == 200
     ev = r.json()["events"][0]
     assert ev["message_type"] == "interactive" and ev["option_id"] == "date_20260927"
@@ -128,7 +151,7 @@ async def test_post_status_only(client, _token):
     payload["entry"][0]["changes"][0]["value"]["statuses"] = [
         {"id": "wamid.s1", "status": "delivered", "timestamp": "1757930003",
          "recipient_id": "919999999978"}]
-    r = await client.post(PATH, json=payload)
+    r = await _post(client, payload)
     assert r.status_code == 200
     body = r.json()
     assert body["events"] == [] and body["statuses"] == 1
@@ -136,17 +159,16 @@ async def test_post_status_only(client, _token):
 
 @pytest.mark.asyncio
 async def test_post_malformed(client, _token):
-    r = await client.post(PATH, content=b"not-json{{{",
-                          headers={"Content-Type": "application/json"})
+    r = await _post(client, b"not-json{{{")
     assert r.status_code in (200, 400, 422)
-    r2 = await client.post(PATH, json={"object": "something_else"})
+    r2 = await _post(client, {"object": "something_else"})
     assert r2.status_code == 200 and r2.json()["status"] == "ignored"
 
 
 @pytest.mark.asyncio
 async def test_post_wrong_pnid(client, _token):
     mid = f"wamid.wp.{uuid.uuid4().hex[:8]}"
-    r = await client.post(PATH, json=_msg(mid, _text_msg(mid), pnid="9999999999999999"))
+    r = await _post(client, _msg(mid, _text_msg(mid), pnid="9999999999999999"))
     assert r.status_code == 200
     assert r.json()["events"] == []
 
@@ -163,7 +185,7 @@ async def test_post_multi_entry(client, _token):
                                      "contacts": [],
                                      "messages": [_button_msg(m2)]}}]}
     payload["entry"].append(second)
-    r = await client.post(PATH, json=payload)
+    r = await _post(client, payload)
     assert r.status_code == 200
     body = r.json()
     assert len(body["events"]) == 2
@@ -173,9 +195,9 @@ async def test_post_multi_entry(client, _token):
 @pytest.mark.asyncio
 async def test_post_duplicate(client, _token):
     mid = f"wamid.dup.{uuid.uuid4().hex[:8]}"
-    first = await client.post(PATH, json=_msg(mid, _text_msg(mid)))
+    first = await _post(client, _msg(mid, _text_msg(mid)))
     assert first.status_code == 200 and first.json()["duplicates"] == 0
-    second = await client.post(PATH, json=_msg(mid, _text_msg(mid)))
+    second = await _post(client, _msg(mid, _text_msg(mid)))
     assert second.status_code == 200
     body = second.json()
     assert body["duplicates"] == 1 and body["events"][0].get("duplicate") is True
@@ -262,7 +284,7 @@ async def test_cloud_hi_runs_engine_and_sends(client, _token, db_session, monkey
 
     phone = _test_phone()
     mid = f"wamid.wire.{uuid.uuid4().hex[:8]}"
-    r = await client.post(PATH, json=_cloud_text(phone, mid))
+    r = await _post(client, _cloud_text(phone, mid))
     assert r.status_code == 200
     body = r.json()
     assert body["processed"] == 1
@@ -294,7 +316,7 @@ async def test_cloud_toggle_off_skips(client, _token, db_session, monkeypatch):
 
     phone = _test_phone()
     mid = f"wamid.off.{uuid.uuid4().hex[:8]}"
-    r = await client.post(PATH, json=_cloud_text(phone, mid))
+    r = await _post(client, _cloud_text(phone, mid))
     assert r.status_code == 200 and r.json()["processed"] == 0
     assert calls == []
 
@@ -315,10 +337,10 @@ async def test_cloud_duplicate_skips_engine(client, _token, db_session, monkeypa
 
     phone = _test_phone()
     mid = f"wamid.wdup.{uuid.uuid4().hex[:8]}"
-    first = await client.post(PATH, json=_cloud_text(phone, mid))
+    first = await _post(client, _cloud_text(phone, mid))
     assert first.status_code == 200
     n_calls = len(calls)
-    second = await client.post(PATH, json=_cloud_text(phone, mid))
+    second = await _post(client, _cloud_text(phone, mid))
     assert second.status_code == 200 and second.json()["processed"] == 0
     assert len(calls) == n_calls
 
@@ -362,9 +384,9 @@ async def test_cloud_template_sent_once_per_step(client, _token, db_session, mon
     monkeypatch.setattr(_wt, "send_welcome", _fake_welcome)
 
     phone = _test_phone()
-    first = await client.post(PATH, json=_cloud_text(phone, f"wamid.g1.{uuid.uuid4().hex[:8]}"))
+    first = await _post(client, _cloud_text(phone, f"wamid.g1.{uuid.uuid4().hex[:8]}"))
     assert first.status_code == 200 and first.json()["processed"] == 1
-    second = await client.post(PATH, json=_cloud_text(phone, f"wamid.g2.{uuid.uuid4().hex[:8]}", body="Hi again"))
+    second = await _post(client, _cloud_text(phone, f"wamid.g2.{uuid.uuid4().hex[:8]}", body="Hi again"))
     assert second.status_code == 200 and second.json()["processed"] == 1
     assert calls["welcome"] == 1, "stuck step must not re-fire the billable template"
     assert calls["send"] == 2, "text reply still goes out every turn"
@@ -388,7 +410,7 @@ async def test_cloud_unknown_type_skips_engine(client, _token, db_session, monke
     payload["entry"][0]["changes"][0]["value"]["messages"][0] = {
         "from": phone, "id": mid, "timestamp": "1757930000", "type": "sticker",
         "sticker": {"id": "123"}}
-    r = await client.post(PATH, json=payload)
+    r = await _post(client, payload)
     assert r.status_code == 200
     body = r.json()
     assert body["events"][0]["message_type"] == "unknown" and body["processed"] == 0

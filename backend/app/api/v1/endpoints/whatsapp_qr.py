@@ -717,6 +717,201 @@ async def qr_inbound(    payload: QrInboundPayload,
                 pass
             logger.warning("QR inbound burst slowed (retry in ~%ss)", _wait)
             return {"status": "ok", "session_id": str(chat_session.session_id), "reply": {"type": "text", "body": _slow_body[:4096]}}
+    # Directive-free date step guard.
+    #
+    # The step guards below run only when a BookingDirective row exists, and
+    # BookingDirective is now a web-widget concept. Without this, a WhatsApp
+    # customer typing a date would skip the live "does this day have a free
+    # slot?" check entirely and only discover the problem at the time step.
+    # The step is therefore driven off session state (the field we are
+    # actually waiting on) rather than a directive row.
+    try:
+        _awaiting = (chat_session.missing_fields or [None])[0]
+        if _awaiting == "date" and not str(
+            getattr(payload, "optionId", "") or ""
+        ).strip():
+            from app.engine import whatsapp_guards as _dfg
+            from app.engine.scheduling_policy import (
+                _contains_concrete_date_value as _dfg_has_date_token,
+                is_available_dates_query as _dfg_is_dates_q,
+                is_schedule_business_hours_query as _dfg_is_hours_q,
+                resolve_booking_horizon_days as _dfg_horizon,
+                select_date_option_labels as _dfg_labels,
+            )
+
+            # An availability or hours question is answered by the engine from
+            # live data, not corrected as a bad date.
+            if not (_dfg_is_dates_q(text) or _dfg_is_hours_q(text)):
+                _dfg_tz = str(getattr(org_config, "timezone", None) or "UTC")
+                try:
+                    _dfg_max = (await _dfg_horizon(db, org.id, org_config))[0]
+                except Exception:
+                    _dfg_max = 30
+                _dfg_iso, _dfg_corr, _dfg_reason = _dfg.validate_typed_date(
+                    text, tz=_dfg_tz, max_days=_dfg_max
+                )
+                # Correct only a genuine date attempt. "go on" / "still there?"
+                # contain no date token at all and are not a malformed date --
+                # lecturing someone about date format because they said "go on"
+                # is worse than passing their message to the engine, which
+                # answers conversationally and re-asks the date with options.
+                if (
+                    not _dfg_iso
+                    and _dfg_reason in ("invalid", "bare_number")
+                    and _dfg_has_date_token(text)
+                ):
+                    _dfg_body = _dfg.date_correction(
+                        text, "Please type the meeting date.", ""
+                    )
+                    # Same window-in-words format as the date step itself, not
+                    # a list of day names.
+                    try:
+                        from app.engine.message_processor import (
+                            _format_available_dates_for_prompt as _dfg_fmt,
+                        )
+
+                        _dfg_body = (
+                            f"{_dfg_body}\n\n{_dfg_fmt(_dfg_tz, _dfg_max)}"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await crud_chat.save_message(
+                            db, str(chat_session.session_id), "user", text
+                        )
+                        await crud_chat.save_message(
+                            db, str(chat_session.session_id), "agent", _dfg_body
+                        )
+                    except Exception:
+                        pass
+                    logger.info(
+                        "date guard corrected (no directive) reason=%s text=%r",
+                        _dfg_reason,
+                        text[:40],
+                    )
+                    return {
+                        "status": "ok",
+                        "session_id": str(chat_session.session_id),
+                        "reply": {"type": "text", "body": _dfg_body[:4096]},
+                    }
+                # A valid date that has no free slot is a real availability
+                # problem, and the engine will happily accept it without this.
+                if _dfg_iso:
+                    _dfg_open, _dfg_corr2, _dfg_reason2 = (
+                        await _dfg.validate_typed_date_availability(
+                            db, org.id, org_config, _dfg_iso
+                        )
+                    )
+                    if not _dfg_open:
+                        _dfg_body2 = _dfg_corr2 or _dfg.date_correction(
+                            text, "Please choose another date.", ""
+                        )
+                        try:
+                            from app.engine.message_processor import (
+                                _format_available_dates_for_prompt as _dfg_fmt2,
+                            )
+
+                            _dfg_body2 = (
+                                f"{_dfg_body2}\n\n{_dfg_fmt2(_dfg_tz, _dfg_max)}"
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            await crud_chat.save_message(
+                                db, str(chat_session.session_id), "user", text
+                            )
+                            await crud_chat.save_message(
+                                db, str(chat_session.session_id), "agent", _dfg_body2
+                            )
+                        except Exception:
+                            pass
+                        logger.info(
+                            "date guard rejected (no availability) iso=%s reason=%s",
+                            _dfg_iso,
+                            _dfg_reason2,
+                        )
+                        return {
+                            "status": "ok",
+                            "session_id": str(chat_session.session_id),
+                            "reply": {"type": "text", "body": _dfg_body2[:4096]},
+                        }
+    except Exception as _dfg_err:
+        logger.warning("directive-free date guard skipped: %s", _dfg_err)
+
+    # Directive-free time step guard.
+    #
+    # The time-step guards further down all sit inside `if _dir and _dir.status
+    # == "PENDING"`, and BookingDirective is no longer written for WhatsApp --
+    # so the whole time step became unguarded. Production symptom: a customer
+    # at the time step who typed anything that was not a time got the identical
+    # slot list back, repeatedly, and a real question ("do you have parking?")
+    # was answered with that slot list six turns running.
+    #
+    # Two jobs here: reject a time that is not on the offered list, and let
+    # anything that is plainly not a time attempt reach the engine so it can be
+    # answered instead of being swallowed by the step.
+    try:
+        if (
+            (chat_session.missing_fields or [None])[0] == "time"
+            and not str(getattr(payload, "optionId", "") or "").strip()
+        ):
+            from app.engine import whatsapp_guards as _tfg
+            from app.engine.validators import DataValidator as _tVal
+
+            _offered = list(
+                (chat_session.collected_data or {}).get("available_slots") or []
+            )
+            _offered_labels = [
+                str(s.get("label") if isinstance(s, dict) else s).strip()
+                for s in _offered
+            ]
+            _offered_labels = [s for s in _offered_labels if s]
+            _tfg_text = text.strip()
+
+            # Normalise what the customer typed to the same shape we offered,
+            # so "3pm", "3 pm" and "15:00" are compared like for like.
+            _norm, _terr = _tVal._validate_time(_tfg_text)
+            _wanted = None
+            if _norm:
+                for _lbl in _offered_labels:
+                    _ln, _le = _tVal._validate_time(_lbl)
+                    if _ln and _ln == _norm:
+                        _wanted = _lbl
+                        break
+
+            if _wanted is not None:
+                pass  # a valid, offered time: fall through to the engine
+            elif _norm and _offered_labels:
+                # A well-formed time that is not on the offered list. Saying so
+                # is correct; repeating the whole list is not.
+                _tfg_body = _tfg.time_correction(
+                    _tfg_text,
+                    ("Available times: " + " · ".join(_offered_labels[:7]) + ".")
+                    if _offered_labels
+                    else "",
+                    examples=_tfg.example_time_hints(_offered_labels),
+                )
+                try:
+                    await crud_chat.save_message(
+                        db, str(chat_session.session_id), "user", text
+                    )
+                    await crud_chat.save_message(
+                        db, str(chat_session.session_id), "agent", _tfg_body
+                    )
+                except Exception:
+                    pass
+                logger.info(
+                    "time guard rejected (not offered) text=%r wanted=%r",
+                    _tfg_text[:30], _norm,
+                )
+                return {
+                    "status": "ok",
+                    "session_id": str(chat_session.session_id),
+                    "reply": {"type": "text", "body": _tfg_body[:4096]},
+                }
+    except Exception as _tfg_err:
+        logger.warning("directive-free time guard skipped: %s", _tfg_err)
+
     # Structured directive tap — handle without LLM if text matches active directive's option
     try:
         _active_id = None
@@ -1051,6 +1246,18 @@ async def qr_inbound(    payload: QrInboundPayload,
                                 f"Please type the meeting date like {_hint2}.",
                                 _horizon2,
                             )
+                            # Telling someone their date "doesn't look right"
+                            # without saying what the booking window is leaves
+                            # them with nothing to go on. State the window in
+                            # words, as the date step itself does.
+                            try:
+                                from app.engine.message_processor import (
+                                    _format_available_dates_for_prompt as _corr_fmt,
+                                )
+
+                                _body = f"{_body}\n\n{_corr_fmt(_tz2, _max2)}"
+                            except Exception:
+                                pass
                         else:
                             _avail = [str(o.get("label") or "").strip() for o in (_dir.options or []) if str(o.get("label") or "").strip()]
                             _hours = ""
@@ -1186,72 +1393,28 @@ async def qr_inbound(    payload: QrInboundPayload,
             from app.crud import chat as _crud_chat
             from app.engine import offtopic_cooldown as _cd
 
-            # Judge the reply by what it DOES, not by exact wording. The model
-            # phrases the same refusal several ways and an equality check on one
-            # canonical string missed most of them, so no strike was ever
-            # recorded and the cooldown never opened.
-            _reply_text = str(getattr(action, "message", "") or "")
-            # A session that just booked (or just verified) is never punished:
-            # its confirmation and OTP replies must reach the customer
-            # untouched. This is the second half of the fix for confirmations
-            # being overwritten by the cooldown notice while the booking
-            # itself succeeded. The classifier also excludes these shapes, so
-            # this is defence in depth, not the primary guard.
-            try:
-                from app.engine.user_visible_text import (
-                    looks_like_confirmation_claim as _is_claim,
+            # One shared implementation, so QR and Meta Cloud cannot diverge.
+            # It used to live inline here and nowhere else, which is why
+            # `record_offtopic` had a single call site and Cloud could never
+            # open a cooldown. Accounting still happens after the engine
+            # returns, because the declines customers actually receive are
+            # produced by presenter/LLM paths that return before the
+            # orchestrator's own checks.
+            _replacement = _cd.account_offtopic_turn(
+                chat_session.collected_data,
+                user_text=text,
+                reply_text=str(getattr(action, "message", "") or ""),
+                turn_intent=getattr(chat_session, "current_intent", None),
+                missing_fields=getattr(chat_session, "missing_fields", None),
+                session_status=getattr(chat_session, "session_status", None),
+                phone_otp_verified=bool(getattr(chat_session, "phone_otp_verified", False)),
+            )
+            if _replacement:
+                action.message = _replacement
+                logger.info(
+                    "offtopic_cooldown_opened session=%s",
+                    str(chat_session.session_id)[:8],
                 )
-                from app.engine.knowledge_guards import (
-                    is_transactional_reply as _is_txn,
-                )
-
-                _just_booked = str(
-                    getattr(chat_session, "session_status", "") or ""
-                ).upper() in ("CONFIRMING", "CONFIRMED") or bool(
-                    getattr(chat_session, "phone_otp_verified", False)
-                )
-                # A turn that IS booking/business progress is never a strike,
-                # even when the reply looks decline-shaped. The engine knew
-                # the turn-3 booking request was START_BOOKING, yet its
-                # clarification reply ("I didn't quite catch that... share
-                # your full name") was judged a decline and locked the
-                # customer out for trying to book.
-                _on_topic_turn = _cd.is_on_topic_turn(
-                    text, getattr(chat_session, "current_intent", None)
-                ) or bool(getattr(chat_session, "missing_fields", None))
-            except Exception:
-                _just_booked = False
-                _on_topic_turn = False
-                _is_claim = None
-                _is_txn = None
-            if _just_booked or _on_topic_turn or (
-                _is_claim is not None and _is_claim(_reply_text)
-            ) or (
-                _is_txn is not None and _is_txn(_reply_text)
-            ):
-                _cd.clear(chat_session.collected_data)
-            elif _cd.looks_like_decline(_reply_text):
-                if not _cd.looks_like_asking_about_us(text):
-                    # If the window was not open before this turn, this strike
-                    # just opened it: the customer hears the plain opening
-                    # line, not another decline. Anything they send after
-                    # this gets the "still in cooldown" line from the early
-                    # gate instead.
-                    _already_cooling = _cd.is_cooling_down(
-                        chat_session.collected_data
-                    )
-                    _cd.record_offtopic(chat_session.collected_data)
-                    if (
-                        not _already_cooling
-                        and _cd.is_cooling_down(chat_session.collected_data)
-                    ):
-                        action.message = _cd.cooldown_opening_message()
-                        logger.info(
-                            "offtopic_cooldown_opened session=%s",
-                            str(chat_session.session_id)[:8],
-                        )
-            else:
-                _cd.clear(chat_session.collected_data)
             await _crud_chat.update_chat_session(
                 db, chat_session.session_id, chat_session
             )
@@ -1273,6 +1436,19 @@ async def qr_inbound(    payload: QrInboundPayload,
                 _active_id_after = chat_session.collected_data.get("active_directive_id")
         except Exception:
             pass
+        # The engine may have persisted a NEW directive and expired the old one
+        # during this turn, but the in-memory session above still points at the
+        # previous id. Rendering that id found an EXPIRED directive, skipped the
+        # whole step render, and fell back to a bare "what date would you like?"
+        # with nothing to pick from. Re-read the session so the id is current.
+        try:
+            await db.refresh(chat_session)
+            if isinstance(chat_session.collected_data, dict):
+                _refreshed_id = chat_session.collected_data.get("active_directive_id")
+                if _refreshed_id:
+                    _active_id_after = _refreshed_id
+        except Exception:
+            pass
         # ── Simple text booking system — directive interactive disabled per product decision ──
         # No interactive buttons/lists, just plain text. Booking engine + directive remain source of truth for validation,
         # but WhatsApp presentation is text-only (user types date like "17 sep" or "18/09/2026").
@@ -1285,12 +1461,63 @@ async def qr_inbound(    payload: QrInboundPayload,
                 )
 
                 _dir_after = await _get_dir2(db, _active_id_after)
+                # A conversational turn ("go on", "still there?") is answered by
+                # the knowledge path, which early-returns with TEXT_INPUT and
+                # never reaches the step. The customer then heard "Yes I'm here!
+                # What date would you like to book?" with no dates and nothing
+                # to tap — the built-in date step silently vanished. So a step
+                # that is still genuinely PENDING and still matches the field
+                # we are waiting on is rendered anyway, with the reply kept in
+                # front ("answer first, step second"). The guard below stops
+                # this from re-asking a field the reply already asks for.
+                # A pending step must not vanish because the customer asked
+                # something on the way to it, so the step is rendered even when
+                # the engine returned TEXT_INPUT.
+                #
+                # It must NOT do so at the cost of swallowing the answer. Both
+                # of these happened in production:
+                #   * "What is the capital of Japan?" got the slot list stapled
+                #     on the end of the reply.
+                #   * "Can you tell me about dotstark" got the identical slot
+                #     list, six turns in a row, and the question was never
+                #     answered.
+                # So when the engine produced an actual answer, that answer is
+                # sent on its own. The step reappears on the next turn, which
+                # was verified: a customer could ask three questions in a row
+                # and still book on the next message.
+                _pending_field = {
+                    "SELECT_DATE": "date",
+                    "SELECT_SLOT": "time",
+                    "SELECT_TIME": "time",
+                }.get(str(getattr(_dir_after, "type", "") or ""))
+                _still_waiting = bool(
+                    _pending_field
+                    and (chat_session.missing_fields or [None])[0] == _pending_field
+                )
+                _replied = str(getattr(action, "message", "") or "").strip()
+                _action_meta = getattr(action, "field_meta", None) or {}
+                _answered = bool(
+                    _action_meta.get("knowledge_answer")
+                    or (_pending_field and _pending_field.lower() not in _replied.lower()
+                        and _replied and "?" in _replied)
+                )
+                # The reply may already ask for the field; in that case the
+                # step render alone carries the ask plus the options.
+                _already_asks = bool(
+                    _pending_field
+                    and _replied
+                    and _pending_field.lower() in _replied.lower()
+                )
                 if (
                     _dir_after
                     and _dir_after.status == "PENDING"
-                    and _frame_matches(
-                        getattr(_dir_after, "type", ""),
-                        getattr(action, "widget_directive", ""),
+                    and not _answered
+                    and (
+                        _frame_matches(
+                            getattr(_dir_after, "type", ""),
+                            getattr(action, "widget_directive", ""),
+                        )
+                        or _still_waiting
                     )
                 ):
                     _title = str(getattr(_dir_after, "title", "") or "").strip()
@@ -1335,6 +1562,10 @@ async def qr_inbound(    payload: QrInboundPayload,
                         except Exception:
                             pass
                     _parts = [p for p in [_title, _desc] if p]
+                    # The date step states the booking window in words, in
+                    # _desc. No day list: a list of day names reads as a menu,
+                    # and any day on it can still turn out to be full, so the
+                    # customer picks from it and is then told it is unavailable.
                     # For time, show available slots as plain text (typed entry, not numbered buttons)
                     if _dir_after.type in ("SELECT_SLOT", "SELECT_TIME"):
                         _opts = list(getattr(_dir_after, "options", None) or [])
@@ -1359,9 +1590,14 @@ async def qr_inbound(    payload: QrInboundPayload,
                     try:
                         _fm_after = getattr(action, "field_meta", None) or {}
                         if isinstance(_fm_after, dict) and _fm_after.get("knowledge_answer"):
-                            _body = whatsapp_client.attach_knowledge_answer(
-                                getattr(action, "message", ""), _body
-                            )
+                            # Only prepend the reply when it adds something. If
+                            # it already asks for this field, the step render
+                            # carries the same ask plus the options, so
+                            # prepending would just repeat the question.
+                            if not (_already_asks and _still_waiting):
+                                _body = whatsapp_client.attach_knowledge_answer(
+                                    getattr(action, "message", ""), _body
+                                )
                     except Exception:
                         pass
                     wa_msg = {"type": "text", "body": _body[:4096]}
@@ -1372,7 +1608,7 @@ async def qr_inbound(    payload: QrInboundPayload,
             # Non-directive path — keep deterministic booking engine rendering for now.
             # Knowledge-tone presentation for ASK_QUESTION will be handled via graph's RAG path (already tone-aware);
             # presenter for text is reserved for Phase 5 when we wire retrieved chunks explicitly.
-            wa_msg = whatsapp_client.format_action_for_whatsapp(action)
+            wa_msg = whatsapp_client.format_action_for_whatsapp_text_only(action)
             # Final anti-hallucination gate: block invented contact/money
             # entities (phones, emails, prices) absent from org facts, catalog
             # fees, and the customer's own session details. Fail-open on error.
@@ -1454,15 +1690,44 @@ async def qr_inbound(    payload: QrInboundPayload,
                 if len(_e164) == 10 and _e164[0] in "6789":
                     _e164 = "91" + _e164
                 _cloud_to = _e164 if len(_e164) >= 12 else from_phone
+                # Per-step dedupe, matching the Meta Cloud transport. Without
+                # it a stuck step (a field the customer cannot satisfy, a
+                # repeated refusal, a re-render after a restart) re-fires a
+                # BILLABLE Meta template on every single turn, because this
+                # block runs unconditionally at the end of each inbound
+                # message. Cloud has had this guard all along; QR did not.
+                _missing = list(getattr(chat_session, "missing_fields", None) or [])
+                _tname = None
                 if _directive == "REQUIRE_EMAIL_INPUT":
+                    _tname = _wtemplates.TEMPLATE_REQUEST_EMAIL
+                elif _directive == "REQUIRE_PHONE_INPUT":
+                    _tname = _wtemplates.TEMPLATE_REQUEST_PHONE
+                elif _directive == "TEXT_INPUT" and str(_fmeta.get("name") or "") == "name":
+                    _tname = _wtemplates.TEMPLATE_WELCOME
+                if _tname and _wtemplates.step_template_already_sent(_sdata, _tname, _missing):
+                    logger.info(
+                        "booking-template %s (qr) skipped: already sent for this step",
+                        _tname,
+                    )
+                    _tname = None
+                if _tname == _wtemplates.TEMPLATE_REQUEST_EMAIL:
                     _tres = await _wtemplates.send_request_email(_cloud_to, _cname if _cname != "there" else "there")
                     logger.info("booking-template email to=%s*** sent=%s wamid=%s", str(_cloud_to)[:6], _tres.get("success"), _tres.get("wamid"))
-                elif _directive == "REQUIRE_PHONE_INPUT":
+                elif _tname == _wtemplates.TEMPLATE_REQUEST_PHONE:
                     _tres = await _wtemplates.send_request_phone(_cloud_to)
                     logger.info("booking-template phone to=%s*** sent=%s wamid=%s", str(_cloud_to)[:6], _tres.get("success"), _tres.get("wamid"))
-                elif _directive == "TEXT_INPUT" and str(_fmeta.get("name") or "") == "name":
+                elif _tname == _wtemplates.TEMPLATE_WELCOME:
                     _tres = await _wtemplates.send_welcome(_cloud_to, _cname, _business)
                     logger.info("booking-template welcome to=%s*** sent=%s wamid=%s", str(_cloud_to)[:6], _tres.get("success"), _tres.get("wamid"))
+                if _tname and _tres.get("success"):
+                    from app.crud import chat as _tpl_crud
+
+                    chat_session.collected_data = _wtemplates.mark_step_template_sent(
+                        _sdata, _tname, _missing
+                    )
+                    await _tpl_crud.update_chat_session(
+                        db, chat_session.session_id, chat_session
+                    )
         except Exception as _e:
             logger.warning(f"booking-template cloud send failed, Baileys fallback kept: {_e}")
         # Repeat circuit breaker: identical consecutive replies get a

@@ -5,11 +5,12 @@ forever, and burn an LLM call each time. After a run of off-topic questions
 the session is briefly paused so the cost and the noise stop.
 
 Rules:
-  * N consecutive off-topic questions start a 15 second cooldown
+  * N consecutive off-topic questions start a 15 MINUTE cooldown
   * while cooling down, ANY inbound message is answered with one short
     "you're still in cooldown" line and nothing else is processed
-  * a single on-topic turn (booking or a knowledge answer) clears the counter,
-    so a customer who is actually booking is never punished
+  * a single on-topic turn (booking or a knowledge answer) resets the strike
+    counter, so a customer who is actually booking is never punished. It does
+    NOT end an already-running pause; only the clock does that.
   * the counter is stored on the session, so it survives a worker restart
 """
 
@@ -97,11 +98,23 @@ def record_offtopic(data: dict) -> int:
 
 
 def clear(data: dict) -> None:
-    """Reset on any on-topic turn: a real booking step or a real answer."""
+    """Reset the strike counter on any on-topic turn.
+
+    Deliberately does NOT release an ACTIVE cooldown window. It used to pop
+    both keys, which meant that any reply the classifier did not read as a
+    decline -- including the orchestrator's own "You're still in cooldown"
+    line, which is precisely the reply the customer gets WHILE cooling down --
+    deleted the deadline and let them straight back in after a single message.
+
+    Resetting the counter and ending the pause are different decisions. A turn
+    is enough to earn a fresh set of three strikes; only the clock ends the
+    pause. An expired window is still cleaned up, so the key does not linger.
+    """
     if not data:
         return
     data.pop(_COUNT_KEY, None)
-    data.pop(_UNTIL_KEY, None)
+    if not is_cooling_down(data):
+        data.pop(_UNTIL_KEY, None)
 
 
 _PHRASE_RE = re.compile(
@@ -353,26 +366,155 @@ _BOOKING_FLOW_INTENTS = frozenset(
 )
 
 
+_BOOKING_VOCAB_RE = re.compile(
+    r"\b(?:book|booking|appointment|appointments|slot|slots|reschedule|cancel|"
+    r"schedule|scheduling)\b",
+    re.IGNORECASE,
+)
+
+
 def is_on_topic_turn(user_text: str | None, turn_intent: str | None) -> bool:
     """True when this turn is booking/business progress, never a strike.
 
-    Two independent signals, either one suffices:
-      - the engine's turn intent is a booking-flow intent, or
-      - the input text itself carries booking intent.
-    Trivia ("who is the prime minister...") yields a question intent and no
-    booking behaviour, so strikes still fire for real off-topic loops.
+    Three independent signals, in order of how much they can be trusted:
+
+      1. the customer's OWN words ask to book. This is the strongest and is
+         never overridden.
+      2. the engine's turn intent is a booking-flow intent. This one is
+         CORROBORATED: a turn intent is only evidence when the customer's
+         message is consistent with it. The intent is carried over from the
+         previous turn, so a session that started a booking would otherwise
+         report START_BOOKING for the rest of the conversation and exempt
+         every later turn -- which is what silently disabled the whole
+         guardrail.
+      3. (applied by the caller) the session has pending fields.
+
+    Trivia ("who is the prime minister...", "what is the capital of...") is an
+    interrogative message and stays countable no matter what the stale intent
+    says.
     """
-    intent = str(turn_intent or "").upper().strip()
-    if intent in _BOOKING_FLOW_INTENTS:
-        return True
+    text = str(user_text or "")
+
     try:
         from app.engine.user_behavior import analyze_user_behavior
 
-        behaviour = analyze_user_behavior(user_text or "") or {}
+        behaviour = analyze_user_behavior(text) or {}
         if behaviour.get("primary_intent") == "book":
             return True
         if bool(behaviour.get("should_start_booking")):
             return True
     except Exception:
         pass
+
+    intent = str(turn_intent or "").upper().strip()
+    if intent in _BOOKING_FLOW_INTENTS:
+        if looks_like_an_off_topic_question(text):
+            # A question is only booking progress if it also talks booking
+            # ("can I book an appointment on Sunday?"). Otherwise a carried
+            # over intent must not grant a standing exemption.
+            return bool(_BOOKING_VOCAB_RE.search(text))
+        return True
     return False
+
+
+# A question is an interrogative opener ("who is the prime minister of ...",
+# "what is the capital of ...") or anything that ends in a question mark.
+# Used to tell a bare data answer ("Priyank", "29/09/2026") apart from an
+# off-topic question, because both lack punctuation.
+_OFFTOPIC_QUESTION_RE = re.compile(
+    r"^\s*(?:who|what|when|where|why|how|which|whose|whom)\b|\?\s*$",
+    re.IGNORECASE,
+)
+
+
+def looks_like_an_off_topic_question(text: str | None) -> bool:
+    """True when the customer's own message reads as a question."""
+    return bool(_OFFTOPIC_QUESTION_RE.search(str(text or "")))
+
+
+def account_offtopic_turn(
+    collected_data: dict | None,
+    *,
+    user_text: str | None,
+    reply_text: str | None,
+    turn_intent: str | None = None,
+    missing_fields=None,
+    session_status: str | None = None,
+    phone_otp_verified: bool = False,
+) -> str | None:
+    """Record one turn against the off-topic counter.
+
+    Returns the message the transport must SEND INSTEAD of ``reply_text`` when
+    this strike is the one that opens the cooldown window, otherwise None.
+
+    This lives here, and not in a transport endpoint, so that the QR/Baileys
+    path and the Meta Cloud path cannot drift apart again. It used to exist
+    only in ``whatsapp_qr.py``: ``record_offtopic`` had exactly one call site in
+    the whole codebase, so a customer who arrived over Meta Cloud could never
+    accumulate a strike and the guardrail silently did not exist for them. The
+    window gate itself lives in the orchestrator and was shared, which made the
+    asymmetry worse rather than better -- Cloud could honour a cooldown opened
+    over Baileys, but could never open one.
+
+    Mutates ``collected_data`` in place; the caller persists the session.
+    """
+    if not isinstance(collected_data, dict):
+        return None
+
+    text = str(user_text or "")
+    reply = str(reply_text or "")
+    missing = list(missing_fields or [])
+    status = str(session_status or "").upper()
+
+    # A turn that is booking/business progress is never a strike, even when the
+    # reply looks decline-shaped.
+    #
+    # `missing_fields` alone is NOT enough of an exemption. It used to be
+    # `is_on_topic_turn(...) or bool(missing_fields)`, which granted a
+    # PERMANENT exemption: once a session had any pending field, every
+    # subsequent turn was exempt, so the guardrail could never fire again for
+    # that session. A live run reproduced it -- one trivia question made the
+    # engine start a booking flow, and the following two trivia questions were
+    # silently never counted.
+    #
+    # So the pending-field signal now only protects a turn that is not itself a
+    # question: a bare data answer ("Priyank", "29/09/2026", "3:00 PM") stays
+    # exempt, an interrogative message does not.
+    on_topic = is_on_topic_turn(text, turn_intent) or (
+        bool(missing) and not looks_like_an_off_topic_question(text)
+    )
+    just_booked = status in ("CONFIRMING", "CONFIRMED") or bool(phone_otp_verified)
+
+    exempt = just_booked or on_topic
+    if not exempt:
+        try:
+            from app.engine.user_visible_text import looks_like_confirmation_claim
+
+            exempt = bool(looks_like_confirmation_claim(reply))
+        except Exception:
+            pass
+    if not exempt:
+        try:
+            from app.engine.knowledge_guards import is_transactional_reply
+
+            exempt = bool(is_transactional_reply(reply))
+        except Exception:
+            pass
+
+    if exempt:
+        clear(collected_data)
+        return None
+
+    if not looks_like_decline(reply):
+        clear(collected_data)
+        return None
+
+    if looks_like_asking_about_us(text):
+        # A genuine question about the business is not a refusal.
+        return None
+
+    already_cooling = is_cooling_down(collected_data)
+    record_offtopic(collected_data)
+    if not already_cooling and is_cooling_down(collected_data):
+        return cooldown_opening_message()
+    return None

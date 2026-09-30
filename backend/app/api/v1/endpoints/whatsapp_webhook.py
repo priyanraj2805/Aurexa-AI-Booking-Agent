@@ -15,13 +15,16 @@ Inbound identity note: Meta `message.from` is the Cloud-API user identity
 Baileys LID — session identity mapping is a later phase.
 """
 
+import hashlib
+import hmac
+import json
 import logging
 import re
 import time as _time
 from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -47,6 +50,50 @@ CLOUD_CHANNEL = "whatsapp_cloud"
 # metadata.phone_number_id on every change value; never hardcoded in logic
 # (see settings.META_WHATSAPP_PHONE_NUMBER_ID).
 _PROVIDER = "meta_cloud"
+
+# ── Inbound authenticity ────────────────────────────────────────────────────
+# Meta signs every webhook POST with the App Secret and sends the digest in
+# X-Hub-Signature-256 as "sha256=<hex>". Without checking it, anyone who can
+# reach this endpoint can forge a message event and drive a booking turn.
+#
+# The HMAC is computed over the RAW request body, never over the re-serialised
+# parsed JSON: `json.loads`/`json.dumps` is not byte-stable (key order, unicode
+# escaping, whitespace), so validating the parsed object would reject genuine
+# requests and could be gamed by alternate encodings.
+META_SIGNATURE_HEADER = "X-Hub-Signature-256"
+META_SIGNATURE_PREFIX = "sha256="
+
+
+def compute_meta_signature(app_secret: str, raw_body: bytes) -> str:
+    """The digest Meta is expected to have sent, in Meta's own format."""
+    return META_SIGNATURE_PREFIX + hmac.new(
+        (app_secret or "").encode("utf-8"),
+        raw_body or b"",
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def is_valid_meta_signature(
+    app_secret: str,
+    raw_body: bytes,
+    signature_header: Optional[str],
+) -> bool:
+    """Constant-time check of X-Hub-Signature-256 against the App Secret.
+
+    Fails closed. A missing App Secret, a missing header, an empty header or a
+    header without the "sha256=" prefix are all rejections, not passes: with no
+    secret there is nothing to verify against, and defaulting to "allow" is
+    exactly the hole this closes.
+    """
+    if not app_secret:
+        return False
+    if not signature_header:
+        return False
+    provided = str(signature_header).strip()
+    if not provided.lower().startswith(META_SIGNATURE_PREFIX):
+        return False
+    expected = compute_meta_signature(app_secret, raw_body)
+    return hmac.compare_digest(expected, provided)
 
 
 def _digits(value: Any) -> str:
@@ -257,6 +304,115 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                     pass
                 logger.warning("meta webhook burst slowed (retry in ~%ss)", _wait)
                 return True
+        # Directive-free date step guard (mirrors the QR transport).
+        #
+        # The step guards below require a BookingDirective row, and
+        # BookingDirective is now web-widget only. Without this, a typed date
+        # on WhatsApp would never get the live "does this day have a free
+        # slot?" check and the customer would only find out at the time step.
+        # Driven off the field we are actually waiting on, not a directive.
+        try:
+            _awaiting_c = (chat_session.missing_fields or [None])[0]
+            if _awaiting_c == "date":
+                from app.engine import whatsapp_guards as _dfgc
+                from app.engine.scheduling_policy import (
+                    _contains_concrete_date_value as _dfgc_has_date_token,
+                    is_available_dates_query as _dfgc_is_dates_q,
+                    is_schedule_business_hours_query as _dfgc_is_hours_q,
+                    resolve_booking_horizon_days as _dfgc_horizon,
+                    select_date_option_labels as _dfgc_labels,
+                )
+
+                if not (_dfgc_is_dates_q(text) or _dfgc_is_hours_q(text)):
+                    _dfgc_tz = str(getattr(org_config, "timezone", None) or "UTC")
+                    try:
+                        _dfgc_max = (await _dfgc_horizon(db, org.id, org_config))[0]
+                    except Exception:
+                        _dfgc_max = 30
+                    _dfgc_iso, _dfgc_corr, _dfgc_reason = _dfgc.validate_typed_date(
+                        text, tz=_dfgc_tz, max_days=_dfgc_max
+                    )
+                    # Correct only a genuine date attempt. "go on" / "still
+                    # there?" carry no date token and are not malformed dates.
+                    if (
+                        not _dfgc_iso
+                        and _dfgc_reason in ("invalid", "bare_number")
+                        and _dfgc_has_date_token(text)
+                    ):
+                        _dfgc_body = _dfgc.date_correction(
+                            text, "Please type the meeting date.", ""
+                        )
+                        # Window-in-words, not a list of day names.
+                        try:
+                            from app.engine.message_processor import (
+                                _format_available_dates_for_prompt as _dfgc_fmt,
+                            )
+
+                            _dfgc_body = (
+                                f"{_dfgc_body}\n\n{_dfgc_fmt(_dfgc_tz, _dfgc_max)}"
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            await crud_chat.save_message(
+                                db, str(chat_session.session_id), "user", text
+                            )
+                            await crud_chat.save_message(
+                                db, str(chat_session.session_id), "agent", _dfgc_body
+                            )
+                        except Exception:
+                            pass
+                        logger.info(
+                            "date guard corrected (cloud, no directive) reason=%s",
+                            _dfgc_reason,
+                        )
+                        return {
+                            "status": "ok",
+                            "session_id": str(chat_session.session_id),
+                            "reply": {"type": "text", "body": _dfgc_body[:4096]},
+                        }
+                    if _dfgc_iso:
+                        _dfgc_open, _dfgc_corr2, _dfgc_reason2 = (
+                            await _dfgc.validate_typed_date_availability(
+                                db, org.id, org_config, _dfgc_iso
+                            )
+                        )
+                        if not _dfgc_open:
+                            _dfgc_body2 = _dfgc_corr2 or _dfgc.date_correction(
+                                text, "Please choose another date.", ""
+                            )
+                            try:
+                                from app.engine.message_processor import (
+                                    _format_available_dates_for_prompt as _dfgc_fmt2,
+                                )
+
+                                _dfgc_body2 = (
+                                    f"{_dfgc_body2}\n\n{_dfgc_fmt2(_dfgc_tz, _dfgc_max)}"
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                await crud_chat.save_message(
+                                    db, str(chat_session.session_id), "user", text
+                                )
+                                await crud_chat.save_message(
+                                    db, str(chat_session.session_id), "agent",
+                                    _dfgc_body2,
+                                )
+                            except Exception:
+                                pass
+                            logger.info(
+                                "date guard rejected (cloud, no availability) iso=%s",
+                                _dfgc_iso,
+                            )
+                            return {
+                                "status": "ok",
+                                "session_id": str(chat_session.session_id),
+                                "reply": {"type": "text", "body": _dfgc_body2[:4096]},
+                            }
+        except Exception as _dfgc_err:
+            logger.warning("directive-free date guard skipped (cloud): %s", _dfgc_err)
+
         # Structured directive tap — same pre-LLM handling as the QR path.
         try:
             _active_id = None
@@ -590,6 +746,18 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                         f"Please type the meeting date like {_hint2}.",
                                         _horizon2,
                                     )
+                                    # State the window in words, as the date
+                                    # step itself does, rather than listing days.
+                                    try:
+                                        from app.engine.message_processor import (
+                                            _format_available_dates_for_prompt as _corr_fmt_c,
+                                        )
+
+                                        _wrong_body = (
+                                            f"{_wrong_body}\n\n{_corr_fmt_c(_tz2, _max2)}"
+                                        )
+                                    except Exception:
+                                        pass
                                 else:
                                     _avail_c = [str(o.get("label") or "").strip() for o in (_dir.options or []) if str(o.get("label") or "").strip()]
                                     _hours = ""
@@ -709,6 +877,19 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                     _active_id_after = chat_session.collected_data.get("active_directive_id")
             except Exception:
                 pass
+            # The engine may have persisted a NEW directive and expired the old
+            # one during this turn, but the in-memory session above still points
+            # at the previous id. Rendering that id found an EXPIRED directive,
+            # skipped the step render, and fell back to a bare "what date would
+            # you like?" with nothing to pick from. Re-read so the id is current.
+            try:
+                await db.refresh(chat_session)
+                if isinstance(chat_session.collected_data, dict):
+                    _refreshed_id_c = chat_session.collected_data.get("active_directive_id")
+                    if _refreshed_id_c:
+                        _active_id_after = _refreshed_id_c
+            except Exception:
+                pass
             # ── Simple text booking system — directive interactive disabled ──
             wa_msg = None
             if _active_id_after:
@@ -719,12 +900,48 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                     )
 
                     _dir_after = await _get_dir2(db, _active_id_after)
+                    # Same as the QR transport: a conversational turn
+                    # ("go on", "still there?") early-returns with TEXT_INPUT
+                    # and used to drop the step entirely, leaving the customer
+                    # with "What date would you like to book?" and no dates. A
+                    # genuinely PENDING step that still matches the field we
+                    # are waiting on is rendered anyway.
+                    _pending_field_c = {
+                        "SELECT_DATE": "date",
+                        "SELECT_SLOT": "time",
+                        "SELECT_TIME": "time",
+                    }.get(str(getattr(_dir_after, "type", "") or ""))
+                    _still_waiting_c = bool(
+                        _pending_field_c
+                        and (chat_session.missing_fields or [None])[0] == _pending_field_c
+                    )
+                    _replied_c = str(getattr(action, "message", "") or "").strip()
+                    # Never let the step swallow a real answer: a customer who
+                    # asked a question between booking steps got the identical
+                    # step rendered instead, six turns running. The answer goes
+                    # out on its own and the step returns next turn.
+                    _action_meta_c = getattr(action, "field_meta", None) or {}
+                    _answered_c = bool(
+                        _action_meta_c.get("knowledge_answer")
+                        or (_pending_field_c
+                            and _pending_field_c.lower() not in _replied_c.lower()
+                            and _replied_c and "?" in _replied_c)
+                    )
+                    _already_asks_c = bool(
+                        _pending_field_c
+                        and _replied_c
+                        and _pending_field_c.lower() in _replied_c.lower()
+                    )
                     if (
                         _dir_after
                         and _dir_after.status == "PENDING"
-                        and _frame_matches(
-                            getattr(_dir_after, "type", ""),
-                            getattr(action, "widget_directive", ""),
+                        and not _answered_c
+                        and (
+                            _frame_matches(
+                                getattr(_dir_after, "type", ""),
+                                getattr(action, "widget_directive", ""),
+                            )
+                            or _still_waiting_c
                         )
                     ):
                         _title = str(getattr(_dir_after, "title", "") or "").strip()
@@ -767,6 +984,10 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                             except Exception:
                                 pass
                         _parts = [p for p in [_title, _desc] if p]
+                        # The date step states the booking window in words, in
+                        # _desc. No day list: it reads as a menu, and any day on
+                        # it can still be full, so the customer picks from it
+                        # and is then told it is unavailable.
                         if _dir_after.type in ("SELECT_SLOT", "SELECT_TIME"):
                             _opts_c = list(getattr(_dir_after, "options", None) or [])
                             if _opts_c:
@@ -785,9 +1006,13 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                         try:
                             _fm_c = getattr(action, "field_meta", None) or {}
                             if isinstance(_fm_c, dict) and _fm_c.get("knowledge_answer"):
-                                _body = whatsapp_client.attach_knowledge_answer(
-                                    getattr(action, "message", ""), _body
-                                )
+                                # Skip when the reply already asks for this
+                                # field: the step render repeats the ask and
+                                # adds the options.
+                                if not (_already_asks_c and _still_waiting_c):
+                                    _body = whatsapp_client.attach_knowledge_answer(
+                                        getattr(action, "message", ""), _body
+                                    )
                         except Exception:
                             pass
                         wa_msg = {"type": "text", "body": _body[:4096]}
@@ -795,7 +1020,7 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                 except Exception as _e:
                     logger.warning(f"Directive render failed (cloud), falling back: {_e}")
             if wa_msg is None:
-                wa_msg = whatsapp_client.format_action_for_whatsapp(action)
+                wa_msg = whatsapp_client.format_action_for_whatsapp_text_only(action)
                 # Final anti-hallucination gate (same as QR path): block
                 # invented contact/money entities. Fail-open on error.
                 # Skip for deterministic duplicate-booking messages — they
@@ -887,6 +1112,39 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                         await crud_chat.update_chat_session(db, str(chat_session.session_id), chat_session)
             except Exception as _e:
                 logger.warning(f"booking-template cloud send failed: {_e}")
+            # Off-topic strike accounting -- the same shared implementation the
+            # QR/Baileys transport uses. This was missing entirely: the
+            # orchestrator's cooldown GATE is shared, so Cloud honoured a window
+            # opened over Baileys, but Cloud could never OPEN one. The same
+            # customer asking the same off-topic questions got the guardrail on
+            # one transport and not the other, which is the exact class of bug
+            # this is meant to prevent.
+            try:
+                from app.engine import offtopic_cooldown as _cd
+
+                _cd_replacement = _cd.account_offtopic_turn(
+                    chat_session.collected_data,
+                    user_text=text,
+                    reply_text=str(getattr(action, "message", "") or ""),
+                    turn_intent=getattr(chat_session, "current_intent", None),
+                    missing_fields=getattr(chat_session, "missing_fields", None),
+                    session_status=getattr(chat_session, "session_status", None),
+                    phone_otp_verified=bool(
+                        getattr(chat_session, "phone_otp_verified", False)
+                    ),
+                )
+                if _cd_replacement:
+                    action.message = _cd_replacement
+                    logger.info(
+                        "offtopic_cooldown_opened session=%s (cloud)",
+                        str(chat_session.session_id)[:8],
+                    )
+                    wa_msg = {"type": "text", "body": str(_cd_replacement)[:4096]}
+                await crud_chat.update_chat_session(
+                    db, str(chat_session.session_id), chat_session
+                )
+            except Exception as _cd_err:
+                logger.warning(f"off-topic accounting failed (cloud): {_cd_err}")
             # Human handover won the race after the early check, or the engine
             # stayed silent on empty input: send nothing back.
             if str(getattr(action, "widget_directive", "") or "") in ("HUMAN_ACTIVE", "SILENT_NO_REPLY"):
@@ -937,14 +1195,33 @@ async def inbound(
 ):
     """Receive Meta events, normalize message events, always answer fast.
 
+    - Unsigned / wrongly-signed POSTs -> 403, nothing is processed.
     - Non-JSON / non-object payloads -> 400 (no point retrying poison bodies).
     - Wrong `object` type, unknown fields, status-only changes -> 200 ignored.
     - Unexpected phone_number_id -> logged, skipped as booking event, 200.
     - Duplicates (Meta retries) -> marked via the shared debouncer
       (`meta:<wamid>` namespace, same mechanism as `qr:<messageId>`), 200.
     """
+    # Authenticate BEFORE touching the payload. `request.body()` is the exact
+    # bytes Meta signed; `request.json()` is not used for verification because
+    # re-encoding is not byte-stable.
+    raw_body = await request.body()
+    _app_secret = str(getattr(settings, "META_WHATSAPP_APP_SECRET", "") or "")
+    if not is_valid_meta_signature(
+        _app_secret, raw_body, request.headers.get(META_SIGNATURE_HEADER)
+    ):
+        # Never log the secret, the signature, or the body. The reason code
+        # distinguishes "we cannot verify at all" from "they did not match",
+        # which is the difference between a misconfiguration and an attack.
+        _reason = "app_secret_not_configured" if not _app_secret else "invalid_signature"
+        logger.error("meta webhook rejected: %s", _reason)
+        return JSONResponse(
+            status_code=403,
+            content={"status": "rejected", "reason": _reason},
+        )
+
     try:
-        payload = await request.json()
+        payload = json.loads(raw_body or b"")
     except Exception:
         return {"status": "ignored", "reason": "invalid_json"}
 

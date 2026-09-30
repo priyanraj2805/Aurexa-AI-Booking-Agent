@@ -12,7 +12,7 @@ decides the next action. No business logic lives in the LLM.
 import logging
 import re
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from fastapi import BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -432,6 +432,112 @@ def _is_greeting_only(text: str) -> bool:
     identity and must never become the customer's name.
     """
     return bool(_GREETING_ONLY_RE.match((text or "").strip()))
+
+
+# A greeting that LEADS a name ("Hi Yash", "Hello Amanpreet Kaur"). Stripped
+# before deciding whether the rest of the message is a name.
+_GREETING_PREFIX_RE = re.compile(
+    r"^(?:hi+|hello+|hey+|yo|sup|namaste|namaskar|salaam+|hola|bonjour|"
+    r"good\s*(?:morning|afternoon|evening|day))\b[\s,.!…?]*",
+    re.IGNORECASE,
+)
+_VOWELS = frozenset("aeiou")
+_KEYBOARD_ROWS = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
+
+# Function words, question words, greetings and address words. A person's
+# name essentially never contains one, so their presence means the customer
+# sent a sentence ("can you help"), not a name. The asymmetry is deliberate:
+# guessing wrong only costs the customer one more question, whereas adopting
+# a sentence as a name would greet them with nonsense and derail the booking.
+_NOT_A_NAME_WORD = frozenset(
+    """
+    a an the this that these those there here
+    i im me my mine myself we us our you your yours yourself he him his
+    she her hers they them their theirs
+    is am are was were be been being
+    and or but if then than so because
+    to of for from with on in at by as about into over under again
+    do does did done can could shall should must
+    what whats what's when where which who whom whose why how hows how's
+    please thanks thank hi hello hey yo sup ok okay yes no yeah yup nope sure
+    help want need like get got give tell know think have has had
+    book booking appointment appointments available availability slot slots
+    schedule time date day days morning afternoon evening night today tomorrow
+    now also just very really much many good
+    doctor dr sir madam maam team office support admin everyone all folks guys
+    """.split()
+)
+
+
+def _looks_like_keyboard_mash(word: str) -> bool:
+    """True for runs of adjacent keys ("qwertyuiop", "asdfgh")."""
+    lowered = word.lower()
+    if len(lowered) < 4:
+        return False
+    return any(row in lowered or lowered in row for row in _KEYBOARD_ROWS)
+
+
+def extract_opening_name(message_text: str) -> str:
+    """Pull a person's name out of a customer's OPENING message.
+
+        "Hi Yash"          -> "Yash"
+        "Amanpreet Kaur"   -> "Amanpreet Kaur"
+        "Hello! Amanpreet" -> "Amanpreet"
+
+    Returns "" for anything that is not a bare name, so a question, an email,
+    a phone number, a date, a greeting on its own, or keysmash garbage is
+    never adopted as the customer's identity. Deliberately conservative: a
+    false positive would greet someone by a nonsense word, and a false
+    negative only means the customer is asked for their name as before.
+    """
+    raw = " ".join(str(message_text or "").split())
+    if not raw:
+        return ""
+    without_greeting = _GREETING_PREFIX_RE.sub("", raw).strip(" .!,…?")
+    if not without_greeting:
+        return ""
+    # Anything structured is a different field, not a name.
+    if any(ch.isdigit() for ch in without_greeting):
+        return ""
+    if any(ch in without_greeting for ch in "@/\\.:;()[]{}\"'&+*=~`$%^<>|"):
+        return ""
+    if "?" in without_greeting:
+        return ""
+    words = without_greeting.split()
+    if not words or len(words) > 3:
+        return ""
+    for word in words:
+        if word.lower() in _NOT_A_NAME_WORD:
+            return ""
+        # No vowel at all => not a name ("Ghhjjkk").
+        if not any(ch.lower() in _VOWELS for ch in word):
+            return ""
+        # 3+ identical letters in a row => keysmash, not a name.
+        if re.search(r"(.)\1{2,}", word):
+            return ""
+        # A repeated syllable => keysmash ("Blaahahhahah" repeats "hah",
+        # "Nahahhahahahz" repeats it three times). Production: a customer
+        # typed Blaahahhahah and it became the name on a real booking. A
+        # 3-char unit twice in a row is already vanishingly rare in real
+        # names; a 2-char unit needs three in a row ("aa" in "Amanpreet" and
+        # "mm" in "Mohammed" must keep passing).
+        lowered_word = word.lower()
+        if re.search(r"(.{3})\1", lowered_word):
+            return ""
+        if re.search(r"(.{2})\1{2}", lowered_word):
+            return ""
+        # 4+ consonants in a row is not a name ("Babbzhahavq", "Gayhajvndkso").
+        if re.search(r"[^aeiou]{4,}", lowered_word):
+            return ""
+        if _looks_like_keyboard_mash(word):
+            return ""
+        if len(word) > 24:
+            return ""
+    if _is_greeting_only(without_greeting) or _is_reserved_name_value(without_greeting):
+        return ""
+    if not _looks_like_name_candidate(without_greeting):
+        return ""
+    return without_greeting
 
 
 # Words that can never be a person's name — the model sometimes echoes the
@@ -3823,6 +3929,39 @@ async def _cancel_confirmed_booking(
     return action
 
 
+def resolve_payment_snapshot_status(
+    *,
+    price_expected: bool,
+    route_ready: bool,
+    paid_found: bool,
+    lookup_failed: bool = False,
+) -> str:
+    """Decide the `payment_status` a booking is recorded with.
+
+    Extracted from `_execute_booking` so the decision is testable on its own.
+    It used to be inline inside an ~800 line async function guarded by a bare
+    `except Exception`, where an UnboundLocalError could quietly resolve to
+    "not_required" for every booking at a priced org.
+
+    `route_ready` and `lookup_failed` are deliberately SEPARATE. `route_ready
+    = False` is a real business state -- the org is priced but has no
+    Razorpay Route account yet, so it genuinely cannot collect payment (the
+    widget rejects the order with 409 provider_payout_not_ready). Overloading
+    it to also mean "we could not find out" is what made the original silent
+    waiver possible, because a crash looked exactly like that state.
+
+    The rule that matters: an UNKNOWN state is never recorded as "nothing
+    owed". When the lookup genuinely failed, a priced org is recorded as
+    "pending" -- money still expected -- so a failure can never silently
+    waive a payment.
+    """
+    if paid_found:
+        return "paid"
+    if price_expected and (route_ready or lookup_failed):
+        return "pending"
+    return "not_required"
+
+
 async def _execute_booking(
     db: AsyncSession,
     org: Organization,
@@ -4307,36 +4446,73 @@ async def _execute_booking(
             meeting_link_status = MeetingLinkStatus.NOT_REQUIRED
 
         # Payment snapshot from latest paid attempt (if any)
+        #
+        # `org_config` is loaded HERE, before this block, because it used to be
+        # read ~150 lines further down at the Google Calendar step. Since
+        # `_execute_booking` does not take org_config as a parameter and this
+        # function assigns it later, it is a LOCAL variable for the whole
+        # function -- so the earlier read raised UnboundLocalError, which the
+        # `except Exception` below swallowed into
+        # `_pay_status = "not_required"`. The net effect: for an org with
+        # pricing enabled, every booking was stamped not_required regardless
+        # of what was actually paid.
+        _cfg_result = await db.execute(
+            select(OrgConfig).where(OrgConfig.org_id == org.id)
+        )
+        org_config = _cfg_result.scalars().first()
         _pay_order_id = None
         _pay_payment_id = None
         _pay_amount = None
         _pay_currency = None
         _pay_status = "not_required"
+        # Whether the admin has this org priced. Used both to decide whether a
+        # payment is expected at all and, on failure, to avoid defaulting to
+        # "not_required" for an org that DOES require payment.
+        _price_expected = False
         try:
             _price_enabled3 = bool(getattr(org_config, "appointment_price_enabled", False))
             _price_paise3 = int(getattr(org_config, "appointment_price_paise", 0) or 0)
+            _price_expected = bool(_price_enabled3 and _price_paise3 > 0)
             from app.services.razorpay.routing import get_org_route_context as _grc3
             _route_ready3 = False
             try:
                 _route_ready3 = (await _grc3(db, org.id)).transfer_ready
             except Exception:
                 _route_ready3 = False
-            if _price_enabled3 and _price_paise3 > 0 and _route_ready3:
+            _paid3 = None
+            if _price_expected and _route_ready3:
                 from app.models.payment import PaymentAttempt as _PA3
                 from sqlalchemy.future import select as _sel3
                 _paid3 = (await db.execute(_sel3(_PA3).where(_PA3.session_id == chat_session.session_id, _PA3.org_id == org.id, _PA3.status == "paid"))).scalars().first()
-                if _paid3:
-                    _pay_order_id = _paid3.razorpay_order_id
-                    _pay_payment_id = _paid3.razorpay_payment_id
-                    _pay_amount = _paid3.amount_paise
-                    _pay_currency = _paid3.currency
-                    _pay_status = "paid"
-                else:
-                    _pay_status = "pending"
-            else:
-                _pay_status = "not_required"
+            if _paid3:
+                _pay_order_id = _paid3.razorpay_order_id
+                _pay_payment_id = _paid3.razorpay_payment_id
+                _pay_amount = _paid3.amount_paise
+                _pay_currency = _paid3.currency
+            _pay_status = resolve_payment_snapshot_status(
+                price_expected=_price_expected,
+                route_ready=_route_ready3,
+                paid_found=bool(_paid3),
+            )
         except Exception:
-            _pay_status = "not_required"
+            # An unknown payment state must never be recorded as "nothing owed".
+            # `route_ready=False` is the honest representation of "we could not
+            # find out", and the resolver turns that into "pending" whenever the
+            # org is priced, rather than silently waiving the payment.
+            _pay_status = resolve_payment_snapshot_status(
+                price_expected=_price_expected,
+                route_ready=False,
+                paid_found=False,
+                lookup_failed=True,
+            )
+            if _price_expected:
+                logger.error(
+                    "payment snapshot lookup failed for a priced org; "
+                    "recording payment_status=pending rather than not_required",
+                    exc_info=True,
+                )
+            else:
+                logger.warning("payment snapshot lookup failed", exc_info=True)
 
         # Service catalog linkage (Phase 3): IDs arrive via collected_data.
         # Invalid/stale refs are dropped with a warning — a confirmed booking
@@ -4455,11 +4631,9 @@ async def _execute_booking(
         )
 
         # Create Google Calendar event (best-effort)
-        config_result = await db.execute(
-            select(OrgConfig).where(OrgConfig.org_id == org.id)
-        )
-        org_config = config_result.scalars().first()
-
+        # `org_config` was loaded above, before the payment snapshot. It used to
+        # be fetched here, which meant every earlier read of it raised
+        # UnboundLocalError.
         if (
             org_config
             and org_config.google_calendar_connected
@@ -4794,7 +4968,7 @@ def _build_edit_summary(
     return (
         f"Got it, I've updated that for you! Here's your revised summary:\n\n"
         + "\n".join(summary)
-        + "\n\nShall I go ahead and book this?",
+        + "\n\nReply CONFIRM and I'll send a fresh verification code to lock in the change.",
         "REQUEST_CONFIRMATION",
     )
 
@@ -4868,3 +5042,132 @@ async def _save_transcript(
         )
     except Exception as e:
         logger.warning(f"Failed to persist transcript: {e}")
+
+
+# Fields that make a session "already started" for opening-greeting purposes.
+_OPENING_SESSION_FIELDS = ("name", "email", "phone", "date", "time")
+
+
+def is_opening_turn(chat_session: ChatSessionState) -> bool:
+    """True when the customer has not given us anything yet.
+
+    Cheap and deterministic: if none of the collected fields have a value,
+    this is the first real message of a new conversation, which is the only
+    moment a salutation is appropriate. A false positive would mean greeting
+    a customer mid-flow, so nothing else may be used as the trigger.
+    """
+    collected = chat_session.collected_data
+    if not isinstance(collected, dict):
+        return True
+    for key in _OPENING_SESSION_FIELDS:
+        value = collected.get(key)
+        if value not in (None, "", [], {}):
+            return False
+    return True
+
+
+def build_opening_greeting(
+    name: str, business_name: str, next_question: str
+) -> str:
+    """A salutation that acknowledges what the customer actually sent.
+
+    Deliberately built here rather than asked of the model: the greeting has
+    to use the name that was just captured, and a model asked to greet a
+    named stranger will sometimes greet them by the wrong name.
+    """
+    who = f" {str(name).strip()}" if str(name or "").strip() else ""
+    biz = str(business_name or "").strip()
+    biz_part = f" to {biz}" if biz else ""
+    return (
+        f"Hello{who}! Thanks for reaching out{biz_part}.{next_question}"
+    )
+
+
+async def maybe_greet_opening_name(
+    db: AsyncSession,
+    org: Organization,
+    org_config: OrgConfig,
+    chat_session: ChatSessionState,
+    message_text: str,
+    field_definitions: Optional[List[FieldDefinition]] = None,
+    inbound_message_id: Optional[str] = None,
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> Optional[ActionPayload]:
+    """Handle "the customer's first message is their name".
+
+    Reported behaviour: a customer opened with "Hi Yash" and was told "Hello!
+    Could you please share your full name?" -- the name they had just given
+    was ignored and they were asked for it again.
+
+    Here the name is captured, acknowledged by name, and the customer is
+    moved on to the next missing field. Returns None for every other opening
+    (a greeting alone, a question, gibberish, an email, a phone number), so
+    the normal engine handles those unchanged.
+    """
+    if not is_opening_turn(chat_session):
+        return None
+
+    fd_list = list(field_definitions or [])
+    fd_map = {fd.name: fd for fd in fd_list}
+
+    # Only intervene when the name is the FIRST thing we still need. If the
+    # field order were different this must not fire.
+    missing = list(chat_session.missing_fields or [])
+    if missing and missing[0] != "name":
+        return None
+    if not missing and "name" in (
+        [fd.name for fd in fd_list] or ["name", "email", "phone", "date", "time"]
+    ):
+        # Name is not required by this org's config: nothing to acknowledge.
+        return None
+
+    candidate = extract_opening_name(message_text)
+    if not candidate:
+        return None
+
+    collected = dict(chat_session.collected_data or {})
+    collected["name"] = candidate
+    chat_session.collected_data = collected
+
+    still_missing = StateEvaluator.calculate_missing_fields(
+        get_required_field_names(fd_list), collected
+    )
+    chat_session.missing_fields = still_missing
+    chat_session.current_intent = "PROVIDE_DATA"
+    await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+
+    next_question = ""
+    if still_missing:
+        _next = fd_map.get(still_missing[0])
+        _label = str(getattr(_next, "label", "") or still_missing[0]).strip()
+        if still_missing[0] == "date":
+            next_question = " What date would you like to book?"
+        elif still_missing[0] == "time":
+            next_question = " What time works for you?"
+        else:
+            next_question = f" Could you please share your {_label.lower()}?"
+    else:
+        next_question = " How can we help you today?"
+
+    business = str(getattr(org_config, "business_name", "") or "").strip() or str(
+        getattr(org, "name", "") or ""
+    ).strip()
+    message = build_opening_greeting(candidate, business, next_question)
+
+    action = ActionPayload(
+        message=message,
+        widget_directive="TEXT_INPUT",
+        field_meta={"name": "name", "type": "text", "opening_greeting": True},
+    )
+    try:
+        await _save_transcript(
+            db,
+            chat_session.session_id,
+            str(message_text or ""),
+            message,
+            directive="TEXT_INPUT",
+            intent="PROVIDE_DATA",
+        )
+    except Exception:
+        logger.debug("opening-greeting transcript save failed")
+    return action

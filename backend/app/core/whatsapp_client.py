@@ -83,6 +83,62 @@ async def break_identical_repeat(db, chat_session, body: str) -> str:
         return body
 
 
+def format_action_for_whatsapp_text_only(action_payload) -> dict:
+    """Always plain text, never interactive elements.
+
+    WhatsApp booking is a conversation: the customer types a date, a time and
+    "yes", and the agent reads it back. Tappable lists and buttons were never
+    wanted on this channel, and relying on the BookingDirective block to
+    suppress them was fragile — with no directive row the caller fell through
+    to `format_action_for_whatsapp`, which returns an interactive list
+    whenever the field carries options. This function is the WhatsApp
+    transport's terminal formatter, so interactive output is impossible
+    regardless of upstream state.
+
+    Options are rendered inline as text so the customer can still see what
+    they may choose. The web widget keeps using `format_action_for_whatsapp`.
+    """
+    directive = action_payload.widget_directive or "TEXT_INPUT"
+    field_meta = getattr(action_payload, "field_meta", None) or {}
+    options = [
+        str(o).strip()
+        for o in (field_meta.get("options") or [])
+        if isinstance(o, str) and str(o).strip()
+    ]
+    if not options:
+        options = [
+            str(o.get("label") or o.get("value") or "").strip()
+            for o in (field_meta.get("options") or [])
+            if isinstance(o, dict) and str(o.get("label") or o.get("value") or "").strip()
+        ]
+    prepared = format_action_for_whatsapp(action_payload)
+    body = str(prepared.get("body") or "")
+
+    # Time slots are listed: the customer has to see them to reply with one.
+    #
+    # Dates are NOT listed. The date step states the booking window in words
+    # (see the WhatsApp date step in the orchestrator) because a list of day
+    # names reads as a menu, and any day on it can still turn out to be full
+    # -- the customer picks from the menu and is then told the day is
+    # unavailable. The horizon and the closed-day note are what they need.
+    if options and directive == "REQUIRE_TIME_SLOT_GRID":
+        line = "Available times: " + " · ".join(options[:10])
+        extra = len(options) - 10
+        if extra > 0:
+            line += f"\n…and {extra} more."
+        if "available times" not in body.lower():
+            body = f"{body}\n\n{line}".strip()
+
+    if directive in ("REQUIRE_OTP_MODAL", "BOOKING_CONFIRMED_CARD"):
+        return {"type": "text", "body": body}
+    if directive in ("REQUEST_CONFIRMATION", "BOOKING_SUMMARY_CARD"):
+        return {
+            "type": "text",
+            "body": f"{body}\n\nReply CONFIRM to confirm or CHANGE to modify.".strip(),
+        }
+    return {"type": "text", "body": body}
+
+
 def format_action_for_whatsapp(action_payload) -> dict:
     """
     Convert an ActionPayload into a WhatsApp-friendly message dict.

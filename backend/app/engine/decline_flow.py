@@ -98,6 +98,82 @@ def is_reengage_request(message_text: str) -> bool:
     return any(re.search(p, text, re.IGNORECASE) for p in _REENGAGE_PATTERNS)
 
 
+# An interrogative clause. Deliberately a CLOSE-DATA shape, not just "ends
+# with ?": "I don't want to book, ok?" is a pure decline, while
+# "I don't want to book appointment. Can you tell me about the services"
+# contains a genuine question in its second clause.
+_QUESTION_CLAUSE_RE = re.compile(
+    r"\b(?:who|what|when|where|why|how|which|whose|whom)\b"
+    r"|\b(?:can|could|would|do|does|did|is|are|was|will)\s+(?:you|there|it|i|we)\b"
+    r"|\b(?:tell|show|list|explain|describe)\s+me\b"
+    r"|\bany\s+(?:idea|information|details)\b",
+    re.IGNORECASE,
+)
+_CLAUSE_SPLIT_RE = re.compile(r"[.!?\n]+")
+
+
+def carries_knowledge_question(message_text: str) -> bool:
+    """True when a decline-shaped message ALSO asks something answerable.
+
+    A customer frequently sends two things at once:
+
+        "I don't want to book appointment. Can you tell me about the
+         services provided by dotstark"
+
+    `is_no_booking_request` matches the WHOLE message on the first clause, so
+    the decline short-circuit fired and the second sentence was discarded --
+    the customer got "No problem, that's completely okay" and their actual
+    question went unanswered.
+
+    The decline is about BOOKING and the question is about the BUSINESS. They
+    are independent, so the question must be answered on its own merits. This
+    returns True for that shape so the caller can answer it instead of
+    swallowing it.
+
+    A pure decline ("I don't want to book", "no thanks", "changed my mind")
+    has no interrogative clause and returns False, so it still takes the
+    graceful decline path.
+    """
+    text = str(message_text or "").strip()
+    if not text:
+        return False
+    if is_standalone_no(text):
+        return False
+    clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(text) if c.strip()]
+    if len(clauses) < 2:
+        # Single clause: only a real interrogative counts, and "ok?" style tags
+        # do not match _QUESTION_CLAUSE_RE.
+        return bool(clauses and _QUESTION_CLAUSE_RE.search(clauses[0]))
+    # Multi-clause: the question does not have to be the whole point, it only
+    # has to be a separate clause from the refusal.
+    return any(_QUESTION_CLAUSE_RE.search(c) for c in clauses[1:])
+
+
+def question_part(message_text: str) -> str:
+    """The interrogative part of a decline-shaped message, or "" if none.
+
+    "I don't want to book appointment. Can you tell me about the services"
+    -> "Can you tell me about the services"
+
+    Used to feed the ENGINE only the question. The customer's full message is
+    still what gets stored in the transcript, so nothing is lost from the
+    inbox. Without this the LLM reads the whole compound message, treats the
+    refusal as the headline, and answers with another polite decline -- the
+    question is present in the text but absent from the reply.
+    """
+    text = str(message_text or "").strip()
+    if not text:
+        return ""
+    clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(text) if c.strip()]
+    if not clauses:
+        return ""
+    asked = [c for c in clauses if _QUESTION_CLAUSE_RE.search(c)]
+    if not asked:
+        return ""
+    # Prefer later clauses: the refusal normally comes first.
+    return " ".join(asked).strip()
+
+
 def is_declined(chat_session: ChatSessionState) -> bool:
     try:
         collected = chat_session.collected_data or {}
