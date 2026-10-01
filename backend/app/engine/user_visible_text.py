@@ -13,6 +13,64 @@ _REASONING_LEAK_RE = re.compile(
 )
 _FALLBACK_TEXT = "I'm here to help with your booking."
 
+# A booking redirect glued onto the end of an answer. Production symptoms:
+#   "The capital of Japan is Tokyo. Back to your booking, could you please
+#    share a preferred date?"
+#   "I don't have information about that. How about we finish up your
+#    booking instead?"
+#   "I can help you book an appointment though. Would you like to pick a
+#    time for October 8th?"
+# The answer arrives, and is immediately buried under a push. Asking one
+# question should not read as an attempt to resume the booking. Kept here
+# (not in the orchestrator) so both the engine and the transport combiner
+# use the same patterns.
+_BOOKING_REDIRECT_SENTENCE_RE = re.compile(
+    r"(?:(?<=^)|(?<=[.!?]))\s*"
+    r"(?:"
+    r"(?:back|getting)\s+to\s+(?:your|the)\s+booking"
+    r"|for\s+your\s+booking"
+    r"|(?:continue|proceed|resume|finish\s+up)\s+(?:with\s+)?(?:the\s+|your\s+)?booking"
+    r"|(?:would|do)\s+you\s+like\s+to\s+(?:book|schedule|continue|proceed|pick)"
+    r"|how\s+about\s+we\s+(?:finish\s+up|continue|proceed|book)"
+    r"|i\s+can\s+help\s+you\s+book\b"
+    r"|(?:let'?s|shall\s+we)\s+(?:get|set)\s+(?:your\s+\w+\s+)?(?:set\s+up|going|booked)"
+    r"|which\s+date\s+works\s+for\s+you"
+    r"|do\s+you\s+want\s+to\s+(?:book|schedule|proceed)"
+    r"|is\s+there\s+anything\s+i\s+can\s+help\s+you\s+book\b"
+    r"|(?:could|can|would)\s+you\s+please\s+share\s+(?:your\s+)?"
+    r"(?:preferred\s+|booking\s+|appointment\s+)?(?:date|time)"
+    r"|what\s+date\s+would\s+you\s+(?:like|prefer)"
+    r"|please\s+(?:share|provide)\s+your\s+(?:preferred\s+)?(?:date|time)"
+    r"|please\s+choose\s+your\s+preferred\s+date"
+    r"|please\s+share\s+a\s+preferred\s+(?:date|time)"
+    r"|share\s+your\s+(?:preferred\s+)?(?:date|time)"
+    r")"
+    r"[^.!?]*[.!?]?",
+    flags=re.IGNORECASE,
+)
+
+
+def strip_booking_redirect(text: str) -> str:
+    """Remove a "back to your booking" push from an answer.
+
+    Only the redirect is removed, and only when it is a separate sentence.
+    A reply whose entire content IS the redirect is left alone, because the
+    caller then substitutes the standard step prompt instead -- removing it
+    there would leave the customer with nothing.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return raw
+    cleaned = _BOOKING_REDIRECT_SENTENCE_RE.sub("", raw)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    # A short answer plus a push is still an answer. The length floor here is
+    # deliberately much lower than the refusal path's: a complete answer can
+    # be one sentence ("The capital of Japan is Tokyo."), and falling back to
+    # the original would put the push straight back in front of the customer.
+    if len(cleaned) < 20:
+        return raw
+    return cleaned
+
 # Structural keys of our LLM contract. Their presence means "this was meant
 # to be a machine payload" — never business content, safe to key on.
 _RESPONSE_KEYS = (
@@ -241,8 +299,13 @@ def extract_user_visible_text(raw_message: Any) -> Tuple[str, Dict[str, Any]]:
             value = parsed_payload.get(key)
             if isinstance(value, str) and value.strip():
                 return sanitize_user_visible_text(value), parsed_payload
-        if looked_like_json_object:
-            return sanitize_user_visible_text(raw_message), parsed_payload
+        # Parsed as machine JSON but contains no human reply (e.g. only an
+        # extracted_fields fragment salvaged from a malformed array payload
+        # like '[\n "response_text": ...'). Never render the raw structure:
+        # production sent such a fragment verbatim to a customer. Fall
+        # through to the repair/debris handling below, which ends in the
+        # safe fallback when nothing human is recoverable.
+        parsed_payload = {}
 
     # Malformed payload (e.g. missing opening brace): salvage the reply.
     if not parsed_payload and isinstance(raw_message, str):
@@ -258,5 +321,14 @@ def extract_user_visible_text(raw_message: Any) -> Tuple[str, Dict[str, Any]]:
         return sanitize_user_visible_text(""), {}
 
     if looked_like_json_object:
-        return sanitize_user_visible_text(raw_message), parsed_payload
+        # Brace text that parsed as neither an object with a reply nor
+        # salvageable debris (e.g. json.loads failed above). Still machine
+        # structure, never customer prose.
+        return sanitize_user_visible_text(""), {}
+
+    if not isinstance(raw_message, str):
+        # A dict/list payload with no reply key is machine structure, not
+        # prose; str() of it would leak Python repr formatting to chat.
+        return sanitize_user_visible_text(""), {}
+
     return sanitize_user_visible_text(raw_message), parsed_payload

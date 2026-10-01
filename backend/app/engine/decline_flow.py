@@ -251,6 +251,29 @@ async def clear_decline(
         return False
 
 
+async def record_decline(
+    db: AsyncSession,
+    chat_session: ChatSessionState,
+) -> bool:
+    """Latch a decline without replying (mixed decline+question turns).
+
+    The caller answers the question on its merits; this only records the
+    state so no further field interrogation happens. Returns True if the
+    latch was newly set. No message-text inspection here by design — the
+    caller decides from the LLM's verdict, never from words.
+    """
+    try:
+        collected = dict(chat_session.collected_data or {})
+        if collected.get(BOOKING_DECLINED_KEY):
+            return False
+        collected[BOOKING_DECLINED_KEY] = True
+        chat_session.collected_data = collected
+        await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+        return True
+    except Exception:
+        return False
+
+
 def carries_booking_value(message_text: str) -> bool:
     """True when the message holds a concrete booking value (contact/date).
 

@@ -1740,6 +1740,17 @@ async def qr_inbound(    payload: QrInboundPayload,
                 if _broken != _body:
                     wa_msg = dict(wa_msg or {})
                     wa_msg["body"] = _broken[:4096]
+                    # The engine already saved the pre-nudge text; update the
+                    # saved row so the admin transcript shows exactly what
+                    # the customer received.
+                    try:
+                        from app.crud import chat as _transcript_crud
+
+                        await _transcript_crud.update_latest_agent_message(
+                            db, str(chat_session.session_id), _broken[:4096]
+                        )
+                    except Exception:
+                        pass
         except Exception as _brk_e:
             logger.warning(f"repeat breaker failed open: {_brk_e}")
         logger.info(

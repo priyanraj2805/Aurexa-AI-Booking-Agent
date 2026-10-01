@@ -815,3 +815,38 @@ async def save_human_message(
     await db.commit()
     await db.refresh(msg)
     return msg
+
+
+async def update_latest_agent_message(
+    db: AsyncSession, session_id: str, content: str
+) -> bool:
+    """Replace the content of this session's most recent agent message.
+
+    The repeat circuit breaker (and any other transport-level rewrite)
+    mutates the reply AFTER the engine already saved it, so without this
+    the admin transcript shows a different text than the customer received.
+    Returns True when a row was updated. Fail-open: never raises.
+    """
+    try:
+        row = (
+            await db.execute(
+                select(ChatMessage)
+                .where(
+                    ChatMessage.session_id == uuid.UUID(str(session_id)),
+                    ChatMessage.role == "agent",
+                )
+                .order_by(ChatMessage.created_at.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+        if row is None:
+            return False
+        row.content = content
+        await db.commit()
+        return True
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return False

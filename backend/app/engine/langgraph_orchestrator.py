@@ -265,56 +265,13 @@ _COURTESY_PREFIX_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
-# A booking redirect glued onto the end of an answer. Production symptom: a
-# customer asked what the capital of Japan is and got
-#   "The capital of Japan is Tokyo. Back to your booking, could you please
-#    share a preferred date?"
-# The answer arrived, and was immediately buried under a push. Asking one
-# question should not read as an attempt to resume the booking. The step is
-# still re-asked on the next turn, which is enough.
-_BOOKING_REDIRECT_SENTENCE_RE = re.compile(
-    r"(?:(?<=^)|(?<=[.!?]))\s*"
-    r"(?:"
-    r"(?:back|getting)\s+to\s+(?:your|the)\s+booking"
-    r"|for\s+your\s+booking"
-    r"|(?:continue|proceed|resume)\s+(?:with\s+)?(?:the\s+|your\s+)?booking"
-    r"|(?:would|do)\s+you\s+like\s+to\s+(?:book|schedule|continue|proceed)"
-    r"|(?:let'?s|shall\s+we)\s+(?:get|set)\s+(?:your\s+\w+\s+)?(?:set\s+up|going|booked)"
-    r"|which\s+date\s+works\s+for\s+you"
-    r"|do\s+you\s+want\s+to\s+(?:book|schedule|proceed)"
-    r"|(?:could|can|would)\s+you\s+please\s+share\s+(?:your\s+)?"
-    r"(?:preferred\s+|booking\s+|appointment\s+)?(?:date|time)"
-    r"|what\s+date\s+would\s+you\s+(?:like|prefer)"
-    r"|please\s+(?:share|provide)\s+your\s+(?:preferred\s+)?(?:date|time)"
-    r"|please\s+choose\s+your\s+preferred\s+date"
-    r"|please\s+share\s+a\s+preferred\s+(?:date|time)"
-    r"|share\s+your\s+(?:preferred\s+)?(?:date|time)"
-    r")"
-    r"[^.!?]*[.!?]?",
-    flags=re.IGNORECASE,
+# Shared with the transport combiner (whatsapp_client.attach_knowledge_answer)
+# via app.engine.user_visible_text.strip_booking_redirect, so engine and
+# transport strip the same redirect phrasings. Thin wrapper kept because
+# existing tests import this name from here.
+from app.engine.user_visible_text import (
+    strip_booking_redirect as _strip_booking_redirect,
 )
-
-
-def _strip_booking_redirect(text: str) -> str:
-    """Remove a trailing "back to your booking" push from an answer.
-
-    Only the redirect is removed, and only when it is a separate sentence.
-    A reply whose entire content IS the redirect is left alone, because the
-    caller then substitutes the standard step prompt instead -- removing it
-    there would leave the customer with nothing.
-    """
-    raw = str(text or "").strip()
-    if not raw:
-        return raw
-    cleaned = _BOOKING_REDIRECT_SENTENCE_RE.sub("", raw)
-    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
-    # A short answer plus a push is still an answer. The length floor here is
-    # deliberately much lower than the refusal path's: a complete answer can
-    # be one sentence ("The capital of Japan is Tokyo."), and falling back to
-    # the original would put the push straight back in front of the customer.
-    if len(cleaned) < 20:
-        return raw
-    return cleaned
 
 
 # Internal vocabulary never shown to a customer. Removed from whatever
@@ -1476,13 +1433,15 @@ async def process_message_with_graph(
             db, org, org_config, chat_session, message_text, background_tasks
         )
 
-    # Booking decline: an explicit "don't want to book" exits gracefully
-    # instead of being interrogated for fields. (Cancel turns already
-    # returned above, so this never swallows a cancellation.)
-    if decline_flow.is_no_booking_request(message_text):
-        return await decline_flow.start_decline(
-            db, org, chat_session, message_text, inbound_message_id=_inbound_id
-        )
+    # Booking decline is decided SOLELY by the LLM's classification
+    # (user_intent == decline_booking), applied after the graph runs below.
+    # No keyword/regex inspection of message_text happens here — the model
+    # reads the actual meaning, in any language. The regex pre-check that
+    # used to live here refused customers before the agent ever saw their
+    # message: "No. Is 7777723415" died on the "No" and its phone number
+    # was lost, and non-English input never survived to extraction.
+    # Field refusals ("No" to a pending field) are handled by the
+    # field-refusal path, not by refusing the booking.
     # Off-topic cooldown: after a run of questions the assistant cannot help
     # with, pause the session briefly. Checked before anything else so the
     # message is answered without burning an LLM call or advancing the
@@ -1519,8 +1478,9 @@ async def process_message_with_graph(
             field_meta={"cooldown_remaining_seconds": _cd_remaining},
         )
 
-    # Re-engagement clears a recorded decline (values or book-words).
-    await decline_flow.maybe_reengage(db, chat_session, message_text)
+    # Re-engagement is verdict-driven (see the post-graph decline block):
+    # any decisive non-decline verdict clears a latched decline, so
+    # "But i still want to book" always re-engages, in any language.
 
     # Opening greeting: a customer whose FIRST message is their name ("Hi
     # Yash", "Amanpreet Kaur") was told "Hello! Could you please share your
@@ -1960,6 +1920,33 @@ async def process_message_with_graph(
             intent="CANCEL_BOOKING",
         )
         return action
+
+    # Booking decline, driven SOLELY by the LLM's classification
+    # (user_intent == decline_booking). No keyword/regex inspection of
+    # message_text here — the model reads the actual meaning, so paraphrases
+    # and other languages work, and multi-intent turns ("No. Is 7777723415")
+    # keep their booking values (the graph extracts them; only the verdict
+    # matters here). Mirrors the check_booking gate above, which migrated to
+    # verdict-only for the same reason.
+    # A latched decline clears on any decisive non-decline verdict, so
+    # "But i still want to book" always re-engages. An absent verdict (LLM
+    # failure) changes nothing: never refuse on unknown, never resurrect.
+    # "resist" alone never declines: it is ambiguous with field-level
+    # pushback ("No email sorry"), and only the explicit decline_booking
+    # verdict authorises a farewell.
+    _verdict = llm_intent.strip().lower()
+    if _verdict == "decline_booking":
+        if result.get("knowledge_answer"):
+            # Mixed turn (decline + real question): record the decline so no
+            # further interrogation happens, but let the flow continue so the
+            # question is answered on its merits instead of swallowed.
+            await decline_flow.record_decline(db, chat_session)
+        else:
+            return await decline_flow.start_decline(
+                db, org, chat_session, message_text, inbound_message_id=_inbound_id
+            )
+    elif _verdict and decline_flow.is_declined(chat_session):
+        await decline_flow.clear_decline(db, chat_session)
 
     # Existing-booking lookup: driven SOLELY by the LLM's classification
     # (user_intent == check_booking / CHECK_BOOKING). No keyword/regex

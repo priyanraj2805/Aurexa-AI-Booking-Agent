@@ -8,6 +8,7 @@ see wa-gateway/src/send.js for Baileys rendering.
 """
 
 import logging
+import re
 from typing import Dict, List
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,27 @@ def attach_knowledge_answer(action_message: str, directive_body: str) -> str:
     body = str(directive_body or "").strip()
     if not answer or not body:
         return body or answer
+    if answer.lower() in body.lower() or body.lower() in answer.lower():
+        return body
+    # Strip a booking push from the answer first, using the same patterns as
+    # the engine. Production: the engine's message was ONLY the push
+    # ("Is there anything I can help you book, check or reschedule?"), so
+    # combining it with the decline (which ends in the same sentence) sent
+    # the call-to-action twice in one message. An answer with no content
+    # beyond the push is dropped and the step body goes out alone.
+    try:
+        from app.engine.user_visible_text import (
+            _BOOKING_REDIRECT_SENTENCE_RE as _push_re,
+            strip_booking_redirect as _strip_push,
+        )
+
+        answer = _strip_push(answer)
+        content_only = _push_re.sub("", answer)
+        content_only = re.sub(r"[ \t]{2,}", " ", content_only).strip()
+        if len(content_only) < 20:
+            return body
+    except Exception:
+        pass
     if answer.lower() in body.lower() or body.lower() in answer.lower():
         return body
     return f"{answer}\n\n{body}"[:4096]

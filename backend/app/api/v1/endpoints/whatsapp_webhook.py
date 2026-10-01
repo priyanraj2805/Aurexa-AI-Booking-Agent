@@ -1159,6 +1159,16 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                     if _broken_c != _body_c:
                         wa_msg = dict(wa_msg or {})
                         wa_msg["body"] = _broken_c[:4096]
+                        # The engine already saved the pre-nudge text; update
+                        # the saved row so the admin transcript shows exactly
+                        # what the customer received.
+                        try:
+                            await crud_chat.update_latest_agent_message(
+                                db, str(chat_session.session_id),
+                                _broken_c[:4096],
+                            )
+                        except Exception:
+                            pass
             except Exception as _brk_c:
                 logger.warning(f"repeat breaker failed open (cloud): {_brk_c}")
             sent = await whatsapp_cloud.send_booking_reply(from_phone, wa_msg)

@@ -1092,13 +1092,40 @@ async def call_model(
             # ..." from Azure chunks that never mention physiotherapy -- the
             # retrieval gate passed them on the generic verb "offer", and
             # nothing downstream ever checked the answer itself.
+            # Scoped to knowledge questions only: a conversational turn
+            # ("go on", "thanks") legitimately overlaps nothing, and
+            # verifying it replaced a harmless acknowledgement with a
+            # decline.
             try:
                 from app.engine.knowledge_guards import (
                     verify_knowledge_answer as _verify_kb_answer,
                 )
 
                 _verify_chunks = locals().get("rag_chunks") or []
-                if _verify_chunks and not _otp_pending_now:
+                # Only questions with something distinctive to ground can be
+                # verified: "still there?" or "thanks" carry no 6+ letter
+                # query word, so there is nothing to check the answer
+                # against and verifying would replace harmless chat with
+                # a decline. Same distinctive-word rule as the retrieval
+                # gate above, applied to the question side.
+                _verify_distinctive = False
+                try:
+                    from app.engine.knowledge_guards import (
+                        content_words as _kb_qwords,
+                    )
+
+                    _verify_distinctive = bool({
+                        w for w in _kb_qwords(retrieval_query or "")
+                        if len(w) >= 6
+                    })
+                except Exception:
+                    _verify_distinctive = True
+                if (
+                    _verify_chunks
+                    and not _otp_pending_now
+                    and _verify_distinctive
+                    and _is_potential_knowledge_question(latest_user_message or "")
+                ):
                     _verify_visible, _ = _extract_visible(str(response.content))
                     _verify_ok, _verify_reason = _verify_kb_answer(
                         _verify_visible, _verify_chunks
