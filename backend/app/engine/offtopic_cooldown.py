@@ -5,9 +5,11 @@ forever, and burn an LLM call each time. After a run of off-topic questions
 the session is briefly paused so the cost and the noise stop.
 
 Rules:
-  * N consecutive off-topic questions start a 15 MINUTE cooldown
-  * while cooling down, ANY inbound message is answered with one short
-    "you're still in cooldown" line and nothing else is processed
+   * N consecutive off-topic questions start a 5 MINUTE cooldown
+   * while cooling down, chatter is answered with one short "you're still
+     in cooldown" line — but a message that validates as a pending booking
+     field ENDS the pause immediately and is processed normally, so a
+     customer who is actually booking is never punished
   * a single on-topic turn (booking or a knowledge answer) resets the strike
     counter, so a customer who is actually booking is never punished. It does
     NOT end an already-running pause; only the clock does that.
@@ -27,10 +29,10 @@ _UNTIL_KEY = "_offtopic_cooldown_until"
 # real customer is not left waiting through repeated failures.
 STRIKE_LIMIT = 3
 
-COOLDOWN_SECONDS = 15 * 60  # 15 minutes
+COOLDOWN_SECONDS = 5 * 60  # 5 minutes
 
-# Reply in whole minutes rather than counting down 900 seconds, which reads
-# like a system error. Reported as "14 minutes", then "13 minutes", etc.
+# Reply in whole minutes rather than counting down raw seconds, which reads
+# like a system error. Reported as "4 minutes", then "3 minutes", etc.
 _SECONDS_PER_MINUTE = 60
 
 # Seconds are stored as wall-clock floats. A message arriving after the window
@@ -323,8 +325,9 @@ def cooldown_message(remaining: int) -> str:
 
     Deliberately different from the opening line: "still" tells the customer
     this is ongoing, not new. The wait is reported in whole minutes, because
-    a raw seconds count on a 15 minute pause reads like a malfunction rather
-    than a deliberate wait.
+    a raw seconds count reads like a malfunction rather than a deliberate
+    wait. Booking data sent during the pause ends it (see
+    ``booking_data_release``) and never receives this reply.
     """
     seconds = max(1, int(remaining or 0))
     minutes = (seconds + _SECONDS_PER_MINUTE - 1) // _SECONDS_PER_MINUTE
@@ -517,4 +520,133 @@ def account_offtopic_turn(
     record_offtopic(collected_data)
     if not already_cooling and is_cooling_down(collected_data):
         return cooldown_opening_message()
+    return None
+
+
+def end_cooldown(data: dict | None) -> None:
+    """End a cooldown pause AND reset the strike counter.
+
+    Unlike :func:`clear` (which deliberately keeps an active window), this
+    is the explicit "customer proved they are booking" exit: booking data
+    always wins over the pause. Only call after the inbound message was
+    validated as a real pending-field value (see ``booking_data_release``).
+    """
+    if not isinstance(data, dict):
+        return
+    data.pop(_COUNT_KEY, None)
+    data.pop(_UNTIL_KEY, None)
+
+
+# Free-text field types where any sentence would validate. A rescue attempt
+# on these must look like a bare value, never a question or a sentence, or
+# trivia ("what is the capital of France?") would end the pause as "name".
+_RESCUE_TEXT_MAX_WORDS = 3
+
+_NAME_BY_FIELD = {
+    "email": "email",
+    "phone": "phone",
+    "date": "date",
+    "time": "time",
+}
+
+
+def _rescue_field_type(name: str, fd_map: dict) -> str:
+    """Field type for rescue ordering (structured fields validate first)."""
+    try:
+        fd = (fd_map or {}).get(name)
+        ftype = str(getattr(fd, "type", "") or "").lower() if fd else ""
+    except Exception:
+        ftype = ""
+    if not ftype:
+        ftype = _NAME_BY_FIELD.get(str(name).lower(), "text")
+    return ftype
+
+
+def _looks_like_date_or_time_text(text: str, timezone: str = "UTC") -> bool:
+    """True when the text parses as a date or a time via the validators."""
+    try:
+        from app.engine.validators import DataValidator
+
+        valid_date, _ = DataValidator._validate_date(text, timezone or "UTC")
+        if valid_date:
+            return True
+        valid_time, _ = DataValidator._validate_time(text)
+        return bool(valid_time)
+    except Exception:
+        return False
+
+
+def booking_data_release(
+    collected_data: dict | None,
+    message_text: str | None,
+    missing_fields=None,
+    field_definitions=None,
+    timezone: str = "UTC",
+    max_booking_days: int = 90,
+) -> str | None:
+    """Return the missing field the message validates as, else None.
+
+    Deterministic (no LLM): the raw message is validated with
+    :class:`DataValidator` against each currently-missing field. A hit means
+    the customer sent real booking data mid-cooldown, so the caller should
+    :func:`end_cooldown` and process the turn normally instead of freezing
+    it. Questions and sentences never qualify.
+    """
+    text = str(message_text or "").strip()
+    if not isinstance(collected_data, dict) or not text or len(text) > 200:
+        return None
+    if looks_like_an_off_topic_question(text):
+        return None
+    missing = [
+        m
+        for m in list(missing_fields or [])
+        if m and not str(m).startswith("_offtopic_")
+    ]
+    if not missing:
+        return None
+    try:
+        from app.engine.validators import DataValidator
+    except Exception:
+        return None
+    words = text.split()
+    fd_map = {}
+    try:
+        fd_map = {fd.name: fd for fd in list(field_definitions or [])}
+    except Exception:
+        fd_map = {}
+    digits = sum(1 for ch in text if ch.isdigit())
+    structured_claim = (
+        "@" in text
+        or digits >= 7
+        or _looks_like_date_or_time_text(text, timezone)
+    )
+    # Structured fields first: "arjun.nair@example.com" validates as a name
+    # too (letters, no digits), so free text must never swallow structured
+    # data — and must not claim it either (an email is not a name).
+    ordered = sorted(
+        missing,
+        key=lambda name: (
+            1
+            if _rescue_field_type(name, fd_map) in ("text", "textarea", "name", "")
+            else 0
+        ),
+    )
+    for name in ordered:
+        ftype = _rescue_field_type(name, fd_map)
+        if ftype in ("text", "textarea", "name", "") and (
+            len(words) > _RESCUE_TEXT_MAX_WORDS or structured_claim
+        ):
+            continue
+        try:
+            result = DataValidator.validate_entities(
+                {name: text},
+                list(field_definitions or []) or None,
+                timezone or "UTC",
+                int(max_booking_days or 90),
+            )
+            valid = result[0] if isinstance(result, tuple) else {}
+        except Exception:
+            continue
+        if valid:
+            return name
     return None

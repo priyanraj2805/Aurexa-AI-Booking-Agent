@@ -224,6 +224,8 @@ class LLMOrchestrator:
         field_definitions: Optional[list] = None,
         org_id: Optional[str] = None,
         db: Optional[Any] = None,
+        business_name: Optional[str] = None,
+        org_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Unified Orchestration Call.
@@ -259,6 +261,8 @@ class LLMOrchestrator:
             persona=persona,
             field_definitions=field_definitions,
             rag_context=rag_context,
+            business_name=business_name,
+            org_name=org_name,
         )
 
         result = await self._call_llm(

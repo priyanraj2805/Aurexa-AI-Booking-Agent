@@ -577,6 +577,12 @@ class TestLLMBeatsKeywords:
         spy = AsyncMock(return_value=ActionPayload(
             message="resent", widget_directive="REQUIRE_OTP_MODAL"))
         monkeypatch.setattr(message_processor, "_handle_otp_resend", spy)
+        # No SMTP in the test env: mock the mailer so the fresh OTP send
+        # succeeds (same pattern as test_booking_otp_context_guard.py).
+        monkeypatch.setattr(
+            "app.core.mail.send_otp_email",
+            AsyncMock(return_value={"success": True, "status": "sent"}),
+        )
         action = await message_processor.process_message(
             db_session, org, cfg, sess, "yes send it")
         assert spy.await_count == 0

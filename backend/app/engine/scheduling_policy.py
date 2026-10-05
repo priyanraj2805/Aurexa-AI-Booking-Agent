@@ -873,12 +873,40 @@ async def lookup_available_dates(
             "effective_timezone": biz_tz,
         }
     labels = [d.strftime("%a, %b %d") for d in found]
-    return {
-        "response_text": (
+    # Horizon wording (never a day menu): a list of day names reads as a
+    # menu, and any day on it can still turn out full — the customer picks
+    # from it and is then told the day is unavailable. The horizon window
+    # cannot go stale between being sent and being used. The day labels
+    # stay in the payload for transports that render their own pickers.
+    try:
+        from app.engine.message_processor import (
+            _format_available_dates_for_prompt as _horizon_text,
+        )
+        from app.engine.message_processor import (
+            fetch_closed_weekdays as _closed_days,
+        )
+
+        try:
+            _closed = await _closed_days(db, org_uuid)
+        except Exception:
+            _closed = []
+        _response_text = _horizon_text(
+            biz_tz, int(horizon_days or 60), closed_weekdays=_closed
+        )
+    except Exception:
+        _response_text = (
             "Here are our next available dates: "
             + " · ".join(labels)
             + f". (All dates in {biz_tz}.)"
-        ),
+        )
+    if not str(_response_text or "").strip():
+        _response_text = (
+            "Here are our next available dates: "
+            + " · ".join(labels)
+            + f". (All dates in {biz_tz}.)"
+        )
+    return {
+        "response_text": _response_text,
         "status": "ok",
         "source": "availability",
         "available_dates": [d.isoformat() for d in found],

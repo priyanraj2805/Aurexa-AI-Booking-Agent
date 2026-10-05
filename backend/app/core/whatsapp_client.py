@@ -52,6 +52,40 @@ def attach_knowledge_answer(action_message: str, directive_body: str) -> str:
     return f"{answer}\n\n{body}"[:4096]
 
 
+def _repeat_escalation(body: str, chat_session, count: int) -> str:
+    """Reframed handoff for the 3rd+ consecutive identical reply.
+
+    Returning ``body`` again would show the customer the same text for the
+    third turn running — the exact "stuck bot" complaint. Instead the reply
+    is reframed around what is still needed (from missing_fields when
+    available), rotating phrasing by count so even the escalation never
+    repeats byte-identically twice in a row. The stored last-body is left
+    untouched, so genuine progress still resets the loop.
+    """
+    need = ""
+    try:
+        missing = getattr(chat_session, "missing_fields", None) or []
+        first = next(
+            (m for m in missing if m and not str(m).startswith("_")), None
+        )
+        if first:
+            need = f" I still need your {str(first).replace('_', ' ')} to move forward."
+    except Exception:
+        need = ""
+    if int(count or 0) <= 2:
+        return (
+            body
+            + "\n\nWe seem to be going in circles here —"
+            + need
+            + " Reply HUMAN to reach a person, or try saying it in different words."
+        )
+    return (
+        "Still stuck on my end —"
+        + need
+        + " A person can pick this up right away if you reply HUMAN."
+    )
+
+
 async def break_identical_repeat(db, chat_session, body: str) -> str:
     """Circuit breaker for constant-answer loops.
 
@@ -60,7 +94,11 @@ async def break_identical_repeat(db, chat_session, body: str) -> str:
     repeat gets a one-time escape hatch appended so the user can reach a
     human or rephrase — instead of reading the same message forever.
     Nudges once per session to avoid nagging; different replies reset it.
-    Fail-open: any error returns the body untouched.
+
+    A 3rd+ consecutive identical reply is reframed (never repeated
+    verbatim): the customer already saw the same text twice, so a third
+    copy reads as a broken bot. Fail-open: any error returns the body
+    untouched.
     """
     try:
         if not (body or "").strip():
@@ -86,6 +124,14 @@ async def break_identical_repeat(db, chat_session, body: str) -> str:
                     + "\n\nIf I'm repeating myself, sorry — reply HUMAN to reach "
                       "a person, or ask me anything in your own words."
                 )
+            if count >= 2:
+                escalated = _repeat_escalation(body, chat_session, count)
+                try:
+                    await crud_chat.update_chat_session(
+                        db, str(chat_session.session_id), chat_session)
+                except Exception:
+                    pass
+                return escalated
             try:
                 await crud_chat.update_chat_session(
                     db, str(chat_session.session_id), chat_session)
@@ -151,13 +197,9 @@ def format_action_for_whatsapp_text_only(action_payload) -> dict:
         if "available times" not in body.lower():
             body = f"{body}\n\n{line}".strip()
 
-    if directive in ("REQUIRE_OTP_MODAL", "BOOKING_CONFIRMED_CARD"):
-        return {"type": "text", "body": body}
-    if directive in ("REQUEST_CONFIRMATION", "BOOKING_SUMMARY_CARD"):
-        return {
-            "type": "text",
-            "body": f"{body}\n\nReply CONFIRM to confirm or CHANGE to modify.".strip(),
-        }
+    # Every directive goes out verbatim: the engine message already tells
+    # the customer what to do, and anything appended here reaches the
+    # customer but never the admin transcript.
     return {"type": "text", "body": body}
 
 

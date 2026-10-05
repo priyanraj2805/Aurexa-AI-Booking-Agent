@@ -174,6 +174,41 @@ def _digits_only(value: str) -> str:
     return re.sub(r"\D", "", value or "")
 
 
+# RFC 2606 reserved documentation domains — can never be a real address.
+# Bots use them as illustrative examples ("like name@example.com"); masking
+# one as [hidden] destroys the example while protecting nothing.
+_PLACEHOLDER_EMAIL_DOMAINS = frozenset(
+    {"example.com", "example.org", "example.net"}
+)
+
+
+def _is_placeholder_entity(candidate: str, kind: str) -> bool:
+    """True when a matched entity is demonstrably a placeholder, not data.
+
+    Only shapes that cannot be real are exempt — a genuinely invented
+    contact number/address must still be masked. Checked BEFORE the
+    allow-list comparison so placeholders pass regardless of materials.
+    """
+    text = str(candidate or "").strip()
+    if not text:
+        return False
+    if kind == "email":
+        domain = text.rsplit("@", 1)[-1].strip().lower() if "@" in text else ""
+        return domain in _PLACEHOLDER_EMAIL_DOMAINS
+    if kind == "phone":
+        digits = _digits_only(text)
+        if len(digits) < 7:
+            # Too short to be a real number — a dial fragment, not data.
+            return True
+        if digits and len(set(digits)) == 1:
+            return True
+        # 555-XXXX fictional range used in examples ("+1 (555) 000-0000").
+        if "555" in digits:
+            return True
+        return False
+    return False
+
+
 def _digit_groups(text: str) -> Set[str]:
     """Digit groups for the ALLOWED side, tokenized exactly like candidates.
 
@@ -277,6 +312,8 @@ def find_unlisted_entities(
         pattern, digit_compare = entry
         for match in pattern.finditer(answer or ""):
             candidate = match.group(0).strip()
+            if _is_placeholder_entity(candidate, kind):
+                continue
             if _missing(candidate, digit_compare=digit_compare):
                 if candidate not in found:
                     found.append(candidate)

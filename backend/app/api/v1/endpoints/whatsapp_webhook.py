@@ -999,7 +999,9 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                             _summary = str(getattr(action, "message", "") or "").strip()
                             if _summary and _summary not in _parts:
                                 _parts.append(_summary)
-                            _parts.append("Reply CONFIRM to confirm or CHANGE to modify.")
+                            # No appended reply hint: the engine message
+                            # already instructs, and appended transport text
+                            # never reaches the admin transcript.
                         _body = "\n\n".join(_parts).strip()
                         # Same knowledge-answer combine as the QR transport:
                         # never drop the engine's answer behind the step.

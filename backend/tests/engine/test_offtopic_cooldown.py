@@ -1,11 +1,11 @@
 ﻿"""Off-topic cooldown guardrail.
 
-Three off-topic questions in a row pause the session for 15 MINUTES (the module
-docstring used to say 15 seconds). While paused, any message gets one short
-line and nothing else is processed. A real booking step or a real knowledge
-answer resets the strike counter, so a customer who comes back to actually book
-is never punished for earlier questions -- but an ACTIVE pause is ended by the
-clock, never by a single good turn.
+Three off-topic questions in a row pause the session for 5 MINUTES. While
+paused, chatter gets one short line and nothing else is processed -- but a
+message that validates as a pending booking field ENDS the pause immediately
+(booking_data_release) and is processed normally. A real booking step or a
+real knowledge answer resets the strike counter, so a customer who comes
+back to actually book is never punished for earlier questions.
 """
 import time
 
@@ -160,8 +160,10 @@ def test_off_topic_questions_are_not_mistaken_for_company_questions(question: st
 # â”€â”€ the message â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def test_cooldown_is_fifteen_minutes() -> None:
-    """Requested change: the pause is 15 minutes, not 15 seconds."""
-    assert COOLDOWN_SECONDS == 900
+    """The pause is 5 minutes: long enough to stop cost/noise burn, short
+    enough that a real customer is not stranded (booking data ends it
+    immediately via booking_data_release)."""
+    assert COOLDOWN_SECONDS == 300
 
 
 @pytest.mark.parametrize(
@@ -194,9 +196,9 @@ def test_opening_and_ongoing_messages_are_distinct() -> None:
     opening = cooldown_opening_message()
     assert "still" not in opening.lower()
     assert "cooldown" in opening.lower()
-    assert "15 minutes" in opening
+    assert "5 minutes" in opening
 
-    ongoing = cooldown_message(899)
+    ongoing = cooldown_message(299)
     assert "still" in ongoing.lower()
     assert "cooldown" in ongoing.lower()
 
@@ -316,4 +318,80 @@ def test_real_knowledge_answers_are_not_declines(reply: str) -> None:
     left the customer one question away from an unwanted cooldown.
     """
     assert looks_like_decline(reply) is False
+
+
+# ── booking-data rescue ───────────────────────────────────────────────
+
+
+def _rescue_fds():
+    from app.schemas.agent import parse_field_definitions
+
+    return parse_field_definitions(None)
+
+
+def _rescue_missing():
+    return ["name", "email", "phone", "date", "time"]
+
+
+def test_booking_data_release_accepts_bare_field_values() -> None:
+    """A customer who sends real booking data mid-cooldown must be rescued.
+
+    Regression: a phone number sent during the pause was answered with the
+    cooldown line and never merged — the valid answer was thrown away and
+    the booking stalled.
+    """
+    from app.engine.offtopic_cooldown import booking_data_release
+
+    assert (
+        booking_data_release(
+            {},
+            "arjun.nair@example.com",
+            missing_fields=_rescue_missing(),
+            field_definitions=_rescue_fds(),
+        )
+        == "email"
+    )
+    assert (
+        booking_data_release(
+            {},
+            "+919814732658",
+            missing_fields=_rescue_missing(),
+            field_definitions=_rescue_fds(),
+        )
+        == "phone"
+    )
+
+
+def test_booking_data_release_rejects_questions_and_sentences() -> None:
+    """Trivia and chatter must NOT end the pause (else "what is the capital
+    of France?" would be "rescued" as a name and the guardrail would die)."""
+    from app.engine.offtopic_cooldown import booking_data_release
+
+    for text in (
+        "what is the capital of France?",
+        "who is the prime minister of India",
+        "lol",
+        "I want to know about dotstark services and pricing details please",
+    ):
+        assert (
+            booking_data_release(
+                {},
+                text,
+                missing_fields=_rescue_missing(),
+                field_definitions=_rescue_fds(),
+            )
+            is None
+        )
+
+
+def test_end_cooldown_clears_window_and_counter() -> None:
+    """Rescue ends the pause AND resets strikes (unlike clear(), which keeps
+    an active window by design)."""
+    from app.engine.offtopic_cooldown import end_cooldown
+
+    data: dict = {_COUNT_KEY: 3, _UNTIL_KEY: 9999999999.0}
+    assert is_cooling_down(data) is True
+    end_cooldown(data)
+    assert is_cooling_down(data) is False
+    assert strike_count(data) == 0
 

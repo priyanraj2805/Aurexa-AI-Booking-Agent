@@ -108,15 +108,20 @@ async def test_scan_runs_without_any_question_phrase() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scan_output_keeps_the_human_readable_list() -> None:
+async def test_scan_output_uses_horizon_wording_not_day_menu() -> None:
+    """Customer-facing text is the horizon window ("We are available from
+    ... to ..., please choose a date within this horizon."), never a day
+    menu — a listed day can still turn out full by the time it is picked.
+    The machine-readable day labels stay in the payload for pickers."""
     db = _FakeDB(sched_row=_sched_row())
     answer = await lookup_available_dates(
         db=db, org_id=ORG_ID, effective_timezone="UTC", org_timezone="UTC"
     )
     text = answer["response_text"]
-    assert text.startswith("Here are our next available dates: ")
-    assert MIDDOT in text
+    assert "Here are our next available dates" not in text
+    assert "within this horizon" in text
     assert "(All dates in UTC.)" in text
+    assert answer["available_date_labels"]
 
 
 @pytest.mark.asyncio
@@ -167,7 +172,9 @@ async def test_every_bookable_day_is_real_calendar_progression() -> None:
     assert all(b > a for a, b in zip(parsed, parsed[1:]))
     assert all(d >= datetime.now(timezone.utc).date() for d in parsed)
     for d in parsed:
-        assert d.strftime("%a, %b %d") in answer["response_text"]
+        # Day labels live in the payload for pickers — the customer-facing
+        # text is the horizon window, never a day menu.
+        assert d.strftime("%a, %b %d") in answer["available_date_labels"]
 
 
 # â”€â”€ what the WhatsApp date step actually shows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

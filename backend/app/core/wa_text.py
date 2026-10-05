@@ -52,46 +52,49 @@ _ALL_CAPS_HEADER_RE = re.compile(r"^[A-Z][A-Z0-9 &'/,\-]{3,}$")
 _BOLD_LINE_RE = re.compile(r"^\s*[*_~]{1,3}\s*$")
 
 
+def _normalize_header_line(line: str) -> str:
+    """Reduce a line to its bare section name for leak matching.
+
+    Strips markdown/WhatsApp wrappers the model adds around echoed headers:
+    leading "##"/"**", trailing colons/decorators, and a model-facing
+    "(annotation)" suffix. Matching is case-insensitive so "Business
+    Hours:" and "**BUSINESS HOURS**" are caught the same as "BUSINESS HOURS".
+    """
+    candidate = line.strip()
+    candidate = re.sub(r"^[#*_\-~>]+\s*", "", candidate)
+    candidate = re.sub(r"\s*[:*_~#\-]+\s*$", "", candidate)
+    annotation = re.match(r"^(.*?)\s*\([^()]*\)\s*$", candidate)
+    if annotation and annotation.group(1).strip():
+        candidate = annotation.group(1).strip()
+    return candidate.strip().upper().replace("'", "")
+
+
 def strip_leaked_headers(text: str) -> str:
     """Remove prompt/template scaffolding that leaked into a reply.
 
-    Only a leading ALL-CAPS line is treated as a leaked header, and only when
-    it matches a known section name or looks like a bare section label. Real
-    sentences keep their capitals, so normal replies are untouched.
-
-    A section name may carry a trailing parenthetical note, e.g.
-    "BUSINESS HOURS (authoritative, answer timing questions from this)". That
-    annotation is aimed at the model, not the customer, and it used to defeat
-    the ALL-CAPS check entirely -- the whole line was then sent to the
-    customer as the opening line of the reply.
+    Any line that matches a known section name (after normalising markdown
+    wrappers, case, trailing colons and "(model annotation)" suffixes) is
+    removed, wherever it sits in the message — production showed these
+    leaking mid-reply, not just as the opening line. Lines that merely look
+    ALL-CAPS but name no known section are left alone, so real sentences
+    keep their capitals and normal replies are untouched.
     """
     if not text:
         return text
     lines = text.split("\n")
-    removed = 0
-    while removed < 2 and lines and not lines[0].strip():
+    while lines and not lines[0].strip():
         lines.pop(0)
-        removed += 1
+    while lines and not lines[-1].strip():
+        lines.pop()
     if not lines:
         return text
-    first = lines[0].strip()
-    if not first:
+    normalized = {_normalize_header_line(line) for line in lines}
+    if not any(name in _LEAKED_HEADERS for name in normalized):
         return text
-    upper = first.upper()
-    if upper in _LEAKED_HEADERS or first.replace("'", "").upper() in _LEAKED_HEADERS:
-        lines.pop(0)
-        return "\n".join(lines)
-    # Section name plus a model-facing annotation in parentheses.
-    annotation = re.match(r"^([A-Z][A-Z0-9 &'/,\-]{2,})\s*\([^()]*\)\s*$", first)
-    if annotation:
-        # The character class is greedy and swallows the space before "(".
-        name = annotation.group(1).strip().upper()
-        if name in _LEAKED_HEADERS or name.replace("'", "") in _LEAKED_HEADERS:
-            lines.pop(0)
-            return "\n".join(lines)
-    if not _ALL_CAPS_HEADER_RE.match(first):
-        return text
-    return "\n".join(lines)
+    kept = [
+        line for line in lines if _normalize_header_line(line) not in _LEAKED_HEADERS
+    ]
+    return "\n".join(kept)
 
 
 def normalize_bold(text: str) -> str:
@@ -220,6 +223,10 @@ def normalize_spacing(text: str) -> str:
             out.append(line)
     text = "\n".join(out)
     text = re.sub(r"[ \t]{3,}", "  ", text)
+    # Stray space before a comma ("appointments ,I") reads broken. It creeps
+    # in when a clause ahead of the comma is stripped upstream, leaving its
+    # trailing space behind. No legitimate text uses " ," so collapse it.
+    text = re.sub(r"[ \t]+,", ",", text)
     return text.strip("\n")
 
 

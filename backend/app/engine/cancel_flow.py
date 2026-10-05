@@ -913,7 +913,14 @@ async def _send_cancel_otp(
     meta["cancel_flow"] = True
     meta["channel"] = _channel
     if _channel == "phone":
-        _masked = _phone[:4] + "***" + _phone[-2:] if len(_phone) > 6 else _phone[:3] + "***"
+        # Star-free mask (see user_visible_text.mask_phone_for_display):
+        # "***" masks were eaten by WhatsApp bold formatting, leaking digits
+        # back together and leaving literal "**" in customer messages.
+        from app.engine.user_visible_text import (
+            mask_phone_for_display as _mask_phone,
+        )
+
+        _masked = _mask_phone(_phone)
         _via = "WhatsApp"
         message = (
             f"I found your appointment — **{slot_label}**. To cancel it, "

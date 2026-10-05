@@ -293,4 +293,7 @@ def test_system_prompt_without_hours_block_has_no_placeholder():
     prompt = build_system_prompt(
         config, [{"name": "name", "type": "text", "required": True}]
     )
-    assert "BUSINESS HOURS" not in prompt
+    # The non-echo rule names the section, but no hours CONTENT block may
+    # leak in when none was provided.
+    assert "## BUSINESS HOURS" not in prompt
+    assert "authoritative — answer" not in prompt

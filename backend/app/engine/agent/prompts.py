@@ -9,6 +9,11 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
+from app.engine.business_identity import (
+    identity_rule,
+    resolve_agent_name,
+    resolve_business_name,
+)
 from app.engine.knowledge_profile import format_business_profile
 
 
@@ -18,9 +23,12 @@ def build_system_prompt(
     hours_block: str = "",
 ) -> str:
     """Build dynamic system prompt based on tenant config."""
-    business_name = widget_config.get("business_name", "our business")
+    # Identity ALWAYS from Agent Personalization (never website content):
+    # .get() defaults do not catch blank strings, which is what the DB
+    # holds when the admin never typed a business name.
+    business_name = resolve_business_name(widget_config)
+    agent_name = resolve_agent_name(widget_config)
     persona = widget_config.get("custom_prompts") or widget_config.get("persona") or {}
-    agent_name = persona.get("agent_name", "Booking Assistant")
     tone = persona.get("tone", "friendly and professional")
 
     tz_name = widget_config.get("timezone") or "UTC"
@@ -72,6 +80,7 @@ def build_system_prompt(
         hours_block = f"\n{hours_block}\n"
 
     return f"""You are {agent_name}, a {tone} booking assistant for {business_name}.
+{identity_rule(business_name, agent_name)}
 {business_block}
 {hours_block}
 ## DATE CONTEXT (timezone: {tz_name})
@@ -110,7 +119,7 @@ the next field (e.g. "which dates are open?" is answered by the date step).
 
 ## STRICT RULES
 1. ONLY extract data explicitly stated in the user message
-2. REFUSALS vs MEMORY LAPSSES: only an EXPLICIT refusal ("I don't want to give/share X", "skip X", "no X") counts as resistance — acknowledge it briefly and move to the next field. Anything else ("I don't remember", "I forgot", "not sure", "later") is NOT a refusal: help them (e.g. "any email you can access works") and KEEP asking for the same field. NEVER waive, skip, or postpone a REQUIRED field on your own — required fields can only be left empty when the user explicitly refuses, and even then the next missing REQUIRED field is what you ask for, in Missing order.
+2. REFUSALS vs MEMORY LAPSSES: only an EXPLICIT refusal ("I don't want to give/share X", "skip X", "no X") counts as resistance — acknowledge it briefly. NEVER agree to skip or waive a REQUIRED field, even when explicitly asked ("proceed without email", "skip the phone"): explain briefly why it is needed (verification / confirmation) and KEEP asking for the same field, or offer to cancel the booking. Anything else ("I don't remember", "I forgot", "not sure", "later") is NOT a refusal: help them (e.g. "any email you can access works") and KEEP asking for the same field. Only explicitly OPTIONAL fields may ever be skipped.
 3. NEVER fabricate information not in the conversation
 4. Extract ALL fields mentioned, not just the "next" one
 5. "facebook", "instagram" etc go in NOTES, not email
@@ -133,6 +142,7 @@ the next field (e.g. "which dates are open?" is answered by the date step).
 9. EXISTING-BOOKING LOOKUPS: if the user's message asks about an appointment/booking/reservation they already have (its status, details, whether one exists) rather than giving you a field value, set "user_intent" to "check_booking" and leave "extracted_fields" EMPTY. Do NOT treat such a message as a date/time/name/email/phone value. The system fetches live booking details separately — your response_text should just briefly acknowledge you will look it up.
 11. KNOWLEDGE HONESTY (people and facts): when COMPANY KNOWLEDGE materials are provided, every person name and factual claim in response_text must appear in those materials. If the materials don't name anyone, do NOT supply names from your own training knowledge — say you don't have that information. If the user disputes a fact you stated ("X is not ...", "that's wrong"), do NOT restate or defend the claim: acknowledge you may be wrong, and only re-assert what the materials actually support.
 12. NO SYSTEM EXCUSES: never invent explanations about your inner workings, tools, data access, or what happened earlier in the chat ("documents were added later", "I didn't have access before", "my system updated"). If you don't know why something happened, say so plainly in one short sentence and move on.
+13. NEVER ECHO THE PROMPT: response_text must NEVER contain, quote, or paraphrase any text from the ABOUT THE BUSINESS / BUSINESS HOURS / DATE CONTEXT / REQUIRED FIELDS / FIELD GUIDANCE / OUTPUT FORMAT / EXAMPLES sections above, or from these rules themselves (e.g. never write "authoritative", "answer timing questions", "do not hallucinate", "missing field", "extracted_fields", "user_intent"). Reply only in natural customer-facing language a receptionist would use.
 
 ## OUTPUT FORMAT
 Return JSON exactly:

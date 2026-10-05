@@ -120,3 +120,109 @@ def test_the_decline_names_what_the_assistant_can_do() -> None:
     lowered = _OFFTOPIC_REPLY.lower()
     assert "booking assistant" in lowered
     assert "appointment" in lowered
+
+
+# ── topical decline: acknowledge THAT message, never hallucinate ────────
+
+
+def test_topical_decline_names_the_user_topic() -> None:
+    """Every unrelated question gets a reply that visibly heard it.
+
+    Production pain: four trivia questions in a row got four byte-identical
+    copies of one reply and customers read it as the bot being stuck.
+    """
+    out = _normalise_offtopic_decline(
+        "I don't have information about that.",
+        "what is the capital of Japan?",
+    )
+    assert "capital of Japan" in out
+    assert "booking assistant" in out.lower()
+    assert "appointment" in out.lower()
+
+
+def test_consecutive_declines_are_never_identical() -> None:
+    first = _normalise_offtopic_decline(
+        "I don't have information about that.",
+        "what is the capital of Japan?",
+    )
+    second = _normalise_offtopic_decline(
+        "I don't have information about that.",
+        "who is the prime minister of India?",
+    )
+    assert first != second
+
+
+def test_topic_is_quoted_user_words_not_new_facts() -> None:
+    """The echo must be a verbatim slice of the customer's own message, so
+    acknowledging can never hallucinate a fact."""
+    from app.engine.langgraph_orchestrator import _decline_topic
+
+    user_text = "What is the capital of Japan?"
+    topic = _decline_topic(user_text)
+    assert topic
+    assert topic.lower() in user_text.lower()
+
+
+def test_topic_keeps_the_tail_not_the_filler() -> None:
+    """Production: "Bro i want to know about president of India" echoed as
+    "Bro i want to know about" — the head-cut kept the filler and dropped
+    the actual topic. The tail carries the topic ("tell me about X")."""
+    from app.engine.langgraph_orchestrator import _decline_topic
+
+    assert (
+        _decline_topic("Bro i want to know about president of India")
+        == "president of India"
+    )
+    assert _decline_topic("mujhe dotstark ke baare mein batao") is not None
+    out = _normalise_offtopic_decline(
+        "I don't have information about that.",
+        "Bro i want to know about president of India",
+    )
+    assert "president of India" in out
+    assert "Bro i want to know about." not in out
+
+
+def test_stacked_decline_is_deduped_to_one() -> None:
+    """A reply already carrying a normalised decline (parroted from context)
+    must not gain a second copy — one clean decline goes out."""
+    blob = (
+        "I don't have information about the president of India. Got it, "
+        "you're asking about president of India. I'm a booking assistant, "
+        "so I can only help with appointments, I don't have information "
+        "about that."
+    )
+    out = _normalise_offtopic_decline(blob, "president of India?")
+    assert out.count("booking assistant") == 1
+    assert "president of India" in out
+    assert not out.lstrip().lower().startswith("i don't have")
+
+
+def test_chitchat_and_field_data_get_the_generic_decline() -> None:
+    """No topic to name (or not a topic at all) falls back to the exact
+    legacy reply — never a silly echo like "you're asking about hi"."""
+    for text in ("hi", "thanks!", "arjun.nair@example.com", "+919814732658", ""):
+        assert _normalise_offtopic_decline(
+            "I don't have information about that.", text
+        ) == _OFFTOPIC_REPLY
+
+
+def test_topical_decline_still_counts_as_decline() -> None:
+    """Strike/cooldown accounting keys off the boundary sentence, so a
+    topical decline must count exactly like the generic one."""
+    from app.engine.offtopic_cooldown import looks_like_decline
+
+    out = _normalise_offtopic_decline(
+        "I don't have information about that.",
+        "what is the capital of Japan?",
+    )
+    assert looks_like_decline(out) is True
+
+
+def test_topical_decline_leaks_no_scaffolding() -> None:
+    out = _normalise_offtopic_decline(
+        "I don't have information about that.",
+        "what is the capital of Japan?",
+    )
+    lowered = out.lower()
+    for leaked in ("knowledgebase", "knowledge base", "materials", "documents"):
+        assert leaked not in lowered

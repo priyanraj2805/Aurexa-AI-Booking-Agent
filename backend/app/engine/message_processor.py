@@ -1032,8 +1032,15 @@ def _build_llm_recovery_message(
     directive: str,
     field_meta: Optional[Dict[str, Any]],
 ) -> str:
+    # Honesty marker first: the model is down and regex fallback is driving,
+    # so the customer is told plainly. "didn't quite catch" is kept because
+    # off-topic accounting keys off it (a recovery ask must still count as a
+    # decline-shaped turn) and the orchestrator's fallback-recovery detector
+    # keys off "temporary issue" (a regex-collected time must survive the
+    # slot-button guard instead of being popped as unselected).
     lead = (
-        "I didn't quite catch that one, but no problem — we can keep going."
+        "I'm having a temporary issue, so I didn't quite catch that one — "
+        "but no problem, we can keep going."
     )
 
     if directive == "REQUIRE_TIME_SLOT_GRID":
@@ -1485,6 +1492,8 @@ async def process_message(
             field_definitions=field_definitions,
             org_id=str(org.id) if org else None,
             db=db,
+            business_name=getattr(org_config, "business_name", None),
+            org_name=getattr(org, "name", None),
         )
 
     intent = unified_result.get("intent", chat_session.current_intent or "PROVIDE_DATA")
@@ -1595,11 +1604,20 @@ async def process_message(
         return action
 
     # ── Decline override (deterministic, pre-LLM classification) ──
-    # An explicit "don't want to book" exits gracefully instead of being
-    # interrogated. Cancellations are excluded inside the helper itself.
+    # ARCHITECTURE (LLM driver, code seatbelt): the LLM owns UNDERSTANDING,
+    # code owns VERIFICATION. So this gate fires ONLY on single-clause,
+    # unambiguous refusals ("no", "not interested") — cheap, exact, instant.
+    # Anything longer ("I don't want to book. Can you tell me about X")
+    # flows to the LLM, which classifies each half properly; guessing intent
+    # with keywords here is exactly how questions got swallowed by farewells.
+    # start_decline itself still acknowledges a question half as a safety net
+    # (verdict path), but the routing decision for mixed turns belongs to
+    # the model, not to regex.
     from app.engine import decline_flow as _decline_flow_gate
 
-    if _decline_flow_gate.is_no_booking_request(message_text):
+    if _decline_flow_gate.is_no_booking_request(
+        message_text
+    ) and not _decline_flow_gate.carries_knowledge_question(message_text):
         return await _decline_flow_gate.start_decline(
             db, org, chat_session, message_text, inbound_message_id=inbound_message_id
         )
@@ -2215,13 +2233,52 @@ async def process_message(
             _fm = next_step.get("field_meta") if isinstance(next_step, dict) else None
             from app.engine import decline_flow as _decline_flow
             from app.engine.user_visible_text import looks_like_json_debris
+            from app.engine.user_visible_text import (
+                looks_like_field_waiver as _waiver_legacy,
+            )
+
+            # Required-field waiver seatbelt (legacy path): the model agreed
+            # to drop a still-missing REQUIRED field ("I can skip the phone
+            # number too"). Same rule as the graph-path guard — replace with
+            # a firm re-ask instead of letting the waiver stand. Optional
+            # waivers pass through untouched.
+            _required_legacy: set = set()
+            try:
+                _required_legacy = {
+                    str(_fd.name)
+                    for _fd in (field_definitions or [])
+                    if bool(getattr(_fd, "required", True))
+                }
+            except Exception:
+                _required_legacy = set()
+            _waived_legacy = bool(
+                _need_field
+                and _waiver_legacy(
+                    llm_generated_msg,
+                    missing_fields=list(chat_session.missing_fields or []),
+                    required_names=_required_legacy,
+                )
+            )
 
             # Debris check: raw JSON containing the field name would fool the
             # cue test into thinking the reply asks for the field.
             _visibly_asks_legacy = _response_asks_for_field(
                 llm_generated_msg, _need_field, (_fm or {}).get("label")
             ) and not looks_like_json_debris(llm_generated_msg)
-            if (
+            if _waived_legacy:
+                _need_label_legacy = str(
+                    ((_fm or {}).get("label") or _need_field or "detail")
+                ).strip().lower()
+                msg = (
+                    f"I'll still need your {_need_label_legacy} — I can't "
+                    f"confirm the booking without it. Could you please share it?"
+                )
+                directive = (
+                    next_step.get("directive", "TEXT_INPUT")
+                    if isinstance(next_step, dict)
+                    else "TEXT_INPUT"
+                )
+            elif (
                 intent in _COLLECTION_INTENTS
                 and _need_field
                 and isinstance(next_step, dict)
@@ -2918,6 +2975,7 @@ async def _handle_booking_flow(
     except Exception as _dup_err:
         logger.warning("duplicate booking guard failed open: %s", _dup_err)
 
+    _verification_revoked_this_turn = False
     if require_otp:
         otp_context_key = _build_otp_context_key(chat_session, fd_map)
         internal_state = _ensure_internal_state(chat_session)
@@ -2926,6 +2984,25 @@ async def _handle_booking_flow(
             chat_session.otp_verified = False
             internal_state.pop("otp_verified_key", None)
             await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+            _verification_revoked_this_turn = True
+
+    # A stale verified flag (set with no matching key — e.g. details changed
+    # after verification, or a flag with no issuance record) plus a message
+    # that is NOT a confirmation must fall back to the review summary: no
+    # fresh code («I've verified the code» is a claim about the past, not a
+    # new confirmation) and no booking. Without this, the revoked flag sent
+    # the flow straight into OTP re-issue and the customer got a code modal
+    # for a booking they never confirmed. A genuine code turn is unaffected:
+    # its key is stored before this runs, so no revocation fires.
+    if (
+        _verification_revoked_this_turn
+        and user_confirmed is False
+        and not (chat_session.missing_fields or [])
+    ):
+        _stale_summary_msg, _stale_summary_directive = _build_confirmation_summary(
+            chat_session, fd_map
+        )
+        return _stale_summary_msg, _stale_summary_directive, None
 
     if require_otp and not chat_session.otp_verified:
         from app.crud.otp import generate_otp, get_otp_policy_metadata, invalidate_otp_delivery

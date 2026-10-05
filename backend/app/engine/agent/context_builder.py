@@ -1,15 +1,21 @@
 from datetime import datetime, timezone
 from typing import Dict, Any, List
 from langchain_core.messages import SystemMessage
+from app.engine.business_identity import (
+    identity_rule,
+    resolve_agent_name,
+    resolve_business_name,
+)
 from app.schemas.agent import FieldDefinition, parse_field_definitions, order_field_definitions
 
 def build_system_prompt(org_config: Dict[str, Any], user_timezone: str = "UTC") -> SystemMessage:
     """
     Build dynamic system prompt based on tenant config.
     """
-    business_name = org_config.get("business_name", "our business")
+    # Identity ALWAYS from Agent Personalization (never website content).
+    business_name = resolve_business_name(org_config)
+    agent_name = resolve_agent_name(org_config)
     persona = org_config.get("persona", {})
-    agent_name = persona.get("agent_name", "Booking Assistant")
     tone = persona.get("tone", "friendly and professional")
     custom_instructions = persona.get("custom_instructions", "")
 
@@ -43,6 +49,7 @@ def build_system_prompt(org_config: Dict[str, Any], user_timezone: str = "UTC") 
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     content = f"""You are {agent_name}, a {tone} booking assistant for {business_name}.
+{identity_rule(business_name, agent_name)}
 
 ## ORG CONTEXT & STRICT RULES
 {custom_instructions}

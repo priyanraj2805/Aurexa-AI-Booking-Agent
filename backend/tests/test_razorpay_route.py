@@ -456,8 +456,8 @@ class TestSettlement:
         linked = _linked(db_session, org_id)
         await db_session.commit()
         state = {"accepted": [], "posts": 0}
-        _mock_client(_transfer_http(state))
-        out = await st.ensure_transfer(db_session, attempt)
+        out = await st.ensure_transfer(
+            db_session, attempt, client=_mock_client(_transfer_http(state)))
         assert out["outcome"] == "created"
         t = out["transfer"]
         assert (t["gross_paise"], t["commission_paise"], t["provider_paise"]) == (100000, 10000, 90000)
@@ -478,9 +478,9 @@ class TestSettlement:
         _linked(db_session, org_id)
         await db_session.commit()
         state = {"accepted": [], "posts": 0}
-        _mock_client(_transfer_http(state))
-        first = await st.ensure_transfer(db_session, attempt)
-        second = await st.ensure_transfer(db_session, attempt)
+        _svc_client = _mock_client(_transfer_http(state))
+        first = await st.ensure_transfer(db_session, attempt, client=_svc_client)
+        second = await st.ensure_transfer(db_session, attempt, client=_svc_client)
         assert first["outcome"] == "created"
         assert second["outcome"] == "existing"
         assert state["posts"] == 1
@@ -501,9 +501,9 @@ class TestSettlement:
                                "source": attempt.razorpay_payment_id, "recipient": linked.razorpay_account_id,
                                "amount": 90000, "currency": "INR", "amount_reversed": 0,
                                "error": {}}],
-                 "posts": 0, "timeout_once": True}
-        _mock_client(_transfer_http(state))
-        out = await st.ensure_transfer(db_session, attempt)
+                  "posts": 0, "timeout_once": True}
+        out = await st.ensure_transfer(
+            db_session, attempt, client=_mock_client(_transfer_http(state)))
         # First call: reconcile GET finds the accepted transfer -> adopted, no POST.
         assert out["outcome"] == "reconciled"
         assert state["posts"] == 0
@@ -517,8 +517,8 @@ class TestSettlement:
         await db_session.commit()
         state = {"accepted": [], "posts": 0, "create_status": "failed",
                  "fail_reason": "insufficient funds"}
-        _mock_client(_transfer_http(state))
-        out = await st.ensure_transfer(db_session, attempt)
+        out = await st.ensure_transfer(
+            db_session, attempt, client=_mock_client(_transfer_http(state)))
         assert out["transfer"]["status"] == "failed"
         assert "insufficient funds" in (out["transfer"]["failure_reason"] or "")
 
@@ -558,14 +558,16 @@ class TestSettlement:
         _linked(db_session, org_id)
         await db_session.commit()
         state = {"accepted": [], "posts": 0}
-        _mock_client(_transfer_http(state))
+        _settle_client = _mock_client(_transfer_http(state))
         pay_id = f"pay_conv_{uuid.uuid4().hex[:8]}"
         first = await st.settle_payment(
             db_session, org_id=org_id,
-            razorpay_order_id=attempt.razorpay_order_id, razorpay_payment_id=pay_id)
+            razorpay_order_id=attempt.razorpay_order_id, razorpay_payment_id=pay_id,
+            client=_settle_client)
         second = await st.settle_payment(
             db_session, org_id=org_id,
-            razorpay_order_id=attempt.razorpay_order_id, razorpay_payment_id=pay_id)
+            razorpay_order_id=attempt.razorpay_order_id, razorpay_payment_id=pay_id,
+            client=_settle_client)
         assert first["outcome"] == "created"
         assert second["outcome"] == "existing"  # webhook-after-verify: no duplicate
         assert state["posts"] == 1
@@ -613,6 +615,11 @@ class TestSettlement:
 class TestOnboardingEndpoints:
     async def _enable(self, monkeypatch):
         monkeypatch.setattr(settings, "RAZORPAY_ROUTE_ENABLED", True)
+        # Endpoints build RouteClient.from_settings(): fail-closed without
+        # platform credentials, so tests inject fakes (no real HTTP — all
+        # Route calls are mocked per test).
+        monkeypatch.setattr(settings, "RAZORPAY_KEY_ID", "rzp_test_platform")
+        monkeypatch.setattr(settings, "RAZORPAY_KEY_SECRET", "test_secret")
 
     async def test_linked_account_idempotent(self, client, registered_user, monkeypatch):
         await self._enable(monkeypatch)
@@ -782,6 +789,7 @@ class TestOrderRoutingAndWebhooks:
 
         monkeypatch.setattr(route_module, "create_platform_order", fake_platform_order)
         monkeypatch.setattr(settings, "RAZORPAY_KEY_ID", "rzp_test_platform")
+        monkeypatch.setattr(settings, "RAZORPAY_KEY_SECRET", "test_secret")
         r = await client.post("/api/v1/widget/payment/order",
                               json={"session_id": str(sess.id), "widget_token": "wt_rdy"})
         assert r.status_code == 200, r.text
@@ -817,6 +825,7 @@ class TestOrderRoutingAndWebhooks:
         import hmac as _hmac_mod
         monkeypatch.setattr(settings, "RAZORPAY_ROUTE_ENABLED", True)
         monkeypatch.setattr(settings, "RAZORPAY_KEY_SECRET", "test_platform_secret")
+        monkeypatch.setattr(settings, "RAZORPAY_KEY_ID", "rzp_test_platform")
         from app.models.razorpay_route import RazorpayLinkedAccount
         from app.services.razorpay.client import RouteClient
 

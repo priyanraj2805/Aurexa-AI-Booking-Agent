@@ -272,6 +272,9 @@ class DataValidator:
         "ok", "okay", "sure", "yes", "no", "yep", "yup",
         "please", "sorry", "welcome", "great", "nice", "cool", "awesome",
         "how are you", "how r u", "whats up", "what's up",
+        # Laugh/chat fillers ("lol" was once accepted as a customer name).
+        "lol", "lmao", "rofl", "haha", "hahaha", "hehe", "hehehe",
+        "hihi", "lolol",
     })
 
     @staticmethod

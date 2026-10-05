@@ -77,8 +77,10 @@ def test_dict_shaped_options_are_rendered_too() -> None:
 def test_confirm_step_stays_text_with_worded_options() -> None:
     out = format_action_for_whatsapp_text_only(_action("REQUEST_CONFIRMATION", "Book it?"))
     assert out["type"] == "text"
-    assert "CONFIRM" in out["body"]
+    assert out["body"] == "Book it?"
     assert "buttons" not in out
+    # No transport-appended hint: customer and transcript see identical text.
+    assert "Reply CONFIRM to confirm" not in out["body"]
 
 
 def test_time_slots_are_still_listed() -> None:

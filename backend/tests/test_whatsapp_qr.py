@@ -522,7 +522,8 @@ class TestQrInbound:
         body = r.json()["reply"]["body"]
         assert "Please confirm your booking" in body
         assert "Here is your booking summary." in body
-        assert "Reply CONFIRM to confirm or CHANGE to modify." in body
+        # No transport-appended hint: customer and transcript see identical text.
+        assert "Reply CONFIRM to confirm or CHANGE to modify." not in body
 
     async def test_inactive_org_ignored(self, client, registered_user, monkeypatch, db_session):
         from app.models.organization import Organization

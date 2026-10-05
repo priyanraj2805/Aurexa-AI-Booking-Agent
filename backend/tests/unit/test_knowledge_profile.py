@@ -141,7 +141,10 @@ def test_system_prompt_includes_business_block():
 
 def test_system_prompt_without_knowledge_context():
     prompt = build_system_prompt({"timezone": "UTC"}, FIELD_DEFS)
-    assert "ABOUT THE BUSINESS" not in prompt
+    # The non-echo rule names the section, but no business CONTENT block may
+    # leak in when no knowledge context was provided.
+    assert "## ABOUT THE BUSINESS" not in prompt
+    assert "Business name:" not in prompt
 
 
 # ─── Legacy pipeline injection helper contract ───────────────────────────

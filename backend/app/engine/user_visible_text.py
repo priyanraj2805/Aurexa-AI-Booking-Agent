@@ -198,7 +198,20 @@ def looks_like_confirmation_claim(message: str) -> bool:
 
 
 _SAVED_CLAIM_VERB_PATTERN = re.compile(
-    r"\b(?:saved|updated|recorded|stored|noted(?: down)?|added|set|taken)\b",
+    r"\b(?:saved|updated|recorded|stored|noted(?: down)?|added|set|taken"
+    r"|received|collected)\b",
+    flags=re.IGNORECASE,
+)
+
+# Receipt-shaped phrasing the verb list misses. Production sent
+# "Thanks! I've got your number. When would you like to book..." while the
+# phone had FAILED validation and was never saved — the customer believed
+# the number was done and the bot asked for it forever. Bare "have" is
+# deliberately excluded ("I have sent the OTP", "I have a question" are not
+# receipt claims).
+_GOT_YOUR_FIELD_RE = re.compile(
+    r"\b(?:i'?ve?\s+got|i\s+got|got\s+it|got\s+your|have\s+your"
+    r"|received\s+your|collected\s+your)\b",
     flags=re.IGNORECASE,
 )
 
@@ -207,11 +220,13 @@ def looks_like_field_saved_claim(message: str, field_name: str) -> bool:
     """True when the message asserts a user-supplied field value was saved.
 
     Used to detect LLM claims that contradict a rejected/invalid value
-    (e.g. "I've saved your phone number" or "Your phone number is 1234567890"
-    while the phone failed validation).
+    (e.g. "I've saved your phone number", "Thanks! I've got your number",
+    or "Your phone number is 1234567890" while the phone failed validation).
     """
     text = message or ""
     if _SAVED_CLAIM_VERB_PATTERN.search(text):
+        return True
+    if _GOT_YOUR_FIELD_RE.search(text):
         return True
     field = (field_name or "").lower().strip()
     if field and re.search(
@@ -224,13 +239,189 @@ def looks_like_field_saved_claim(message: str, field_name: str) -> bool:
     return False
 
 
+# Instruction-shaped phrasing from our own prompt scaffolding. When the
+# model echoes these into a reply they must be cut out sentence-wise while
+# the human remainder survives. Topic words alone ("business hours",
+# "availability") are deliberately NOT matched — only instruction phrasing
+# a receptionist would never say to a customer.
+_INSTRUCTION_ECHO_RES = (
+    # The exact production leak (scheduling_policy BUSINESS HOURS block).
+    re.compile(
+        r"answer\s+questions?\s+about\s+opening\s+hours,?\s+timings?,?\s+"
+        r"(?:availability\s+windows?\s+or\b|availability\b)",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r"answer\s+(?:timing|time|hours?)\s+questions?\s+from\s+this",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(r"only\s+start\s+the\s+booking\s+flow", flags=re.IGNORECASE),
+    re.compile(r"directly\s+from\s+this\s+block", flags=re.IGNORECASE),
+    re.compile(
+        r"do\s+not\s+answer\s+from\s+general\s+knowledge", flags=re.IGNORECASE
+    ),
+)
+
+_INSTRUCTION_ECHO_MARKERS = (
+    "authoritative",
+    "do not hallucinate",
+    "missing field",
+    "next field to ask",
+    "extracted_entities",
+    "extracted_fields",
+    "user_intent",
+    "field definitions",
+    "session context",
+    "output format",
+    "company knowledge context",
+    "business scope",
+    "strict - do not",
+    "for this business only",
+    "response_text",
+    "response_message",
+)
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+
+# Bullet (U+2022), never an asterisk: WhatsApp bold formatting pairs and
+# strips "*" runs, so a "***" mask is eaten (digits join back together) or
+# mangles the surrounding bold markers into literal "**". Bullets survive
+# every formatter in the outbound pipeline untouched.
+_MASK_BULLET = "\u2022"
+
+
+def mask_phone_for_display(phone: Any) -> str:
+    """Mask a phone number for customer-visible messages.
+
+    Shows at most the country prefix + last 2 digits — enough to recognise
+    which number a code went to, never enough to reconstruct it. Star-free
+    by design (see _MASK_BULLET).
+    """
+    raw = str(phone or "").strip()
+    digits = re.sub(r"\D", "", raw)
+    if not digits:
+        return ""
+    if len(digits) <= 6:
+        return (digits[:2] + _MASK_BULLET * 2) if len(digits) >= 4 else _MASK_BULLET * 2
+    plus = "+" if raw.startswith("+") else ""
+    return f"{plus}{digits[:2]}{_MASK_BULLET * 4}{digits[-2:]}"
+
+
+def mask_email_for_display(email: Any) -> str:
+    """Mask an email for customer-visible messages (first letter + domain).
+
+    Star-free for the same pipeline reason as mask_phone_for_display.
+    """
+    raw = str(email or "").strip()
+    if "@" not in raw:
+        return _MASK_BULLET * 3
+    local, _, domain = raw.partition("@")
+    first = (local[:1] or _MASK_BULLET).strip() or _MASK_BULLET
+    return f"{first}{_MASK_BULLET * 3}@{domain.strip() or '...'}"
+
+
+def strip_instruction_echo(text: str) -> str:
+    """Remove echoed prompt instructions from a reply, keep the human part.
+
+    Drops any sentence carrying instruction-shaped phrasing. If nothing
+    human survives, returns "" so the caller substitutes its safe fallback
+    (mirrors the JSON-debris path) instead of sending scaffolding.
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return ""
+    lowered_full = raw.lower()
+    if not any(rx.search(raw) for rx in _INSTRUCTION_ECHO_RES) and not any(
+        marker in lowered_full for marker in _INSTRUCTION_ECHO_MARKERS
+    ):
+        return raw
+    kept = []
+    for sentence in _SENTENCE_SPLIT_RE.split(raw):
+        chunk = sentence.strip(" \t")
+        if not chunk:
+            continue
+        lowered = chunk.lower()
+        if any(rx.search(chunk) for rx in _INSTRUCTION_ECHO_RES):
+            continue
+        if any(marker in lowered for marker in _INSTRUCTION_ECHO_MARKERS):
+            continue
+        kept.append(chunk)
+    cleaned = " ".join(kept)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    if len(cleaned) < 20:
+        return ""
+    return cleaned
+
+
+# Waiver phrasing: the bot agreeing to drop a field ("I can skip that",
+# "proceed without it"). Only an offence when a REQUIRED field is still
+# pending — waiving an optional field is legal and must pass through.
+_WAIVER_MARKERS = (
+    "skip that",
+    "skip the",
+    "skip your",
+    "can skip",
+    "will skip",
+    "could skip",
+    "skipping that",
+    "without the",
+    "without your",
+    "proceed without",
+    "continue without",
+    "go ahead without",
+    "no need for",
+    "dont need",
+    "don't need",
+    "do not need",
+    "forget it",
+    "forget about",
+)
+
+
+def looks_like_field_waiver(
+    message: Any,
+    missing_fields: Any = None,
+    required_names: Any = None,
+) -> bool:
+    """True when the reply waives a still-required field.
+
+    Production: "I understand. I can skip the phone number too." for a
+    REQUIRED phone still in missing_fields — the customer believed the
+    field was dropped while the flow still needed it. Optional-field
+    waivers pass: only required-and-still-missing counts.
+    """
+    text = str(message or "").lower().strip()
+    if not text:
+        return False
+    if not any(marker in text for marker in _WAIVER_MARKERS):
+        return False
+    try:
+        missing = [str(m) for m in list(missing_fields or []) if m]
+    except Exception:
+        return False
+    if not missing:
+        return False
+    try:
+        required = {str(r) for r in list(required_names or []) if r}
+    except Exception:
+        required = set()
+    if required:
+        pending_required = [m for m in missing if m in required]
+        return bool(pending_required)
+    # Unknown schema: fail safe — any pending field could be required.
+    return True
+
+
 def sanitize_user_visible_text(raw_message: Any) -> str:
     text = str(raw_message or "")
     text = _THINK_BLOCK_RE.sub("", text)
     text = _THINK_TAG_RE.sub("", text).strip()
     if not text or _REASONING_LEAK_RE.search(text):
         return _FALLBACK_TEXT
-    return text
+    stripped = strip_instruction_echo(text)
+    if not stripped:
+        return _FALLBACK_TEXT
+    return stripped
 
 
 def _extract_embedded_json_object(text: str) -> Dict[str, Any]:

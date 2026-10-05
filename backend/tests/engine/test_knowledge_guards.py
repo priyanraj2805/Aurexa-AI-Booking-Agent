@@ -121,8 +121,13 @@ def test_no_hardcoded_business_content_in_module():
 
     src = pathlib.Path(__file__).resolve().parents[2] / "app" / "engine" / "knowledge_guards.py"
     text = src.read_text(encoding="utf-8")
-    for literal in ("98765", "reediff", "example.com", "Dr. ", "Rs 500", "9 AM to 6 PM"):
+    for literal in ("98765", "reediff", "Dr. ", "Rs 500", "9 AM to 6 PM"):
         assert literal not in text, f"hardcoded business content leaked: {literal}"
+    # "example.com" is deliberately NOT in the forbidden list: RFC 2606
+    # reserves example.com/org/net as documentation domains that can never
+    # be a real address, and _PLACEHOLDER_EMAIL_DOMAINS uses exactly that
+    # set so illustrative examples ("like name@example.com") are never
+    # masked as [hidden]. Pinned by test_placeholder_and_repeat_guard.py.
 
 
 def test_distinctive_term_logic_physio_vs_azure() -> None:

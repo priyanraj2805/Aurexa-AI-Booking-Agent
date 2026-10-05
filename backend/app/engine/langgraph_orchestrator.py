@@ -224,6 +224,106 @@ _OFFTOPIC_REPLY = (
     "Is there anything I can help you book, check or reschedule?"
 )
 
+# Words that carry no topic on their own — echoing them back ("you're
+# asking about hi") reads silly instead of attentive. Split into leading
+# filler (stripped from the front) and trailing filler (stripped from the
+# back); the topic almost always sits at the END ("tell me about X",
+# "what is X"), so over-long topics are cut from the front, never the tail.
+_DECLINE_TOPIC_FILLER = frozenset(
+    {
+        "hi", "hii", "hello", "hey", "yo", "thanks", "thank", "you",
+        "please", "ok", "okay", "bye", "sorry", "yes", "no", "good",
+        "morning", "evening", "night", "dear", "sir", "bro", "brooo",
+        "bhai", "bhaiya", "yrr", "yrrr",
+        "i", "ive", "i've", "we", "my", "me", "u", "ur", "he", "she",
+        "they", "it", "this", "that", "a", "an", "the", "to", "do",
+        "mujhe", "mujhko", "muj", "mere", "mera", "meri", "ko", "ke",
+        "ki", "ka", "kya", "hai", "hain", "ho", "tha", "thi", "the",
+        "toh", "abhi", "na", "batao", "btao", "bataiye", "karo", "karein",
+        "do", "jara", "zara", "thoda", "please", "kindly", "aap", "ap",
+        "tum", "tu", "tujhe", "mujhe", "liye", "baare", "mein", "main",
+        "to", "know", "know,", "want", "wants", "about", "an", "the",
+        "for", "of", "on", "at", "in", "and", "or", "so", "is", "it",
+    }
+)
+
+# Leading interrogatives / request openers stripped to reach the topic.
+_DECLINE_TOPIC_OPENER_RE = re.compile(
+    r"^(?:who|what|when|where|why|how|which|whose|whom|is|are|was|were|"
+    r"do|does|did|can|could|would|should|will|shall|may|tell\s+me|show\s+me|"
+    r"give\s+me|list|explain|describe|define)\b\s*",
+    flags=re.IGNORECASE,
+)
+
+
+def _decline_topic(user_text: str | None) -> str | None:
+    """Short verbatim topic slice of the user's message, or None.
+
+    Used to acknowledge THAT message inside an off-topic decline ("you're
+    asking about ...") so consecutive declines are never byte-identical and
+    the customer feels heard. It is a substring of what the customer wrote
+    — never a new factual claim — so it cannot hallucinate. Returns None
+    for chitchat, field-data-like text (emails, digit strings), or anything
+    without a usable topic, in which case the generic decline is used.
+
+    Filler is stripped from BOTH ends and over-long topics keep the TAIL:
+    "Bro i want to know about president of India" yields "president of
+    India" — cutting from the front previously kept the filler and dropped
+    the actual topic.
+    """
+    text = str(user_text or "").strip()
+    if not text:
+        return None
+    # Field data is not a topic (an email address is never "what you ask").
+    # Checked on the FULL text first: splitting "arjun.nair@example.com" on
+    # dots would otherwise leave a misleading "arjun" slice.
+    if "@" in text or sum(1 for ch in text if ch.isdigit()) >= 7:
+        return None
+    # First clause only; single line, no quotes/backticks/control chars.
+    first = re.split(r"[\n.!?]+", text, maxsplit=1)[0]
+    first = re.sub(r"[`\"'*_~#]", "", first).strip()
+    first = re.sub(r"\s+", " ", first)
+    if not first:
+        return None
+    topic = _DECLINE_TOPIC_OPENER_RE.sub("", first).strip()
+    words = [w for w in re.sub(r"\s+", " ", topic).split(" ") if w]
+    while words and words[0].lower() in _DECLINE_TOPIC_FILLER:
+        words.pop(0)
+    while words and words[-1].lower() in _DECLINE_TOPIC_FILLER:
+        words.pop()
+    if not words:
+        return None
+    if len(words) == 1 and words[0].lower() in _DECLINE_TOPIC_FILLER:
+        return None
+    # Keep the tail: the topic comes last ("tell me about X").
+    if len(words) > 6:
+        words = words[-6:]
+    topic = " ".join(words)
+    if len(topic) > 48:
+        topic = topic[-48:].lstrip()
+        topic = re.sub(r"^[a-zA-Z0-9']+\s+", "", topic).strip() or topic
+    if not topic:
+        return None
+    return topic
+
+
+def _offtopic_reply_for_topic(topic: str | None) -> str:
+    """Decline naming the user's topic, or the generic decline.
+
+    The boundary sentence ("I'm a booking assistant, so I can only help
+    with appointments") is always kept verbatim: strike/cooldown counting
+    keys off it, so a topical decline must count exactly like the generic
+    one. No facts are asserted beyond quoting the customer's own words.
+    """
+    if not topic:
+        return _OFFTOPIC_REPLY
+    return (
+        f"Got it — you're asking about {topic}. I'm a booking assistant, so "
+        f"I can only help with appointments — I don't have information about "
+        f"that.\n\n"
+        f"Is there anything I can help you book, check or reschedule?"
+    )
+
 # How much real content must appear before a decline marker for the reply to
 # count as a PARTIAL answer. Long enough that a throwaway clause like "I don't
 # have that" never qualifies, short enough that one useful sentence does.
@@ -295,7 +395,7 @@ def _strip_internal_scaffolding(text: str) -> str:
     return cleaned.strip()
 
 
-def _normalise_offtopic_decline(reply: str) -> str:
+def _normalise_offtopic_decline(reply: str, user_text: str | None = None) -> str:
     """Return one consistent, warm decline for every off-topic question.
 
     The model invents a new cold phrasing on nearly every call ("...in our
@@ -310,17 +410,28 @@ def _normalise_offtopic_decline(reply: str) -> str:
     function matched the caveat anywhere in the text and discarded
     everything, which is worse for the customer than the cold phrasing it was
     meant to fix.
+
+    When ``user_text`` is given, the decline names the customer's topic
+    ("you're asking about ...") so every message is visibly acknowledged
+    and consecutive declines are never byte-identical — without it, four
+    trivia questions in a row got four copies of one reply and customers
+    read it as the bot being stuck. The topic is a verbatim slice of their
+    own words, never a new factual claim, so this cannot hallucinate. The
+    boundary sentence is kept verbatim so strike/cooldown counting treats a
+    topical decline exactly like the generic one. Omitting ``user_text``
+    preserves the exact legacy output.
     """
+    _decline = _offtopic_reply_for_topic(_decline_topic(user_text))
     text = str(reply or "").strip()
     if not text:
-        return _OFFTOPIC_REPLY
+        return _decline
 
     # A courtesy opener is not itself part of the refusal, so it is removed
     # before judging. "Sorry, I don't have information about this." otherwise
     # reads as an answer and reaches the customer verbatim.
     text = _COURTESY_PREFIX_RE.sub("", text).strip()
     if not text:
-        return _OFFTOPIC_REPLY
+        return _decline
 
     # A refusal is a reply that OPENS with one. A partial answer also
     # contains a refusal, but only after the useful part, and the useful part
@@ -328,6 +439,19 @@ def _normalise_offtopic_decline(reply: str) -> str:
     lowered = text.lower()
     opens_with_refusal = any(lowered.startswith(p) for p in _REFUSAL_OPENERS)
     if not opens_with_refusal:
+        # Already a normalised decline (e.g. parroted from context): never
+        # stack a second copy — drop any leading refusal restatement and
+        # keep the single clean decline.
+        if "i can only help with appointments" in lowered:
+            sentences = re.split(r"(?<=[.!?])\s+", text)
+            kept = [
+                s
+                for s in sentences
+                if "i can only help with appointments" in s.lower()
+            ]
+            if kept:
+                return " ".join(kept).strip() or _decline
+            return _decline
         return text  # a real answer, leave it exactly as it is
 
     # Strip the refusal sentence, and see whether real content remains.
@@ -335,9 +459,73 @@ def _normalise_offtopic_decline(reply: str) -> str:
     remainder = _split[1] if len(_split) > 1 else ""
     cleaned = _strip_internal_scaffolding(remainder)
     if len(cleaned) >= _MIN_ANSWER_CHARS:
-        return f"{cleaned}\n\n{_OFFTOPIC_REPLY}"
+        # The remainder may itself be an already-normalised decline parroted
+        # from context — appending another copy stacks declines.
+        if "i can only help with appointments" in cleaned.lower():
+            return cleaned
+        return f"{cleaned}\n\n{_decline}"
 
-    return _OFFTOPIC_REPLY
+    return _decline
+
+
+# Explicit slot-availability questions ("tell me timings", "available
+# times", "which slots are free"). Unlike idle chatter ("do you have
+# parking?"), these MUST be answered with the computed slot list: the graph
+# has no inventory in its prompt, so leaving its answer intact makes the bot
+# say "I don't have a list of open time slots" while slots exist.
+# Deliberately narrow — date questions ("which dates are open?") and hours
+# questions ("what time do you close?") belong to other paths.
+_SLOT_REQUEST_RE = re.compile(
+    r"\b(?:available|free|open|empty|vacant)\s+(?:time|times|slot|slots|timings?)\b"
+    r"|\b(?:timings?|slots?)\s+(?:are\s+|is\s+)?(?:available|free|open|for|on)\b"
+    r"|\b(?:show|tell|give|send|list)\s+me\s+[^.!?]{0,60}?\b(?:time|times|slot|slots|timings?)\b"
+    r"|\bwhat\s+(?:time|times|slots?)\b[^.!?]{0,40}?\b(?:available|free|open)\b"
+    r"|\b(?:timings?|time|slot|slots?)\s+(?:batao|bataiye|btao|dikhao|dikhaiye|bhejo)\b"
+    r"|\b(?:batao|bataiye|btao|dikhao|dikhaiye|bhejo)\b[^.!?]{0,40}?\b(?:time|timings?|slot|slots?)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _asks_for_available_slots(message_text: str | None) -> bool:
+    """True when the customer explicitly asks for the slot/timing list."""
+    text = str(message_text or "").strip()
+    if not text:
+        return False
+    return bool(_SLOT_REQUEST_RE.search(text))
+
+
+def _date_provided_this_turn(
+    message_text: str | None,
+    target: Any,
+    captured_deltas: Any,
+) -> bool:
+    """True when this turn supplied the booking date.
+
+    Primary signal is the merge diff: if "date" was captured this turn, the
+    customer provided it — no parsing needed. This covers relative dates
+    ("tomorrow"), dates inside sentences ("book for November 5th please"),
+    and non-English phrasings that a strict full-message parse rejects
+    (which used to skip slot rendering, forcing the customer to ask for
+    timings explicitly). Falls back to the strict parse for re-stated dates
+    that produced no delta.
+    """
+    try:
+        deltas = captured_deltas if isinstance(captured_deltas, dict) else {}
+        if "date" in deltas:
+            return True
+    except Exception:
+        pass
+    try:
+        from dateutil.parser import parse as _this_turn_parse
+
+        _turn_date = _this_turn_parse(str(message_text or "")).date().isoformat()
+        return bool(
+            _turn_date
+            and str(target or "").strip()
+            and _turn_date == str(target).strip()[:10]
+        )
+    except Exception:
+        return False
 
 
 def _unmatched_time_choice(message_text: str, offered_labels) -> str:
@@ -613,6 +801,65 @@ def _window_item_to_message(item: dict[str, str]) -> HumanMessage | AIMessage:
     return HumanMessage(content=content)
 
 
+def _graph_messages_to_window(messages: Any) -> list[dict[str, str]]:
+    """Rolling window rebuilt from the full graph state messages.
+
+    The graph's own ``context_window`` output never contains its reply, so
+    persisting it verbatim left every stored window human-only: the model
+    never saw its own prior questions, re-asked collected fields after any
+    detour, and the summary carried chatter alone. Rebuild from the state
+    messages instead — human turns verbatim, AI turns reduced to what the
+    customer actually saw (raw blobs would leak JSON into future prompts).
+    Returns [] when there is nothing usable; callers fall back to the
+    previous window so an error turn never wipes context.
+    """
+    if not isinstance(messages, list) or not messages:
+        return []
+    try:
+        from app.engine.user_visible_text import (
+            extract_user_visible_text as _extract_visible,
+        )
+    except Exception:
+        _extract_visible = None  # type: ignore[assignment]
+    items: list[dict[str, str]] = []
+    for message in messages[-MAX_RUNTIME_CONTEXT_MESSAGES:]:
+        try:
+            if isinstance(message, dict):
+                role = str(message.get("role", "") or "").strip().lower()
+                content = message.get("content", "")
+            else:
+                role = (
+                    "ai"
+                    if isinstance(message, AIMessage)
+                    else "human"
+                    if isinstance(message, HumanMessage)
+                    else "system"
+                )
+                content = getattr(message, "content", "")
+            text = content if isinstance(content, str) else str(content or "")
+            if not text.strip():
+                continue
+            if role in {"ai", "assistant"} and _extract_visible is not None:
+                try:
+                    text, _ = _extract_visible(text)
+                except Exception:
+                    pass
+                text = (text or "").strip()
+                if not text:
+                    continue
+                role = "ai"
+            elif role not in {"human", "user"}:
+                if role not in {"ai", "assistant"}:
+                    continue
+                role = "ai"
+            else:
+                role = "human"
+            items.append({"role": role, "content": text})
+        except Exception:
+            continue
+    return items
+
+
 def _load_runtime_context(chat_session: ChatSessionState) -> tuple[str, list[dict[str, str]]]:
     raw_state = {}
     collected_data = getattr(chat_session, "collected_data", None)
@@ -731,6 +978,61 @@ def _guard_user_visible_booking_message(
             (field_meta or {}).get("label") or active_field.replace("_", " ")
         ).lower()
         return f"I couldn't save that {label}. {invalid_error}"
+
+    # Required-field waiver: the model agreed to drop a field that is still
+    # missing ("I understand. I can skip the phone number too."). The
+    # customer then believes the field is gone while the flow still needs
+    # it — the booking silently degrades. Replace with a firm re-ask of the
+    # first still-missing required field. Waiving an OPTIONAL field passes
+    # through untouched.
+    try:
+        from app.engine.user_visible_text import (
+            looks_like_field_waiver as _waiver_check,
+        )
+
+        _missing_now = list(getattr(chat_session, "missing_fields", None) or [])
+        _required_now: set = set()
+        try:
+            if isinstance(fd_map, dict):
+                _required_now = {
+                    str(_k)
+                    for _k, _v in fd_map.items()
+                    if bool(getattr(_v, "required", True))
+                }
+        except Exception:
+            _required_now = set()
+        if _waiver_check(
+            assistant_message,
+            missing_fields=_missing_now,
+            required_names=_required_now,
+        ):
+            _need = next(
+                (
+                    m
+                    for m in _missing_now
+                    if not _required_now or m in _required_now
+                ),
+                None,
+            )
+            _need_label = ""
+            try:
+                if isinstance(fd_map, dict) and _need in (fd_map or {}):
+                    _need_label = str(
+                        getattr(fd_map[_need], "label", "") or ""
+                    ).strip().lower()
+            except Exception:
+                _need_label = ""
+            if not _need_label:
+                _need_label = str(
+                    (field_meta or {}).get("label")
+                    or str(_need or "detail").replace("_", " ")
+                ).strip().lower()
+            return (
+                f"I'll still need your {_need_label} — I can't confirm the "
+                f"booking without it. Could you please share it?"
+            )
+    except Exception:
+        pass
 
     if not looks_like_confirmation_claim(assistant_message):
         return assistant_message
@@ -1113,6 +1415,9 @@ def _is_user_confirmation(message_text: str) -> bool:
     only from the inbound text and never from the model's intent label. When
     the model returned an unexpected intent on the confirmation turn the
     booking was silently skipped while the customer was still told "confirmed".
+    ARCHITECTURE (LLM driver, code seatbelt): this keyword check is
+    deliberately NOT migrated to the model — authorising money/slot writes
+    is a verification duty, and verification belongs in code.
 
     Real customers type "Okayy", "yess", "okk" or "comfirm". Those must count
     as a confirmation here, otherwise the flow stalls at the final step. The
@@ -1454,6 +1759,43 @@ async def process_message_with_graph(
     except Exception:
         _cooldown = None
         _cd_remaining = 0
+    if _cd_remaining > 0:
+        # Booking data always wins over the pause: if this message validates
+        # as a value for a currently-missing field, end the cooldown and
+        # process the turn normally instead of freezing it. Deterministic
+        # check (no LLM) so the cost saving for true chatter is kept.
+        try:
+            _rescue_fds = order_field_definitions(
+                parse_field_definitions(
+                    getattr(org_config, "field_definitions", None)
+                    or getattr(org_config, "required_fields", None)
+                )
+            )
+            _rescued_field = _cooldown.booking_data_release(
+                chat_session.collected_data,
+                message_text,
+                missing_fields=getattr(chat_session, "missing_fields", None),
+                field_definitions=_rescue_fds,
+                timezone=getattr(org_config, "timezone", "UTC") or "UTC",
+                max_booking_days=getattr(org_config, "max_booking_days_ahead", 90)
+                or 90,
+            )
+        except Exception:
+            _rescued_field = None
+        if _rescued_field:
+            try:
+                _cooldown.end_cooldown(chat_session.collected_data)
+                await crud_chat.update_chat_session(
+                    db, session_id, chat_session
+                )
+            except Exception:
+                pass
+            logger.info(
+                "cooldown rescued by booking data session=%s field=%s",
+                str(session_id)[:8],
+                _rescued_field,
+            )
+            _cd_remaining = 0
     if _cd_remaining > 0:
         _cd_msg = (
             _cooldown.cooldown_message(_cd_remaining)
@@ -1928,6 +2270,9 @@ async def process_message_with_graph(
     # keep their booking values (the graph extracts them; only the verdict
     # matters here). Mirrors the check_booking gate above, which migrated to
     # verdict-only for the same reason.
+    # ARCHITECTURE (LLM driver, code seatbelt): understanding lives in the
+    # model; code below only VERIFIES outcomes (slot locks, OTP, confirmation
+    # claims). Do not add keyword intent checks here.
     # A latched decline clears on any decisive non-decline verdict, so
     # "But i still want to book" always re-engages. An absent verdict (LLM
     # failure) changes nothing: never refuse on unknown, never resurrect.
@@ -2304,8 +2649,17 @@ async def process_message_with_graph(
             chat_session.collected_data[crud_chat.RUNTIME_CHECKPOINT_KEY] = checkpoint
 
     checkpoint_manager = CheckpointManager(write_checkpoint=_write_checkpoint)
-    context_window = _normalize_context_window(result.get("context_window"))
-    summary = str(result.get("summary", "") or "")
+    # Rebuild the persisted window from the full graph state messages: the
+    # graph's own context_window output never contains its reply, so the old
+    # code stored human-only windows and the model forgot its own questions.
+    # Fall back to the previous window (never blank it) when the result
+    # carries nothing usable — an error turn must not wipe context.
+    context_window = _graph_messages_to_window(result.get("messages"))
+    if not context_window:
+        context_window = _normalize_context_window(
+            result.get("context_window")
+        ) or list(existing_window)
+    summary = str(result.get("summary", "") or "") or existing_summary
     # FIX: prevent nested duplication of runtime_checkpoint inside collected_data
     _clean_collected = dict(chat_session.collected_data or {})
     _clean_collected.pop(crud_chat.RUNTIME_CHECKPOINT_KEY, None)
@@ -2557,24 +2911,31 @@ async def process_message_with_graph(
                                         # message is not a time. Only a turn
                                         # that provided nothing (a question,
                                         # chatter) keeps the graph's answer.
-                                        _provided_this_turn = False
-                                        try:
-                                            from dateutil.parser import (
-                                                parse as _this_turn_parse,
-                                            )
-                                            _turn_date = _this_turn_parse(
-                                                str(message_text or "")
-                                            ).date().isoformat()
-                                            _provided_this_turn = bool(
-                                                _turn_date
-                                                and str(_target or "").strip()
-                                                and _turn_date == str(_target).strip()[:10]
-                                            )
-                                        except Exception:
-                                            pass
+                                        _provided_this_turn = _date_provided_this_turn(
+                                            message_text,
+                                            _target,
+                                            (
+                                                result.get("captured_deltas")
+                                                if isinstance(result, dict)
+                                                else None
+                                            ),
+                                        )
+                                        # An explicit "show me the timings" question
+                                        # must render the computed list even on
+                                        # a question turn: the graph has no
+                                        # inventory in its prompt, so its answer
+                                        # is an honest-but-wrong "I don't have
+                                        # a list". Idle chatter keeps the
+                                        # graph's answer (re-rendering the grid
+                                        # there trapped customers in identical
+                                        # slot lists).
+                                        _explicit_slot_request = bool(
+                                            _asks_for_available_slots(message_text)
+                                        )
                                         if (
                                             not _is_time_attempt
                                             and not _provided_this_turn
+                                            and not _explicit_slot_request
                                             and str(
                                             getattr(chat_session, "current_intent", "")
                                         ) in ("ASK_QUESTION", "PROVIDE_DATA")
@@ -3210,12 +3571,14 @@ async def process_message_with_graph(
         field_meta["channel"] = "phone"
         field_meta["knowledge_answer"] = True
         # Normalise the decline so the customer gets one consistent, warm
-        # answer. The model reaches for several different cold phrasings
-        # ("...in our knowledge materials", "the company knowledge
-        # materials don't include...", "I don't have information about
-        # that") which read as a brush-off and mention internal machinery the
-        # customer has never heard of.
-        _knowledge_reply = _normalise_offtopic_decline(_knowledge_reply)
+        # answer naming THEIR topic ("you're asking about ..."). The model
+        # reaches for several different cold phrasings ("...in our knowledge
+        # materials", "the company knowledge materials don't include...",
+        # "I don't have information about that") which read as a brush-off
+        # and mention internal machinery the customer has never heard of.
+        # Passing the user's message keeps consecutive declines distinct so
+        # the bot never reads as stuck on one reply.
+        _knowledge_reply = _normalise_offtopic_decline(_knowledge_reply, message_text)
         # A question between booking steps is answered on its own terms. The
         # "back to your booking" push is removed so the answer stands alone;
         # the pending step is re-asked on the next turn.
@@ -3398,7 +3761,14 @@ async def process_message_with_graph(
         field_meta["otp_event_key"] = phone_event_key
         if otp_error:
             field_meta["validation_error"] = otp_error
-        masked = phone[:4] + "***" + phone[-2:] if len(phone) > 6 else phone[:3] + "***"
+        # Star-free mask: "*" runs are paired/stripped by WhatsApp bold
+        # formatting, which ate "***" masks (digits joined back) and mangled
+        # surrounding bold markers into literal "**".
+        from app.engine.user_visible_text import (
+            mask_phone_for_display as _mask_phone,
+        )
+
+        masked = _mask_phone(phone)
         via = "WhatsApp"
         if otp_error:
             assistant_message = (

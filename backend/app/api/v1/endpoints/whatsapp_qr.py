@@ -1574,15 +1574,15 @@ async def qr_inbound(    payload: QrInboundPayload,
                             if _labels:
                                 _parts.append("Available slots: " + " · ".join(_labels))
                                 _parts.append("You can type any format — e.g. 3pm, 3 pm or 3:00 PM.")
-                    # Confirm step must show the booking summary + explicit
-                    # reply options. The old text-only render sent a bare
-                    # "Please confirm your booking" with no CONFIRM/CHANGE
-                    # hint, so users typed "Okay"/typos and looped.
+                    # Confirm step shows the booking summary as-is. No reply
+                    # hint is appended: the engine message already carries
+                    # the confirm/edit/cancel instruction, and transport-side
+                    # mutations never reach the admin transcript — the
+                    # customer and the transcript must see identical text.
                     if _dir_after.type == "CONFIRM_BOOKING":
                         _summary = str(getattr(action, "message", "") or "").strip()
                         if _summary and _summary not in _parts:
                             _parts.append(_summary)
-                        _parts.append("Reply CONFIRM to confirm or CHANGE to modify.")
                     _body = "\n\n".join(_parts).strip()
                     # Knowledge answers must not die behind the step render:
                     # mid-booking questions are answered AND the pending step

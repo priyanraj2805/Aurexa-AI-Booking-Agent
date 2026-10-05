@@ -728,6 +728,9 @@ async def call_model(
                 # the excerpt was a partial page rather than the full sentence.
                 # Anti-hallucination is kept, but aimed at facts with no
                 # support anywhere in the chunks.
+                from app.engine.business_identity import (
+                    KNOWLEDGE_IDENTITY_NOTE as _IDENTITY_NOTE,
+                )
                 grounding = (
                     " These excerpts were retrieved because they are the most "
                     "relevant material the company has for this question. If "
@@ -736,7 +739,7 @@ async def call_model(
                     "did not repeat your exact question. If they genuinely do "
                     "not cover it, say so plainly. Either way, state only "
                     "things supported by these excerpts; never invent names, "
-                    "dates, prices or details."
+                    "dates, prices or details. " + _IDENTITY_NOTE
                 )
                 if overview_mode:
                     header = (

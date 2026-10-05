@@ -147,6 +147,34 @@ async def test_start_decline_sets_flag_and_farewell(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
+async def test_start_decline_with_question_acknowledges_it(db_session: AsyncSession):
+    """Mixed turn: the farewell must visibly acknowledge the question half
+    instead of swallowing it (production: GDP question got only the canned
+    farewell). Flag still latches; pure declines keep legacy wording."""
+    from types import SimpleNamespace
+
+    row = await _row(db_session)
+    state = _state(session_id=str(row.id), org_id=str(row.org_id))
+    action = await flow.start_decline(
+        db_session,
+        SimpleNamespace(name="Acme"),
+        state,
+        "but i dont want to book any appointment. "
+        "i wanted to ask you about the gdp of india",
+    )
+    assert "gdp of india" in action.message.lower()
+    assert "booking assistant" in action.message.lower()
+    assert flow.is_declined(state) is True
+
+    row2 = await _row(db_session)
+    state2 = _state(session_id=str(row2.id), org_id=str(row2.org_id))
+    plain = await flow.start_decline(
+        db_session, SimpleNamespace(name="Acme"), state2, "I don't want to book"
+    )
+    assert "completely okay" in plain.message.lower()
+
+
+@pytest.mark.asyncio
 async def test_reengage_clears_on_values(db_session: AsyncSession):
     row = await _row(db_session)
     state = _state(

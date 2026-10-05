@@ -149,7 +149,7 @@ class ConversationManager:
     ) -> ActionPayload:
         """Delegate to existing LangGraph path with canary fallback."""
         try:
-            return await runtime_router.process_message_with_graph(
+            action = await runtime_router.process_message_with_graph(
                 db=self.db,
                 org=self.org,
                 org_config=self.org_config,
@@ -158,6 +158,40 @@ class ConversationManager:
                 background_tasks=background_tasks,
                 recovery_metadata=recovery_metadata,
             )
+            # Off-topic strike accounting (web parity with the WhatsApp
+            # endpoints): runs after the engine returns, on the final reply.
+            # Without this the web widget could never open a cooldown while
+            # WhatsApp could, so identical behaviour diverged by channel.
+            try:
+                from app.engine import offtopic_cooldown as _cd
+
+                _replacement = _cd.account_offtopic_turn(
+                    self.chat_session.collected_data,
+                    user_text=message_text,
+                    reply_text=str(getattr(action, "message", "") or ""),
+                    turn_intent=getattr(self.chat_session, "current_intent", None),
+                    missing_fields=getattr(self.chat_session, "missing_fields", None),
+                    session_status=getattr(self.chat_session, "session_status", None),
+                    phone_otp_verified=bool(
+                        getattr(self.chat_session, "phone_otp_verified", False)
+                    ),
+                )
+                if _replacement:
+                    action.message = _replacement
+                    logger.info(
+                        "offtopic_cooldown_opened session=%s",
+                        str(
+                            getattr(self.chat_session, "session_id", "") or ""
+                        )[:8],
+                    )
+                await crud_chat.update_chat_session(
+                    self.db,
+                    str(getattr(self.chat_session, "session_id", "") or ""),
+                    self.chat_session,
+                )
+            except Exception:
+                logger.warning("web off-topic accounting failed", exc_info=True)
+            return action
         except Exception as error:
             # Preserve existing canary-fallback behavior from runtime_router.
             from app.engine.runtime_router import (
