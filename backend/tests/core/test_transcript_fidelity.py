@@ -97,7 +97,8 @@ async def test_update_latest_agent_message_no_agent_row(db_session):
 
 @pytest.mark.asyncio
 async def test_breaker_output_matches_saved_transcript(db_session):
-    """End-to-end shape of the fix: breaker mutates, transcript follows."""
+    """End-to-end shape: the breaker passes text through untouched, so the
+    transcript trivially matches what the customer received."""
     from app.core import whatsapp_client
     from types import SimpleNamespace
 
@@ -114,8 +115,8 @@ async def test_breaker_output_matches_saved_transcript(db_session):
             session_id=sess.id, collected_data=dict(sess.state_data or {})
         ), "same reply",
     )
-    assert out != "same reply"
-    assert "HUMAN" in out
+    assert out == "same reply"
+    assert "HUMAN" not in out
     changed = await crud_chat.update_latest_agent_message(
         db_session, str(sess.id), out[:4096]
     )

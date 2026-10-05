@@ -52,48 +52,15 @@ def attach_knowledge_answer(action_message: str, directive_body: str) -> str:
     return f"{answer}\n\n{body}"[:4096]
 
 
-def _repeat_escalation(body: str, chat_session, count: int) -> str:
-    """One-time reframed handoff for the 3rd consecutive identical reply.
-
-    Returning ``body`` again would show the customer the same text for the
-    third turn running — the exact "stuck bot" complaint. Instead the reply
-    is reframed once around what is still needed (from missing_fields when
-    available). Further identical turns go out plain: the caller caps this
-    to once per episode, because nagging every turn reads worse than the
-    repetition. The stored last-body is left untouched, so genuine progress
-    still resets the loop.
-    """
-    need = ""
-    try:
-        missing = getattr(chat_session, "missing_fields", None) or []
-        first = next(
-            (m for m in missing if m and not str(m).startswith("_")), None
-        )
-        if first:
-            need = f" I still need your {str(first).replace('_', ' ')} to move forward."
-    except Exception:
-        need = ""
-    return (
-        body
-        + "\n\nWe seem to be going in circles here —"
-        + need
-        + " Reply HUMAN to reach a person, or try saying it in different words."
-    )
-
-
 async def break_identical_repeat(db, chat_session, body: str) -> str:
-    """Circuit breaker for constant-answer loops.
+    """Repeat tracker for constant-answer loops (observe-only).
 
-    Tracks the last reply body in session state. When the engine produces
-    the byte-identical reply on consecutive turns (no progress), the second
-    repeat gets a one-time escape hatch appended so the user can reach a
-    human or rephrase — instead of reading the same message forever.
-    Nudges once per session to avoid nagging; different replies reset it.
-
-    A 3rd consecutive identical reply is reframed once (never a third
-    verbatim copy). After that the plain body goes out: nagging every turn
-    with HUMAN text reads worse than the repetition it replaces, and the
-    stuck engine underneath is fixed at its own layer, not here. Fail-open:
+    Tracks the last reply body and consecutive-repeat count in session
+    state so stuck loops stay visible in diagnostics, but NEVER mutates
+    the customer-facing text: appended HUMAN/nudge lines reached users on
+    stuck turns and read as nagging, so all mutation was removed. Stuck
+    loops are fixed in the engine itself (validation guards, context
+    memory, cooldown rescue), never by editing replies here. Fail-open:
     any error returns the body untouched.
     """
     try:
@@ -104,41 +71,10 @@ async def break_identical_repeat(db, chat_session, body: str) -> str:
         data = dict(getattr(chat_session, "collected_data", None) or {})
         last = str(data.get("_last_reply_body") or "")
         if (body or "").strip() == last.strip() and last.strip():
-            count = int(data.get("_repeat_count") or 0) + 1
-            data["_repeat_count"] = count
-            chat_session.collected_data = data
-            if count >= 1 and not data.get("_repeat_nudged"):
-                data["_repeat_nudged"] = True
-                chat_session.collected_data = data
-                try:
-                    await crud_chat.update_chat_session(
-                        db, str(chat_session.session_id), chat_session)
-                except Exception:
-                    pass
-                return (
-                    body
-                    + "\n\nIf I'm repeating myself, sorry — reply HUMAN to reach "
-                      "a person, or ask me anything in your own words."
-                )
-            if count >= 2 and not data.get("_repeat_escalated"):
-                data["_repeat_escalated"] = True
-                chat_session.collected_data = data
-                escalated = _repeat_escalation(body, chat_session, count)
-                try:
-                    await crud_chat.update_chat_session(
-                        db, str(chat_session.session_id), chat_session)
-                except Exception:
-                    pass
-                return escalated
-            try:
-                await crud_chat.update_chat_session(
-                    db, str(chat_session.session_id), chat_session)
-            except Exception:
-                pass
-            return body
-        data["_last_reply_body"] = body
-        data["_repeat_count"] = 0
-        data.pop("_repeat_escalated", None)
+            data["_repeat_count"] = int(data.get("_repeat_count") or 0) + 1
+        else:
+            data["_last_reply_body"] = body
+            data["_repeat_count"] = 0
         chat_session.collected_data = data
         try:
             await crud_chat.update_chat_session(

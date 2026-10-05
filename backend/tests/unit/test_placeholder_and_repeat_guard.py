@@ -107,8 +107,9 @@ def test_masked_cancel_message_survives_outbound_pipeline() -> None:
 
 
 @pytest.mark.asyncio
-async def test_third_identical_repeat_is_reframed_not_repeated(db_session):
-    """3rd consecutive identical body must differ; the loop must end."""
+async def test_repeats_are_tracked_but_never_mutated(db_session):
+    """Observe-only contract: no HUMAN/nudge text may ever be appended —
+    stuck loops are fixed in the engine, not by editing replies here."""
     import uuid
     from types import SimpleNamespace
 
@@ -132,19 +133,12 @@ async def test_third_identical_repeat_is_reframed_not_repeated(db_session):
     body = "Please share your phone number."
     first = await whatsapp_client.break_identical_repeat(db_session, sess, body)
     assert first == body
-    second = await whatsapp_client.break_identical_repeat(db_session, sess, body)
-    assert "HUMAN" in second
-    third = await whatsapp_client.break_identical_repeat(db_session, sess, body)
-    assert third != body
-    assert third != second
-    assert "HUMAN" in third
-    assert "phone" in third
-    # Capped: further identical turns go out plain — nagging every turn
-    # reads worse than the repetition it replaces.
-    fourth = await whatsapp_client.break_identical_repeat(db_session, sess, body)
-    assert fourth == body
-    fifth = await whatsapp_client.break_identical_repeat(db_session, sess, body)
-    assert fifth == body
+    # Observe-only: repeats are tracked but the text is NEVER mutated —
+    # no HUMAN/nudge lines may ever reach the customer from here.
+    for _ in range(4):
+        out = await whatsapp_client.break_identical_repeat(db_session, sess, body)
+        assert out == body
+        assert "HUMAN" not in out
     fresh = await whatsapp_client.break_identical_repeat(
         db_session, sess, "What date works for you?"
     )

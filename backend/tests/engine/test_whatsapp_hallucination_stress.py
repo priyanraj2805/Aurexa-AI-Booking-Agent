@@ -419,17 +419,17 @@ class TestLoopBusting:
         msgs = await crud_chat.get_session_messages(db_session, sess.session_id)
         assert msgs == []
 
-    async def test_identical_repeat_gets_one_time_hatch(self, db_session):
+    async def test_identical_repeat_never_mutates_text(self, db_session):
         from app.core import whatsapp_client
         org = await _make_org(db_session)
         sess = await _make_session(db_session, org, user="wa_9100000093")
         body = "Please share your full name."
-        first = await whatsapp_client.break_identical_repeat(db_session, sess, body)
-        assert first == body  # first delivery untouched
-        second = await whatsapp_client.break_identical_repeat(db_session, sess, body)
-        assert second != body and "HUMAN" in second  # escape hatch once
-        third = await whatsapp_client.break_identical_repeat(db_session, sess, second)
-        assert "HUMAN" in third and third.count("HUMAN") == 1  # never nagged twice
+        # Observe-only: repeats are tracked for diagnostics, but the text
+        # is NEVER appended to — no HUMAN/nudge lines reach the customer.
+        for _ in range(4):
+            out = await whatsapp_client.break_identical_repeat(db_session, sess, body)
+            assert out == body
+            assert "HUMAN" not in out
         fresh = await whatsapp_client.break_identical_repeat(
             db_session, sess, "What date works for you?")
         assert fresh == "What date works for you?"  # progress resets
