@@ -373,7 +373,7 @@ async def test_post_booking_cancel_still_routes(monkeypatch):
     )
     started = {}
 
-    async def _fake_start(db, chat_session, message_text):
+    async def _fake_start(db, chat_session, message_text, org_config=None, channel=""):
         started["called"] = True
         return ActionPayload(message="cancel flow started", widget_directive="TEXT_INPUT")
 

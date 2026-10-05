@@ -116,3 +116,24 @@ def ensure_identity_keys(
         if fallback:
             config_dict["business_name"] = fallback
     return config_dict
+
+
+def reconcile_business_names(
+    column_name: Any = "", nested_name: Any = ""
+) -> "tuple[str, str]":
+    """Single source of truth for the two stored business names.
+
+    The name lives in two places — the ``org_configs.business_name`` column
+    and nested ``custom_prompts.business_name`` — and production showed them
+    disagreeing ("Dotstark" vs "BrightSmile Dental Clinic"), so the bot's
+    identity depended on which reader won. The column is authoritative: a
+    set column overwrites the nested copy, a blank column inherits a set
+    nested copy, both blank stays blank (callers fall back to org name).
+    """
+    col = str(column_name or "").strip()
+    nested = str(nested_name or "").strip()
+    if col:
+        return col, col
+    if nested:
+        return nested, nested
+    return "", ""

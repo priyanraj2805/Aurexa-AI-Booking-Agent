@@ -1562,6 +1562,31 @@ async def update_agent_config(
         config.org_name = update.org_name
     if update.business_name is not None:
         config.business_name = update.business_name
+    # Anti-drift: the business name is stored twice (column + nested
+    # custom_prompts.business_name) and they disagreed in production, so
+    # reconcile on every save. Column is authoritative.
+    try:
+        from app.engine.business_identity import (
+            reconcile_business_names as _reconcile_bn,
+        )
+
+        _cp = (
+            config.custom_prompts
+            if isinstance(config.custom_prompts, dict)
+            else {}
+        )
+        _col, _nested = _reconcile_bn(
+            getattr(config, "business_name", ""),
+            _cp.get("business_name", ""),
+        )
+        if _col != getattr(config, "business_name", ""):
+            config.business_name = _col or None
+        if _nested != _cp.get("business_name", ""):
+            _cp = dict(_cp)
+            _cp["business_name"] = _nested
+            config.custom_prompts = _cp if _cp else None
+    except Exception:
+        pass
     if update.logo_url is not None:
         config.logo_url = update.logo_url
 

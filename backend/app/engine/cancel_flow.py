@@ -58,6 +58,65 @@ def _otp_channel_label(otp_channel: str, org_config: OrgConfig) -> str:
         return "WhatsApp"
     return "email"
 
+
+def _lookup_contact_kind(org_config=None, channel: str = "") -> str:
+    """Which contact the cancel lookup must ask for: 'phone', 'email' or ''
+    (generic fallback when config/channel is unknown).
+
+    Mirrors _resolve_cancel_otp_channel so the lookup asks ONLY for the
+    channel the OTP will actually use. Asking "email or phone" while the
+    code can only go to the phone confuses customers and wastes a turn.
+    """
+    if org_config is None:
+        return ""
+    try:
+        resolved = _resolve_cancel_otp_channel(
+            org_config, channel=str(channel or "")
+        )
+    except Exception:
+        return ""
+    return resolved if resolved in ("phone", "email") else ""
+
+
+_LOOKUP_CONTACT_WORDS = {
+    "phone": "phone number",
+    "email": "email address",
+    "": "email or phone number",
+}
+
+_LOOKUP_PLACEHOLDERS = {
+    "phone": "+91 98765 43210",
+    "email": "you@example.com",
+    "": "you@example.com or +91 98765 43210",
+}
+
+_LOOKUP_LABELS = {
+    "phone": "Phone Number",
+    "email": "Email Address",
+    "": "Email or Phone",
+}
+
+_LOOKUP_DESCRIPTIONS = {
+    "phone": "Enter the phone number used for the booking.",
+    "email": "Enter the email address used for the booking.",
+    "": "Enter the email or phone number used for the booking.",
+}
+
+
+def _lookup_contact_prompt(
+    template: str, org_config=None, channel: str = ""
+) -> str:
+    """Fill a lookup-ask template with the OTP channel's contact words.
+
+    Templates carry a {contact} slot, e.g. "Please enter the {contact} you
+    used." Unknown config falls back to the legacy "email or phone number".
+    """
+    kind = _lookup_contact_kind(org_config, channel)
+    try:
+        return str(template).format(contact=_LOOKUP_CONTACT_WORDS[kind])
+    except Exception:
+        return str(template).replace("{contact}", _LOOKUP_CONTACT_WORDS[""])
+
 # Booking-field keys (plus the stale runtime checkpoint) that must be pruned
 # from persisted state_data whenever a session is reset for a new booking.
 # crud.chat.update_chat_session MERGES state_data, so clearing the in-memory
@@ -402,11 +461,22 @@ def clear_cancel_flow(chat_session: ChatSessionState) -> None:
 
 
 def _lookup_action(
-    message: str, *, validation_error: str = ""
+    message: str,
+    *,
+    validation_error: str = "",
+    org_config=None,
+    channel: str = "",
 ) -> ActionPayload:
     meta = dict(_CANCEL_LOOKUP_META)
     if validation_error:
         meta["validation_error"] = validation_error
+    # Channel-aware input hints: the placeholder/label/description name ONLY
+    # the contact the OTP will use, so the widget input matches the ask.
+    kind = _lookup_contact_kind(org_config, channel)
+    if kind:
+        meta["label"] = _LOOKUP_LABELS[kind]
+        meta["placeholder"] = _LOOKUP_PLACEHOLDERS[kind]
+        meta["description"] = _LOOKUP_DESCRIPTIONS[kind]
     return ActionPayload(
         message=message, widget_directive=CANCEL_LOOKUP_DIRECTIVE, field_meta=meta
     )
@@ -562,7 +632,13 @@ async def handle_active_cancel_flow(
     set_cancel_flow(chat_session, stage="lookup", otp_verified=False)
     await _persist_session(db, chat_session)
     action = _lookup_action(
-        "Let's find your appointment. Please enter the email or phone number you used."
+        _lookup_contact_prompt(
+            "Let's find your appointment. Please enter the {contact} you used.",
+            org_config,
+            str(getattr(chat_session, "channel", "") or ""),
+        ),
+        org_config=org_config,
+        channel=str(getattr(chat_session, "channel", "") or ""),
     )
     await _save_transcript(
         db,
@@ -576,14 +652,31 @@ async def handle_active_cancel_flow(
 
 
 async def start_cancel_flow(
-    db: AsyncSession, chat_session: ChatSessionState, message_text: str
+    db: AsyncSession,
+    chat_session: ChatSessionState,
+    message_text: str,
+    org_config=None,
+    channel: str = "",
 ) -> ActionPayload:
-    """Post-graph hook: initialise the lookup stage for a detected cancel intent."""
+    """Post-graph hook: initialise the lookup stage for a detected cancel intent.
+
+    Asks ONLY for the contact the OTP will use (phone when phone-OTP is on,
+    else email) — offering both while the code can reach just one wastes a
+    turn and confuses. Falls back to the legacy either/or ask when config is
+    unavailable.
+    """
     set_cancel_flow(chat_session, stage="lookup", otp_verified=False)
     chat_session.pending_cancel = True
     await _persist_session(db, chat_session)
     return _lookup_action(
-        "Sure — I can help with that. Please enter the email or phone number you used for the appointment."
+        _lookup_contact_prompt(
+            "Sure — I can help with that. Please enter the {contact} you used "
+            "for the appointment.",
+            org_config,
+            channel or str(getattr(chat_session, "channel", "") or ""),
+        ),
+        org_config=org_config,
+        channel=channel or str(getattr(chat_session, "channel", "") or ""),
     )
 
 
@@ -664,7 +757,13 @@ async def _handle_lookup_stage(
             return None
         if _FIND_BOOKING_RE.search(message_text):
             action = _lookup_action(
-                "Let's find your appointment. Please enter the email or phone number you used."
+                _lookup_contact_prompt(
+                    "Let's find your appointment. Please enter the {contact} you used.",
+                    org_config,
+                    str(getattr(chat_session, "channel", "") or ""),
+                ),
+                org_config=org_config,
+                channel=str(getattr(chat_session, "channel", "") or ""),
             )
             await _save_transcript(
                 db, session_id, message_text, action.message, action.widget_directive,
@@ -717,7 +816,14 @@ async def _handle_lookup_stage(
             return None
         if classification == "RESUME_FLOW":
             action = _lookup_action(
-                "Sure — let's keep going. Please enter the email or phone number you used for the appointment."
+                _lookup_contact_prompt(
+                    "Sure — let's keep going. Please enter the {contact} you used "
+                    "for the appointment.",
+                    org_config,
+                    str(getattr(chat_session, "channel", "") or ""),
+                ),
+                org_config=org_config,
+                channel=str(getattr(chat_session, "channel", "") or ""),
             )
             await _save_transcript(
                 db, session_id, message_text, action.message, action.widget_directive,
@@ -725,12 +831,18 @@ async def _handle_lookup_stage(
             )
             return action
 
-        reply = str(analysis.get("reply") or "").strip() or (
+        reply = str(analysis.get("reply") or "").strip() or _lookup_contact_prompt(
             "I'm sorry, I didn't quite get that. To find your appointment, "
-            "please enter the email or phone number you used — or say "
-            "'book a new appointment' to start a fresh booking."
+            "please enter the {contact} you used — or say "
+            "'book a new appointment' to start a fresh booking.",
+            org_config,
+            str(getattr(chat_session, "channel", "") or ""),
         )
-        action = _lookup_action(reply)
+        action = _lookup_action(
+            reply,
+            org_config=org_config,
+            channel=str(getattr(chat_session, "channel", "") or ""),
+        )
         await _save_transcript(
             db, session_id, message_text, action.message, action.widget_directive,
             intent="CANCEL_BOOKING",

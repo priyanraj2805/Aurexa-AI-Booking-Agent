@@ -1222,7 +1222,9 @@ async def _handle_post_booking_session(
     # 1. Explicit cancel request on a CONFIRMED booking → OTP-protected cancel
     #    flow (lookup → cancel-scoped OTP → execution).
     if status == "CONFIRMED" and is_action_request and action == "CANCEL":
-        action_payload = await cancel_flow.start_cancel_flow(db, chat_session, message_text)
+        action_payload = await cancel_flow.start_cancel_flow(
+            db, chat_session, message_text, org_config=org_config
+        )
         await _persist_transcript_best_effort(
             db,
             session_id=chat_session.session_id,
@@ -1254,7 +1256,7 @@ async def _handle_post_booking_session(
                 db, chat_session.session_id, chat_session
             )
             action_payload = await cancel_flow.start_cancel_flow(
-                db, chat_session, message_text
+                db, chat_session, message_text, org_config=org_config
             )
             await _persist_transcript_best_effort(
                 db,
@@ -2252,7 +2254,9 @@ async def process_message_with_graph(
     # cancellation flow instead of applying booking state.
     llm_intent = str((structured_assistant_payload or {}).get("user_intent") or "")
     if cancel_flow.is_cancel_intent(message_text, llm_user_intent=llm_intent):
-        action = await cancel_flow.start_cancel_flow(db, chat_session, message_text)
+        action = await cancel_flow.start_cancel_flow(
+            db, chat_session, message_text, org_config=org_config
+        )
         await _persist_transcript_best_effort(
             db,
             session_id=session_id,

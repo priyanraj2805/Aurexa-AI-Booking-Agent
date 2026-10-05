@@ -39,6 +39,21 @@ def test_agent_name_prefers_personalization() -> None:
     assert resolve_agent_name({}) == "Booking Assistant"
 
 
+def test_reconcile_prefers_column_over_nested() -> None:
+    from app.engine.business_identity import reconcile_business_names
+
+    assert reconcile_business_names("Priyanshu", "BrightSmile") == (
+        "Priyanshu",
+        "Priyanshu",
+    )
+    assert reconcile_business_names("", "BrightSmile") == (
+        "BrightSmile",
+        "BrightSmile",
+    )
+    assert reconcile_business_names("", "") == ("", "")
+    assert reconcile_business_names(None, None) == ("", "")
+
+
 def test_identity_rule_pins_names_and_forbids_adoption() -> None:
     rule = identity_rule("Priyanshu", "Aurexa")
     assert "Priyanshu" in rule

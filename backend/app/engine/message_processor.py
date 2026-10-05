@@ -3608,7 +3608,7 @@ async def _handle_post_booking(
                     db, chat_session.session_id, chat_session
                 )
                 action = await _cancel_flow_mod.start_cancel_flow(
-                    db, chat_session, message_text
+                    db, chat_session, message_text, org_config=org_config
                 )
                 await _save_transcript(
                     db, chat_session.session_id, _transcript_user_text, action.message,
@@ -3671,7 +3671,7 @@ async def _handle_post_booking(
             from app.engine import cancel_flow as _cancel_flow_mod2
 
             action = await _cancel_flow_mod2.start_cancel_flow(
-                db, chat_session, message_text
+                db, chat_session, message_text, org_config=org_config
             )
             await _save_transcript(
                 db, chat_session.session_id, _transcript_user_text, action.message,
@@ -3899,7 +3899,7 @@ async def _cancel_confirmed_booking(
         from app.engine import cancel_flow as _cancel_flow_gate
 
         action = await _cancel_flow_gate.start_cancel_flow(
-            db, chat_session, "cancel my booking"
+            db, chat_session, "cancel my booking", org_config=org_config
         )
         await _save_transcript(
             db, chat_session.session_id, "cancel my booking", action.message,
