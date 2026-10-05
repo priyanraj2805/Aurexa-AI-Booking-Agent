@@ -477,12 +477,31 @@ def _looks_like_keyboard_mash(word: str) -> bool:
     return any(row in lowered or lowered in row for row in _KEYBOARD_ROWS)
 
 
+# Self-introduction wrappers stripped before name checks. Without these,
+# "I am Rohan Verma" either fails the word-count cap (re-ask loop) or —
+# worse — passes a loose validator whole and is BOOKED as the customer's
+# name. Hinglish variants included ("mera naam Rohan hai", "main Rohan
+# hoon"): the Hindi copula trails, so it is stripped from the END, never
+# the front (a front-strip would eat the name itself). The remainder still
+# faces every strict check below.
+_INTRO_PREFIX_RE = re.compile(
+    r"^(?:i\s+am|i'?m|my\s+name\s+is|this\s+is|myself|it'?s\s+me|"
+    r"mera\s+naam|main)\b\s*",
+    flags=re.IGNORECASE,
+)
+_INTRO_SUFFIX_RE = re.compile(
+    r"\s*\b(?:hai|hoon|hu)\s*$",
+    flags=re.IGNORECASE,
+)
+
+
 def extract_opening_name(message_text: str) -> str:
     """Pull a person's name out of a customer's OPENING message.
 
         "Hi Yash"          -> "Yash"
         "Amanpreet Kaur"   -> "Amanpreet Kaur"
         "Hello! Amanpreet" -> "Amanpreet"
+        "I am Rohan Verma" -> "Rohan Verma"
 
     Returns "" for anything that is not a bare name, so a question, an email,
     a phone number, a date, a greeting on its own, or keysmash garbage is
@@ -496,6 +515,10 @@ def extract_opening_name(message_text: str) -> str:
     without_greeting = _GREETING_PREFIX_RE.sub("", raw).strip(" .!,…?")
     if not without_greeting:
         return ""
+    without_intro = _INTRO_PREFIX_RE.sub("", without_greeting)
+    without_intro = _INTRO_SUFFIX_RE.sub("", without_intro).strip(" .!,…?")
+    if without_intro:
+        without_greeting = without_intro
     # Anything structured is a different field, not a name.
     if any(ch.isdigit() for ch in without_greeting):
         return ""
@@ -671,9 +694,14 @@ def _extract_entities_without_llm(
             continue
 
         if parseable_name:
-            if not _looks_like_name_candidate(message_text):
+            # Strict shared extractor (strips "I am ...", greetings, Hinglish
+            # wrappers and rejects sentences/keysmash). The old code validated
+            # the RAW message, so "I am Rohan Verma" passed as a name and was
+            # BOOKED verbatim. A rejection here only re-asks — safe.
+            candidate = extract_opening_name(message_text)
+            if not candidate:
                 continue
-            parsed_name, err = DataValidator._validate_name(message_text)
+            parsed_name, err = DataValidator._validate_name(candidate)
             if not err and parsed_name:
                 extracted[field_name] = parsed_name
             continue

@@ -148,6 +148,28 @@ class TestExtractEntitiesWithoutLlm:
         )
         assert "name" not in result
 
+    def test_intro_sentence_yields_bare_name_not_sentence(self):
+        """Production: "I am Rohan Verma" was validated whole and BOOKED as
+        the customer name. The fallback must strip the introduction."""
+        result = _extract_entities_without_llm(
+            message_text="I am Rohan Verma",
+            missing_fields=["name"],
+            field_definitions=self.field_defs,
+            timezone_name="UTC",
+            max_booking_days=90,
+        )
+        assert result.get("name") == "Rohan Verma"
+
+    def test_question_never_becomes_name(self):
+        result = _extract_entities_without_llm(
+            message_text="what is the capital of France?",
+            missing_fields=["name"],
+            field_definitions=self.field_defs,
+            timezone_name="UTC",
+            max_booking_days=90,
+        )
+        assert "name" not in result
+
     def test_rejects_greeting_as_custom_field(self):
         result = _extract_entities_without_llm(
             message_text="hello",

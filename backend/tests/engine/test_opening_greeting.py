@@ -40,6 +40,12 @@ def test_reported_message_yields_the_name() -> None:
         ("Good morning Amanpreet", "Amanpreet"),
         ("Hello! Amanpreet.", "Amanpreet"),
         ("  Hi   Amanpreet   Kaur  ", "Amanpreet Kaur"),
+        # self-introductions: the wrapper goes, the name stays
+        ("I am Rohan Verma", "Rohan Verma"),
+        ("My name is Rohan Verma", "Rohan Verma"),
+        ("myself Rohan", "Rohan"),
+        ("mera naam Rohan hai", "Rohan"),
+        ("main Rohan hoon", "Rohan"),
     ],
 )
 def test_names_are_extracted(message: str, expected: str) -> None:
