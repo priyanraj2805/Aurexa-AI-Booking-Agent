@@ -139,8 +139,12 @@ async def test_third_identical_repeat_is_reframed_not_repeated(db_session):
     assert third != second
     assert "HUMAN" in third
     assert "phone" in third
+    # Capped: further identical turns go out plain — nagging every turn
+    # reads worse than the repetition it replaces.
     fourth = await whatsapp_client.break_identical_repeat(db_session, sess, body)
-    assert fourth != third  # rotation: never the same twice running
+    assert fourth == body
+    fifth = await whatsapp_client.break_identical_repeat(db_session, sess, body)
+    assert fifth == body
     fresh = await whatsapp_client.break_identical_repeat(
         db_session, sess, "What date works for you?"
     )

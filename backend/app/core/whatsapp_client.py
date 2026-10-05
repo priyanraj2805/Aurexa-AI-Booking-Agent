@@ -53,14 +53,15 @@ def attach_knowledge_answer(action_message: str, directive_body: str) -> str:
 
 
 def _repeat_escalation(body: str, chat_session, count: int) -> str:
-    """Reframed handoff for the 3rd+ consecutive identical reply.
+    """One-time reframed handoff for the 3rd consecutive identical reply.
 
     Returning ``body`` again would show the customer the same text for the
     third turn running — the exact "stuck bot" complaint. Instead the reply
-    is reframed around what is still needed (from missing_fields when
-    available), rotating phrasing by count so even the escalation never
-    repeats byte-identically twice in a row. The stored last-body is left
-    untouched, so genuine progress still resets the loop.
+    is reframed once around what is still needed (from missing_fields when
+    available). Further identical turns go out plain: the caller caps this
+    to once per episode, because nagging every turn reads worse than the
+    repetition. The stored last-body is left untouched, so genuine progress
+    still resets the loop.
     """
     need = ""
     try:
@@ -72,17 +73,11 @@ def _repeat_escalation(body: str, chat_session, count: int) -> str:
             need = f" I still need your {str(first).replace('_', ' ')} to move forward."
     except Exception:
         need = ""
-    if int(count or 0) <= 2:
-        return (
-            body
-            + "\n\nWe seem to be going in circles here —"
-            + need
-            + " Reply HUMAN to reach a person, or try saying it in different words."
-        )
     return (
-        "Still stuck on my end —"
+        body
+        + "\n\nWe seem to be going in circles here —"
         + need
-        + " A person can pick this up right away if you reply HUMAN."
+        + " Reply HUMAN to reach a person, or try saying it in different words."
     )
 
 
@@ -95,10 +90,11 @@ async def break_identical_repeat(db, chat_session, body: str) -> str:
     human or rephrase — instead of reading the same message forever.
     Nudges once per session to avoid nagging; different replies reset it.
 
-    A 3rd+ consecutive identical reply is reframed (never repeated
-    verbatim): the customer already saw the same text twice, so a third
-    copy reads as a broken bot. Fail-open: any error returns the body
-    untouched.
+    A 3rd consecutive identical reply is reframed once (never a third
+    verbatim copy). After that the plain body goes out: nagging every turn
+    with HUMAN text reads worse than the repetition it replaces, and the
+    stuck engine underneath is fixed at its own layer, not here. Fail-open:
+    any error returns the body untouched.
     """
     try:
         if not (body or "").strip():
@@ -124,7 +120,9 @@ async def break_identical_repeat(db, chat_session, body: str) -> str:
                     + "\n\nIf I'm repeating myself, sorry — reply HUMAN to reach "
                       "a person, or ask me anything in your own words."
                 )
-            if count >= 2:
+            if count >= 2 and not data.get("_repeat_escalated"):
+                data["_repeat_escalated"] = True
+                chat_session.collected_data = data
                 escalated = _repeat_escalation(body, chat_session, count)
                 try:
                     await crud_chat.update_chat_session(
@@ -140,6 +138,7 @@ async def break_identical_repeat(db, chat_session, body: str) -> str:
             return body
         data["_last_reply_body"] = body
         data["_repeat_count"] = 0
+        data.pop("_repeat_escalated", None)
         chat_session.collected_data = data
         try:
             await crud_chat.update_chat_session(
