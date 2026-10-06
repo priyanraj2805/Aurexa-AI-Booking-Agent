@@ -37,3 +37,35 @@ def validate_org_type(value: Optional[str]) -> str:
     if value == "organization":
         return "organization"
     return "individual"
+
+
+async def get_managed_unit_ids(db, user_id) -> list:
+    """Floors this staff member manages (empty = no dept restriction)."""
+    from sqlalchemy.future import select
+
+    from app.models.staff import StaffUnitScope
+
+    rows = (
+        await db.execute(
+            select(StaffUnitScope.unit_id).where(
+                StaffUnitScope.user_id == user_id
+            )
+        )
+    ).all()
+    return [str(r[0]) for r in rows]
+
+
+async def get_provider_id_for_user(db, org_id, user_id):
+    """Doctor row linked to this login (None = not a doctor login)."""
+    from sqlalchemy.future import select
+
+    from app.models.service_unit import Provider
+
+    prov = (
+        await db.execute(
+            select(Provider).where(
+                Provider.org_id == org_id, Provider.user_id == user_id
+            )
+        )
+    ).scalars().first()
+    return str(prov.id) if prov else None
