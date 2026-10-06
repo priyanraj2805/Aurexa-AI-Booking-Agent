@@ -56,6 +56,9 @@ class ProviderCreate(BaseModel):
     email: Optional[str] = Field(default=None, max_length=255)
     phone: Optional[str] = Field(default=None, max_length=50)
     is_active: bool = True
+    timezone: Optional[str] = Field(default=None, max_length=64)
+    slot_duration_minutes: Optional[int] = Field(default=None, gt=0, le=480)
+    booking_window_days: Optional[int] = Field(default=None, gt=0, le=365)
 
 
 class ProviderUpdate(BaseModel):
@@ -64,6 +67,9 @@ class ProviderUpdate(BaseModel):
     email: Optional[str] = Field(default=None, max_length=255)
     phone: Optional[str] = Field(default=None, max_length=50)
     is_active: Optional[bool] = None
+    timezone: Optional[str] = Field(default=None, max_length=64)
+    slot_duration_minutes: Optional[int] = Field(default=None, gt=0, le=480)
+    booking_window_days: Optional[int] = Field(default=None, gt=0, le=365)
 
 
 class ProviderOut(BaseModel):
@@ -74,6 +80,9 @@ class ProviderOut(BaseModel):
     phone: Optional[str] = None
     is_active: bool
     units: List[str] = []
+    timezone: Optional[str] = None
+    slot_duration_minutes: Optional[int] = None
+    booking_window_days: Optional[int] = None
 
 
 class AssignIn(BaseModel):
@@ -292,6 +301,9 @@ async def list_providers(
                 phone=p.phone,
                 is_active=bool(p.is_active),
                 units=[str(a.unit_id) for a in links],
+                timezone=getattr(p, "timezone", None),
+                slot_duration_minutes=getattr(p, "slot_duration_minutes", None),
+                booking_window_days=getattr(p, "booking_window_days", None),
             )
         )
     return out
@@ -313,6 +325,9 @@ async def create_provider(
         email=(data.email or "").strip() or None,
         phone=(data.phone or "").strip() or None,
         is_active=data.is_active,
+        timezone=(data.timezone or "").strip() or None,
+        slot_duration_minutes=data.slot_duration_minutes,
+        booking_window_days=data.booking_window_days,
         created_at=_now(),
         updated_at=_now(),
     )
@@ -329,6 +344,9 @@ async def create_provider(
         phone=provider.phone,
         is_active=bool(provider.is_active),
         units=[],
+        timezone=provider.timezone,
+        slot_duration_minutes=provider.slot_duration_minutes,
+        booking_window_days=provider.booking_window_days,
     )
 
 
@@ -352,6 +370,9 @@ async def get_provider(
         phone=provider.phone,
         is_active=bool(provider.is_active),
         units=[str(a.unit_id) for a in links],
+        timezone=getattr(provider, "timezone", None),
+        slot_duration_minutes=getattr(provider, "slot_duration_minutes", None),
+        booking_window_days=getattr(provider, "booking_window_days", None),
     )
 
 
@@ -378,6 +399,12 @@ async def update_provider(
         provider.phone = data.phone.strip() or None
     if data.is_active is not None:
         provider.is_active = bool(data.is_active)
+    if data.timezone is not None:
+        provider.timezone = data.timezone.strip() or None
+    if data.slot_duration_minutes is not None:
+        provider.slot_duration_minutes = data.slot_duration_minutes
+    if data.booking_window_days is not None:
+        provider.booking_window_days = data.booking_window_days
     provider.updated_at = _now()
     await db.commit()
     await db.refresh(provider)
@@ -424,6 +451,9 @@ async def unit_providers(
                 phone=p.phone,
                 is_active=bool(p.is_active),
                 units=[str(unit.id)],
+                timezone=getattr(p, "timezone", None),
+                slot_duration_minutes=getattr(p, "slot_duration_minutes", None),
+                booking_window_days=getattr(p, "booking_window_days", None),
             )
         )
     return out

@@ -12,6 +12,9 @@ class UserRegister(BaseModel):
     email: str = Field(min_length=5, max_length=255)
     password: str = Field(min_length=6, max_length=128)
     otp_code: str = Field(min_length=6, max_length=6)
+    # individual = single doctor shop, organization = hospital mall.
+    # Defaults to individual so old clients keep working.
+    org_type: Literal["individual", "organization"] = "individual"
 
 
 class UserLogin(BaseModel):
@@ -45,6 +48,7 @@ class UserResponse(BaseModel):
     full_name: str
     org_id: UUID4
     org_name: Optional[str] = None
+    org_type: str = "individual"
     avatar_url: Optional[str] = None
     is_active: bool
     created_at: datetime

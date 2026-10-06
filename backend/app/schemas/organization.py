@@ -23,6 +23,7 @@ class OrgConfigResponse(OrgConfigBase):
 class OrganizationResponse(OrganizationBase):
     id: UUID4
     api_key: str
+    type: str = "individual"
     created_at: datetime
     updated_at: datetime
 

@@ -60,6 +60,11 @@ class Provider(Base):
     role_label = Column(String(120), nullable=True)  # Doctor, Stylist, Coach…
     email = Column(String(255), nullable=True)
     phone = Column(String(50), nullable=True)
+    # Per-doctor timetable override (NULL = use org default).
+    # individual orgs leave these NULL; organization orgs set per doctor.
+    timezone = Column(String(64), nullable=True)
+    slot_duration_minutes = Column(Integer, nullable=True)
+    booking_window_days = Column(Integer, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True, server_default=sa.true())
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(

@@ -34,6 +34,20 @@ class ChatSession(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=True
     )
 
+    # Org-mode: remembers picked department + doctor in this chat
+    unit_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("service_units.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    provider_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("providers.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     # Human handoff fields
     human_agent_id = Column(
         UUID(as_uuid=True),

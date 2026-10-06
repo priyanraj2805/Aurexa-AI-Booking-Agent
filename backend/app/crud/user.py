@@ -32,11 +32,15 @@ async def create_user_with_org(db: AsyncSession, data: UserRegister) -> tuple:
     3. Create User linked to org
     Returns (user, org)
     """
-    # 1. Create org
+    # 1. Create org (individual shop vs organization mall)
+    org_type = getattr(data, "org_type", "individual") or "individual"
+    if org_type not in ("individual", "organization"):
+        org_type = "individual"
     org = Organization(
         name=data.org_name,
         api_key=_generate_api_key(),
         is_active=True,
+        type=org_type,
     )
     db.add(org)
     await db.flush()  # get org.id without committing

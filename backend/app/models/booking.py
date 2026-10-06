@@ -33,10 +33,25 @@ class TimeSlot(Base):
     end_time = Column(DateTime(timezone=True), nullable=False)
     is_booked = Column(Boolean, default=False, nullable=False)
     locked_until = Column(DateTime(timezone=True), nullable=True)
+    # Org-mode: NULL = individual/org-shared slot, set = that doctor's slot.
+    provider_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("providers.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    unit_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("service_units.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     __table_args__ = (
         Index("ix_timeslot_availability", "org_id", "is_booked", "start_time"),
-        UniqueConstraint("org_id", "start_time", name="uq_timeslot_org_start"),
+        # NOTE: uniqueness is enforced by partial indexes in org_mode_001
+        # (individual: unique org+start where provider NULL;
+        #  provider: unique org+provider+start) so two doctors can share a time.
     )
 
 
@@ -173,6 +188,13 @@ class ScheduleDay(Base):
         nullable=False,
         index=True,
     )
+    # NULL = org template hours, set = this doctor's override hours
+    provider_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("providers.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     day_of_week = Column(Integer, nullable=False)  # 0=Mon, 6=Sun
     is_active = Column(Boolean, nullable=False, default=True)
     open_time = Column(Time, nullable=True)
@@ -198,6 +220,13 @@ class ScheduleException(Base):
         index=True,
     )
     exception_date = Column(Date, nullable=False)
+    # NULL = org-wide closed/custom day, set = only this doctor affected
+    provider_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("providers.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     exception_type = Column(
         Enum(ExceptionType, name="exception_type_enum"),
         nullable=False,
