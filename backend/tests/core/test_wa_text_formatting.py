@@ -165,3 +165,27 @@ def test_full_reply_keeps_values_and_reads_cleanly() -> None:
 )
 def test_pipeline_is_safe_on_empty_input(raw) -> None:
     assert format_outbound(raw) == ""
+
+
+def test_leaked_business_hours_instruction_is_stripped() -> None:
+    raw = (
+        "## BUSINESS HOURS (authoritative — answer timing questions from this)\n"
+        "- Mon: 9:00 AM\n"
+        "Answer questions about opening hours, timings, availability windows or\n"
+        "booking rules directly from this block. Only start the booking flow when\n"
+        "the user actually wants to book an appointment.\n\n"
+        "We are closed on Sunday."
+    )
+    out = format_outbound(raw)
+    assert "BUSINESS HOURS" not in out
+    assert "Answer questions" not in out
+    assert "booking rules directly" not in out
+    assert "Only start the booking flow" not in out
+    assert "closed on Sunday" in out
+
+
+def test_no_header_still_strips_leaked_instruction() -> None:
+    raw = "Answer questions about opening hours, timings, availability windows or this block."
+    out = format_outbound(raw)
+    assert "Answer questions" not in out
+    assert "opening hours" not in out

@@ -186,6 +186,55 @@ def _normalize_llm_base_url(raw_url: str) -> str:
     return normalized
 
 
+def _blocked_identity_overwrites(
+    collected: Any,
+    validated_extracted: Any,
+    missing: Any,
+    reopen_fields: Any,
+    user_message: Any,
+) -> List[str]:
+    """Identity fields whose update must be dropped before the merge.
+
+    Updates apply only when the field is still missing, explicitly
+    reopened, or the turn's own message carries that kind of value (pure
+    parsing of the message text — digit/email shape, never word lists).
+    Date/time are exempt: users legitimately change them mid-flow and slot
+    availability judges. Returns the list of blocked field names.
+    """
+    try:
+        reopen_set = {
+            str(item or "").strip().lower()
+            for item in (reopen_fields or [])
+            if isinstance(item, str) and item.strip()
+        }
+        msg_digits = re.sub(r"\D", "", str(user_message or ""))
+        msg_shapes = {
+            "phone": 10 <= len(msg_digits) <= 15,
+            "email": bool(
+                re.search(
+                    r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
+                    str(user_message or ""),
+                )
+            ),
+        }
+        blocked: List[str] = []
+        for id_field in ("phone", "email"):
+            old_val = str((collected or {}).get(id_field) or "").strip()
+            new_val = str((validated_extracted or {}).get(id_field) or "").strip()
+            if (
+                old_val
+                and new_val
+                and new_val != old_val
+                and id_field not in (missing or [])
+                and id_field not in reopen_set
+                and not msg_shapes.get(id_field, False)
+            ):
+                blocked.append(id_field)
+        return blocked
+    except Exception:
+        return []
+
+
 # Initialize LLM
 # Groq is OpenAI-compatible, so we use ChatOpenAI with base_url
 _normalized_llm_base_url = _normalize_llm_base_url(settings.LLM_BASE_URL)
@@ -198,21 +247,37 @@ if _normalized_llm_base_url != settings.LLM_BASE_URL:
         },
     )
 
-# Mercury (Inception Labs) uses reasoning_effort param; pass only for that family
+# Mercury (Inception Labs) uses reasoning_effort param; pass only for that family.
+# Explicit retry/timeout on both clients: transient connection resets must be
+# retried in-client before the graph pays for a full fallback-LLM round trip.
 if "mercury" in settings.LLM_MODEL.lower():
     llm = ChatOpenAI(
         base_url=_normalized_llm_base_url,
         api_key=settings.LLM_API_KEY,
         model=settings.LLM_MODEL,
-        temperature=0,
+        temperature=0.5,
         reasoning_effort="low",
+        max_retries=3,
+        request_timeout=30.0,
+        # Cap completion length: our replies are short by design (a few
+        # hundred tokens), and an unbounded cap lets providers account the
+        # model maximum against per-minute token budgets — a direct 429
+        # driver on tight free tiers.
+        max_tokens=1000,
     )
 else:
     llm = ChatOpenAI(
         base_url=_normalized_llm_base_url,
         api_key=settings.LLM_API_KEY,
         model=settings.LLM_MODEL,
-        temperature=0,
+        temperature=0.5,
+        max_retries=3,
+        request_timeout=30.0,
+        # Cap completion length: our replies are short by design (a few
+        # hundred tokens), and an unbounded cap lets providers account the
+        # model maximum against per-minute token budgets — a direct 429
+        # driver on tight free tiers.
+        max_tokens=1000,
     )
 
 # Fallback LLM — used when the primary provider fails (rate limit, timeout,
@@ -223,7 +288,11 @@ if settings.LLM_FALLBACK_BASE_URL and settings.LLM_FALLBACK_API_KEY:
         base_url=_normalize_llm_base_url(settings.LLM_FALLBACK_BASE_URL),
         api_key=settings.LLM_FALLBACK_API_KEY,
         model=settings.LLM_FALLBACK_MODEL or settings.LLM_MODEL,
-        temperature=0,
+        temperature=0.5,
+        max_retries=3,
+        request_timeout=30.0,
+        # Same completion cap as primary (see above).
+        max_tokens=1000,
     )
     logger.info(
         "llm_fallback_configured",
@@ -481,7 +550,24 @@ async def call_model(
     hours_block = await load_weekly_hours_block(
         db, str(state.get("org_id") or "")
     )
-    sys_prompt = build_system_prompt(org_config, field_definitions, hours_block=hours_block)
+    # First-turn signal for the greeting rule: none of the booking fields
+    # collected yet (internal/metadata keys don't count). Deterministic
+    # flag; the wording stays the model's job.
+    _has_booking_data = False
+    try:
+        _collected_now = collected if isinstance(collected, dict) else {}
+        _has_booking_data = any(
+            str(_collected_now.get(_k) or "").strip()
+            for _k in ("name", "email", "phone", "date", "time")
+        )
+    except Exception:
+        _has_booking_data = False
+    sys_prompt = build_system_prompt(
+        org_config,
+        field_definitions,
+        hours_block=hours_block,
+        is_first_turn=not _has_booking_data,
+    )
     context_block = build_context_block(collected, missing, "ACTIVE")
     if active_summary:
         context_block = f"{context_block}\n\nConversation summary:\n{active_summary}"
@@ -1019,6 +1105,11 @@ async def call_model(
         conflicts = data.get("conflicts", {})
         unknown_fields = data.get("unknown_fields", [])
         reopen_fields = data.get("reopen_fields", [])
+        # Model-declared slot-list request: the customer asked for available
+        # times/slots in their own words (any language/paraphrase) and the
+        # renderer must answer with the computed inventory. Structured flag,
+        # never keyword code.
+        wants_slot_list = bool(data.get("wants_slot_list", False))
 
         # Name-grounding guard: company materials were injected this turn,
         # so every person-name-shaped phrase in the visible reply must occur
@@ -1164,27 +1255,121 @@ async def call_model(
         validation_errors: Dict[str, str] = {}
         validated_extracted = dict(extracted) if isinstance(extracted, dict) else {}
         validated_metadata: Dict[str, Dict[str, str]] = {}
+        # "name" is validated too: without it a day-word first message
+        # ("yesterday") sailed through merge and persisted as the customer's
+        # name, since only contact/date fields were checked. The name
+        # validator only rejects chitchat/digits/mash/date-words — real
+        # names always pass.
         extracted_for_validation = {
             key: value
             for key, value in validated_extracted.items()
-            if key in {"email", "phone", "date", "time"}
+            if key in {"email", "phone", "date", "time", "name"}
         }
+        # Time seatbelt: on terse time replies ("1:30pm", "10:30 AM") the
+        # model intermittently chats without emitting any entity, stalling
+        # the time step in a re-ask loop. When time is still needed and the
+        # turn carries nothing else, the deterministic time grammar fills
+        # it — the same parser validation uses, never a word list.
+        # parse_flexible_time returns None for chatter, sentences ("my
+        # preferred time is..."), phone numbers, and vague words
+        # ("morning"), so this only fires on clean time strings, and the
+        # normal validation + slot-availability checks still judge the value.
+        if (
+            "time" in (missing or [])
+            and "time" not in validated_extracted
+            and str(state.get("current_intent") or "START_BOOKING")
+            in ("START_BOOKING", "PROVIDE_DATA")
+        ):
+            try:
+                from app.engine.time_flex import parse_flexible_time as _pfl_seat
+
+                if _pfl_seat(str(latest_user_message or "")) is not None:
+                    _seat_time = str(latest_user_message or "").strip()
+                    validated_extracted["time"] = _seat_time
+                    extracted_for_validation["time"] = _seat_time
+            except Exception:
+                pass
+        # Contact seatbelts (phone/email): same model-dropout class as time —
+        # bare "6350063338" / "a@b.com" intermittently arrive with no entity
+        # and the steps stall in re-ask loops. Shape parsing only (digit /
+        # email grammar, never word lists); validation still judges.
+        if str(state.get("current_intent") or "START_BOOKING") in (
+            "START_BOOKING",
+            "PROVIDE_DATA",
+        ):
+            try:
+                _seat_msg = str(latest_user_message or "")
+                if "phone" in (missing or []) and "phone" not in validated_extracted:
+                    _seat_digits = re.sub(r"\D", "", _seat_msg)
+                    if 10 <= len(_seat_digits) <= 15:
+                        validated_extracted["phone"] = _seat_msg.strip()
+                        extracted_for_validation["phone"] = _seat_msg.strip()
+                if "email" in (missing or []) and "email" not in validated_extracted:
+                    _seat_email = re.search(
+                        r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
+                        _seat_msg,
+                    )
+                    if _seat_email:
+                        validated_extracted["email"] = _seat_email.group(0)
+                        extracted_for_validation["email"] = _seat_email.group(0)
+            except Exception:
+                pass
         date_reset_required = False
         fallback_reason = ""
         fallback_next_step = ""
         if extracted_for_validation:
+            # Admin's same-day policy enforced at date ENTRY: a "today" date
+            # is rejected here with a clear reason instead of being accepted
+            # and failing later at slot inventory (default deny, matching
+            # _slot_policy_kwargs).
+            _allow_same_day = bool(org_config.get("allow_same_day_booking", False))
             valid_entities, entity_errors, entity_metadata = DataValidator.validate_entities(
                 extracted_for_validation,
                 timezone=effective_timezone,
                 max_booking_days=max_booking_days,
                 include_metadata=True,
                 field_definitions=None,
+                allow_same_day_booking=_allow_same_day,
             )
             for key in list(extracted_for_validation.keys()):
                 if key in valid_entities:
                     validated_extracted[key] = valid_entities[key]
                 else:
                     validated_extracted.pop(key, None)
+            # Raw-literal fallback: the model sometimes emits a decorated
+            # phone/email variant (added spaces, guessed country code) that
+            # fails validation while the user's literal text is shape-clean.
+            # Prefer the literal — production: bare "9822014713" never stuck
+            # because decorated variants kept failing validation.
+            try:
+                _raw_msg_fb = str(latest_user_message or "")
+                if "phone" in entity_errors:
+                    _fb_digits = re.sub(r"\D", "", _raw_msg_fb)
+                    if 10 <= len(_fb_digits) <= 15:
+                        _fb_res, _fb_err, _ = DataValidator._validate_phone(
+                            _raw_msg_fb.strip()
+                        )
+                        if _fb_res and not _fb_err:
+                            valid_entities["phone"] = _fb_res
+                            validated_extracted["phone"] = _fb_res
+                            entity_errors.pop("phone", None)
+                            validation_errors.pop("phone", None)
+                if "email" in entity_errors:
+                    _fb_em = re.search(
+                        r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
+                        _raw_msg_fb,
+                    )
+                    if _fb_em:
+                        _fb_eres, _fb_eerr = DataValidator._validate_email(
+                            _fb_em.group(0)
+                        )
+                        if _fb_eres and not _fb_eerr:
+                            valid_entities["email"] = _fb_eres
+                            validated_extracted["email"] = _fb_eres
+                            entity_errors.pop("email", None)
+                            validation_errors.pop("email", None)
+            except Exception:
+                pass
             validation_errors.update(
                 {
                     key: value
@@ -1213,9 +1398,37 @@ async def call_model(
                 if not fallback_reason:
                     fallback_reason = "invalid_date_input"
                     fallback_next_step = "pick_another_date"
+                # Same-day refusal keeps its own reason code so the transport
+                # shows the crisp policy message, not a generic invalid-date
+                # prompt.
+                if "Same-day booking isn't available" in str(validation_errors.get("date") or ""):
+                    fallback_reason = "same_day_disabled"
+                    fallback_next_step = "pick_another_date"
 
         merged_invalid_fields = dict(invalid_fields) if isinstance(invalid_fields, dict) else {}
         merged_invalid_fields.update(validation_errors)
+
+        # Identity overwrite guard: a model-hallucinated phone/email that is
+        # structurally valid must never silently replace a collected value.
+        # Production: the customer's +91 number was overwritten by a
+        # hallucinated +212 number (assembled from sender metadata) on a
+        # turn that was not providing contact details — the OTP then went to
+        # a number that does not exist and the customer could never verify.
+        for _blocked_field in _blocked_identity_overwrites(
+            collected=collected,
+            validated_extracted=validated_extracted,
+            missing=missing,
+            reopen_fields=reopen_fields,
+            user_message=latest_user_message,
+        ):
+            logger.warning(
+                "identity_overwrite_blocked",
+                extra={
+                    "session_id": state.get("session_id"),
+                    "field": _blocked_field,
+                },
+            )
+            validated_extracted.pop(_blocked_field, None)
 
         merge_result = apply_state_merge(
             current_fields=collected,
@@ -1284,6 +1497,7 @@ async def call_model(
             "optional_skips": sorted(merge_result["optional_skips"]),
             "pending_conflict": merge_result["pending_conflict"],
             "follow_up_fields": gated_follow_up_fields,
+            "wants_slot_list": wants_slot_list,
             "captured_deltas": merge_result["captured_deltas"],
             "merge_diagnostics": merge_result["diagnostics"],
             "validation_errors": validation_errors,

@@ -40,16 +40,27 @@ def test_reported_message_yields_the_name() -> None:
         ("Good morning Amanpreet", "Amanpreet"),
         ("Hello! Amanpreet.", "Amanpreet"),
         ("  Hi   Amanpreet   Kaur  ", "Amanpreet Kaur"),
-        # self-introductions: the wrapper goes, the name stays
-        ("I am Rohan Verma", "Rohan Verma"),
-        ("My name is Rohan Verma", "Rohan Verma"),
-        ("myself Rohan", "Rohan"),
-        ("mera naam Rohan hai", "Rohan"),
-        ("main Rohan hoon", "Rohan"),
     ],
 )
 def test_names_are_extracted(message: str, expected: str) -> None:
     assert extract_opening_name(message) == expected
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # Self-introductions are the MODEL's job to parse — no keyword
+        # stripping here. The strict extractor rejects them so a wrapper
+        # can never be booked as a name; the flow simply re-asks.
+        "I am Rohan Verma",
+        "My name is Rohan Verma",
+        "mera naam Rohan hai",
+    ],
+)
+def test_self_introductions_are_not_parsed_by_keyword_code(
+    message: str,
+) -> None:
+    assert extract_opening_name(message) == ""
 
 
 # â”€â”€ must NOT be mistaken for a name â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

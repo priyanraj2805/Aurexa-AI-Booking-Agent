@@ -105,6 +105,37 @@ def test_clear_drops_an_expired_window() -> None:
     assert strike_count(data) == 0
 
 
+def test_expired_window_does_not_reopen_on_a_single_turn() -> None:
+    """Production: cooldown opened, 45 minutes of silence, one "hello" →
+    full fresh 5-minute window. Stale strikes must die with the expired
+    window, so the next countable turn starts back at one, not four."""
+    data: dict = {}
+    for _ in range(STRIKE_LIMIT):
+        record_offtopic(data)
+    assert is_cooling_down(data) is True
+    # Let the window lapse, then one more countable turn much later.
+    from app.engine.offtopic_cooldown import _UNTIL_KEY
+
+    data[_UNTIL_KEY] = time.time() - 1
+    assert is_cooling_down(data) is False
+    assert record_offtopic(data) == 1
+    assert strike_count(data) == 1
+    assert is_cooling_down(data) is False
+    assert _UNTIL_KEY not in data
+
+
+def test_sub_limit_strikes_still_accumulate_without_a_window() -> None:
+    """Two strikes with no window open must still lead to an opening on the
+    third — only EXPIRED windows reset the count, not the mere absence of
+    one."""
+    data: dict = {}
+    assert record_offtopic(data) == 1
+    assert record_offtopic(data) == 2
+    assert is_cooling_down(data) is False
+    assert record_offtopic(data) == 3
+    assert is_cooling_down(data) is True
+
+
 def test_strikes_survive_arbitrary_session_data() -> None:
     """The counter rides along with normal session fields, so a real session
     payload must not break it."""

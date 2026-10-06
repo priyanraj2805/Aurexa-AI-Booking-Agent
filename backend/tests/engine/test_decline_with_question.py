@@ -112,33 +112,20 @@ def test_cancellation_is_still_owned_by_the_cancel_flow() -> None:
     assert decline_flow.is_no_booking_request("cancel my booking") is False
 
 
-# ── ask-to-know shapes (no auxiliary verb, no question mark) ──────────────
+# ── mixed turns route to the MODEL, not to keyword code ───────────────────
+# Ask-to-know shapes ("i wanted to ask you about the GDP of India") carry
+# no keyword the gate recognises — deliberately. Understanding belongs to
+# the LLM (legacy gate sends multi-clause turns to it; the verdict path
+# prefers the model's own decline wording via reply_override). These cases
+# pin that the gate does NOT claim them.
 @pytest.mark.parametrize(
     "msg",
     [
         "but i dont want to book any appointment. i wanted to ask you about the gdp of india",
         "I don't want to book. I want to know about your timings",
-        "no booking. tell me about the gdp",
     ],
 )
-def test_ask_to_know_shapes_carry_a_question(msg: str) -> None:
-    """Production: the GDP turn read as a pure refusal and the question was
-    swallowed without a trace — the reply never showed the customer was
-    heard on the second half."""
-    assert decline_flow.carries_knowledge_question(msg) is True
-    assert "gdp" in decline_flow.question_part(msg).lower() or "timing" in decline_flow.question_part(msg).lower()
-
-
-@pytest.mark.parametrize(
-    "msg",
-    [
-        "I don't want to book",
-        "I don't want to book any appointment",
-        "no thanks",
-        "I want to book an appointment",
-    ],
-)
-def test_ask_to_know_patterns_dont_fire_on_plain_lines(msg: str) -> None:
+def test_ask_to_know_shapes_are_not_keyword_claims(msg: str) -> None:
     assert decline_flow.carries_knowledge_question(msg) is False
 
 

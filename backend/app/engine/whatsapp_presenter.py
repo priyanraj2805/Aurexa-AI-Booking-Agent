@@ -52,7 +52,7 @@ _FALLBACK_TONE = "friendly"
 # kept receiving in the middle of a booking. This one is honest about the
 # limit and hands the customer a concrete next step.
 _NO_KNOWLEDGE_REPLY = (
-    "I'm a booking assistant, so I can only help with appointments — "
+    "I'm a booking assistant, so I can only help with appointments. "
     "I don't have information about that.\n\n"
     "Here's what I can do for you right now:\n"
     "• Book a new appointment\n"
@@ -149,8 +149,8 @@ class WhatsAppPresenter:
             at_biz = f" at {biz}" if biz else ""
             clean_desc = desc.rstrip(".") if desc else ""
             fallback = (
-                f"Good question — we ask for your {label}{at_biz}"
-                f"{f' — {clean_desc}' if clean_desc else ''}. "
+                f"Good question, we ask for your {label}{at_biz}"
+                f"{f', {clean_desc}' if clean_desc else ''}. "
                 f"{step_title + ' ' if step_title else ''}Whenever you're ready, {step_prompt or 'just reply to continue.'}"
             )
 

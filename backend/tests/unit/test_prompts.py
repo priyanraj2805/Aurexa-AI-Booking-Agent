@@ -43,3 +43,32 @@ def test_graph_system_prompt_bans_ai_style():
     assert "em dash" in prompt.lower()
     assert "As an AI" in prompt
     assert "REQUIRED FIELDS" in prompt
+
+
+def test_first_turn_greeting_rule_in_both_prompts():
+    """The first reply must always open with a greeting, whatever the
+    first message contains — instructed to the MODEL, never keyword code."""
+    from app.engine.agent.prompts import build_system_prompt
+
+    graph_first = build_system_prompt(
+        {"business_name": "Test Biz", "persona": {}},
+        [{"name": "name", "type": "text", "required": True}],
+        is_first_turn=True,
+    )
+    assert "FIRST MESSAGE OF THE CONVERSATION" in graph_first
+    graph_later = build_system_prompt(
+        {"business_name": "Test Biz", "persona": {}},
+        [{"name": "name", "type": "text", "required": True}],
+        is_first_turn=False,
+    )
+    assert "FIRST MESSAGE OF THE CONVERSATION" not in graph_later
+
+    unified_first = PromptGenerator.build_unified_turn_prompt(
+        "what are your hours?", ["name"], {}, "START_BOOKING",
+        is_first_turn=True,
+    )
+    assert "FIRST MESSAGE OF THE CONVERSATION" in unified_first
+    unified_later = PromptGenerator.build_unified_turn_prompt(
+        "what are your hours?", ["email"], {"name": "X"}, "PROVIDE_DATA",
+    )
+    assert "FIRST MESSAGE OF THE CONVERSATION" not in unified_later

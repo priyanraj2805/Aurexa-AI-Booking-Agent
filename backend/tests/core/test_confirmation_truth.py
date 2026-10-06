@@ -27,7 +27,30 @@ FALSE_CONFIRMATIONS = [
     "Great, your appointment is confirmed. We look forward to seeing you.",
     "Your appointment has been booked for tomorrow at 10 AM.",
     "All confirmed! See you on 5 October at 3 PM.",
+    # Date/time subjects with a completion adverb (production 2026-10-05:
+    # "That date is already confirmed for your appointment." reached a
+    # customer with no Booking row).
+    "That date is already confirmed for your appointment.",
+    "I see you're looking at October 6, 2026. That date is already "
+    "confirmed for your appointment.",
+    "Your time is successfully booked.",
 ]
+
+
+def test_date_subject_claims_need_an_adverb_of_completion() -> None:
+    """Bare date/time phrasing must stay safe: questions, mid-flow text
+    ("the date is set"), negations and confirm-requests are not claims."""
+    for safe in [
+        "The date is set for October 6, please pick a time.",
+        "Is your date confirmed?",
+        "Please confirm the booking.",
+        "Your slot is not booked yet.",
+        "Thanks. What date would you like to book?",
+        "That date is confirmed?",  # question form, no adverb
+    ]:
+        assert looks_like_confirmation_claim(safe) is False, (
+            f"a legitimate message would be wrongly blocked: {safe!r}"
+        )
 
 
 def test_every_false_confirmation_phrase_is_detected() -> None:

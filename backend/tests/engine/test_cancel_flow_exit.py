@@ -38,6 +38,16 @@ class TestIsCancelExitRequest:
         for msg in ("it's ok", "it okay", "it is fine", "it's alright"):
             assert is_cancel_exit_request(msg), f"expected exit intent for: {msg}"
 
+    def test_bare_cancel_is_cancel_intent(self) -> None:
+        """Production: bare "Cancel" matched no pattern, so routing fell to
+        the LLM verdict, which flip-flopped across identical turns (summary
+        card, farewell, summary, lookup). A whole-message "cancel" is
+        unambiguous and routes deterministically."""
+        from app.engine.cancel_flow import is_cancel_intent
+
+        for text in ("Cancel", "cancel", "CANCEL", "Cancel.", "  cancel  "):
+            assert is_cancel_intent(text) is True
+
     def test_real_cancel_intents_do_not_exit(self) -> None:
         for msg in (
             "cancel my booking",

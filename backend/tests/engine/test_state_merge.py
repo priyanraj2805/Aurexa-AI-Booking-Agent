@@ -89,3 +89,21 @@ def test_unknown_fields_are_logged_and_do_not_block_progression() -> None:
     assert result["collected_fields"] == {"name": "Ada", "email": "ada@test.com"}
     assert result["missing_fields"] == []
     assert result["diagnostics"]["unknown_fields"] == {"favorite_color": "blue"}
+
+
+def test_null_and_empty_extractions_never_clobber_saved_values() -> None:
+    """Production: collected email/phone/date vanished on outage and
+    off-topic turns when the merge wrote null/empty over stored values,
+    then re-asked for them as if never given. There is no clear-field UX,
+    so empty can never be fresher than stored data."""
+    result = apply_state_merge(
+        current_fields={"name": "Raghav", "email": "r@test.com", "phone": "+911234567890"},
+        extracted_fields={"email": None, "phone": "", "date": "2026-10-22"},
+        required_fields=["name", "email", "phone", "date"],
+        optional_fields=[],
+    )
+
+    assert result["collected_fields"]["email"] == "r@test.com"
+    assert result["collected_fields"]["phone"] == "+911234567890"
+    assert result["collected_fields"]["date"] == "2026-10-22"
+    assert result["follow_up_fields"] == []

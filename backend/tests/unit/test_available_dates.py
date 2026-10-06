@@ -141,6 +141,42 @@ async def test_answer_lists_only_bookable_dates(db_session):
 
 
 @pytest.mark.asyncio
+def test_relative_day_words_resolve_to_iso() -> None:
+    """Production loop: "Tomorrow" never parsed, so the date stayed pinned
+    to a slot-less day and the bot repeated "No available slots" forever.
+    Full-string match only — sentences and absolute dates pass through."""
+    from datetime import timedelta as _timedelta
+    from zoneinfo import ZoneInfo as _ZoneInfo
+
+    from app.engine.validators import DataValidator, _resolve_relative_date
+
+    # Timezone-consistent: the resolver computes in the passed tz, so the
+    # expectation must use the same tz — naive date.today() (host clock)
+    # disagrees near midnight across zones and flakes the test.
+    utc_today = datetime.now(_ZoneInfo("UTC")).date()
+    assert _resolve_relative_date("tomorrow", "UTC") == (
+        utc_today + _timedelta(days=1)
+    ).isoformat()
+    assert _resolve_relative_date("  Tomorrow  ", "UTC") is not None
+    assert _resolve_relative_date("2026-10-06", "UTC") is None
+    assert _resolve_relative_date("book for tomorrow please", "UTC") is None
+    assert _resolve_relative_date("", "UTC") is None
+    valid, err = DataValidator._validate_date("tomorrow", "UTC", 90)
+    assert err is None and valid
+
+
+def test_horizon_names_closed_days() -> None:
+    """The date prompt must say which days are shut, so customers don't
+    discover it by trial and error ("We are closed on Sunday.")."""
+    from app.engine.message_processor import _format_available_dates_for_prompt
+
+    out = _format_available_dates_for_prompt("UTC", 60, closed_weekdays=[6])
+    assert "We are closed on Sunday." in out
+    assert "within this horizon" in out
+    plain = _format_available_dates_for_prompt("UTC", 60, closed_weekdays=[])
+    assert "closed on" not in plain
+
+
 async def test_answer_non_inquiry_returns_none(db_session):
     answer = await lookup_available_dates_answer(
         db=db_session,

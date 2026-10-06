@@ -219,110 +219,10 @@ _OFFTOPIC_DECLINE_RE = re.compile(
 )
 
 _OFFTOPIC_REPLY = (
-    "I'm a booking assistant, so I can only help with appointments — "
+    "I'm a booking assistant, so I can only help with appointments. "
     "I don't have information about that.\n\n"
     "Is there anything I can help you book, check or reschedule?"
 )
-
-# Words that carry no topic on their own — echoing them back ("you're
-# asking about hi") reads silly instead of attentive. Split into leading
-# filler (stripped from the front) and trailing filler (stripped from the
-# back); the topic almost always sits at the END ("tell me about X",
-# "what is X"), so over-long topics are cut from the front, never the tail.
-_DECLINE_TOPIC_FILLER = frozenset(
-    {
-        "hi", "hii", "hello", "hey", "yo", "thanks", "thank", "you",
-        "please", "ok", "okay", "bye", "sorry", "yes", "no", "good",
-        "morning", "evening", "night", "dear", "sir", "bro", "brooo",
-        "bhai", "bhaiya", "yrr", "yrrr",
-        "i", "ive", "i've", "we", "my", "me", "u", "ur", "he", "she",
-        "they", "it", "this", "that", "a", "an", "the", "to", "do",
-        "mujhe", "mujhko", "muj", "mere", "mera", "meri", "ko", "ke",
-        "ki", "ka", "kya", "hai", "hain", "ho", "tha", "thi", "the",
-        "toh", "abhi", "na", "batao", "btao", "bataiye", "karo", "karein",
-        "do", "jara", "zara", "thoda", "please", "kindly", "aap", "ap",
-        "tum", "tu", "tujhe", "mujhe", "liye", "baare", "mein", "main",
-        "to", "know", "know,", "want", "wants", "about", "an", "the",
-        "for", "of", "on", "at", "in", "and", "or", "so", "is", "it",
-    }
-)
-
-# Leading interrogatives / request openers stripped to reach the topic.
-_DECLINE_TOPIC_OPENER_RE = re.compile(
-    r"^(?:who|what|when|where|why|how|which|whose|whom|is|are|was|were|"
-    r"do|does|did|can|could|would|should|will|shall|may|tell\s+me|show\s+me|"
-    r"give\s+me|list|explain|describe|define)\b\s*",
-    flags=re.IGNORECASE,
-)
-
-
-def _decline_topic(user_text: str | None) -> str | None:
-    """Short verbatim topic slice of the user's message, or None.
-
-    Used to acknowledge THAT message inside an off-topic decline ("you're
-    asking about ...") so consecutive declines are never byte-identical and
-    the customer feels heard. It is a substring of what the customer wrote
-    — never a new factual claim — so it cannot hallucinate. Returns None
-    for chitchat, field-data-like text (emails, digit strings), or anything
-    without a usable topic, in which case the generic decline is used.
-
-    Filler is stripped from BOTH ends and over-long topics keep the TAIL:
-    "Bro i want to know about president of India" yields "president of
-    India" — cutting from the front previously kept the filler and dropped
-    the actual topic.
-    """
-    text = str(user_text or "").strip()
-    if not text:
-        return None
-    # Field data is not a topic (an email address is never "what you ask").
-    # Checked on the FULL text first: splitting "arjun.nair@example.com" on
-    # dots would otherwise leave a misleading "arjun" slice.
-    if "@" in text or sum(1 for ch in text if ch.isdigit()) >= 7:
-        return None
-    # First clause only; single line, no quotes/backticks/control chars.
-    first = re.split(r"[\n.!?]+", text, maxsplit=1)[0]
-    first = re.sub(r"[`\"'*_~#]", "", first).strip()
-    first = re.sub(r"\s+", " ", first)
-    if not first:
-        return None
-    topic = _DECLINE_TOPIC_OPENER_RE.sub("", first).strip()
-    words = [w for w in re.sub(r"\s+", " ", topic).split(" ") if w]
-    while words and words[0].lower() in _DECLINE_TOPIC_FILLER:
-        words.pop(0)
-    while words and words[-1].lower() in _DECLINE_TOPIC_FILLER:
-        words.pop()
-    if not words:
-        return None
-    if len(words) == 1 and words[0].lower() in _DECLINE_TOPIC_FILLER:
-        return None
-    # Keep the tail: the topic comes last ("tell me about X").
-    if len(words) > 6:
-        words = words[-6:]
-    topic = " ".join(words)
-    if len(topic) > 48:
-        topic = topic[-48:].lstrip()
-        topic = re.sub(r"^[a-zA-Z0-9']+\s+", "", topic).strip() or topic
-    if not topic:
-        return None
-    return topic
-
-
-def _offtopic_reply_for_topic(topic: str | None) -> str:
-    """Decline naming the user's topic, or the generic decline.
-
-    The boundary sentence ("I'm a booking assistant, so I can only help
-    with appointments") is always kept verbatim: strike/cooldown counting
-    keys off it, so a topical decline must count exactly like the generic
-    one. No facts are asserted beyond quoting the customer's own words.
-    """
-    if not topic:
-        return _OFFTOPIC_REPLY
-    return (
-        f"Got it — you're asking about {topic}. I'm a booking assistant, so "
-        f"I can only help with appointments — I don't have information about "
-        f"that.\n\n"
-        f"Is there anything I can help you book, check or reschedule?"
-    )
 
 # How much real content must appear before a decline marker for the reply to
 # count as a PARTIAL answer. Long enough that a throwaway clause like "I don't
@@ -395,7 +295,7 @@ def _strip_internal_scaffolding(text: str) -> str:
     return cleaned.strip()
 
 
-def _normalise_offtopic_decline(reply: str, user_text: str | None = None) -> str:
+def _normalise_offtopic_decline(reply: str) -> str:
     """Return one consistent, warm decline for every off-topic question.
 
     The model invents a new cold phrasing on nearly every call ("...in our
@@ -411,17 +311,10 @@ def _normalise_offtopic_decline(reply: str, user_text: str | None = None) -> str
     everything, which is worse for the customer than the cold phrasing it was
     meant to fix.
 
-    When ``user_text`` is given, the decline names the customer's topic
-    ("you're asking about ...") so every message is visibly acknowledged
-    and consecutive declines are never byte-identical — without it, four
-    trivia questions in a row got four copies of one reply and customers
-    read it as the bot being stuck. The topic is a verbatim slice of their
-    own words, never a new factual claim, so this cannot hallucinate. The
-    boundary sentence is kept verbatim so strike/cooldown counting treats a
-    topical decline exactly like the generic one. Omitting ``user_text``
-    preserves the exact legacy output.
+    Topic acknowledgement lives in the MODEL (prompt-instructed to mirror
+    the user's topic warmly), not in keyword code here.
     """
-    _decline = _offtopic_reply_for_topic(_decline_topic(user_text))
+    _decline = _OFFTOPIC_REPLY
     text = str(reply or "").strip()
     if not text:
         return _decline
@@ -468,30 +361,14 @@ def _normalise_offtopic_decline(reply: str, user_text: str | None = None) -> str
     return _decline
 
 
-# Explicit slot-availability questions ("tell me timings", "available
-# times", "which slots are free"). Unlike idle chatter ("do you have
-# parking?"), these MUST be answered with the computed slot list: the graph
-# has no inventory in its prompt, so leaving its answer intact makes the bot
-# say "I don't have a list of open time slots" while slots exist.
-# Deliberately narrow — date questions ("which dates are open?") and hours
-# questions ("what time do you close?") belong to other paths.
-_SLOT_REQUEST_RE = re.compile(
-    r"\b(?:available|free|open|empty|vacant)\s+(?:time|times|slot|slots|timings?)\b"
-    r"|\b(?:timings?|slots?)\s+(?:are\s+|is\s+)?(?:available|free|open|for|on)\b"
-    r"|\b(?:show|tell|give|send|list)\s+me\s+[^.!?]{0,60}?\b(?:time|times|slot|slots|timings?)\b"
-    r"|\bwhat\s+(?:time|times|slots?)\b[^.!?]{0,40}?\b(?:available|free|open)\b"
-    r"|\b(?:timings?|time|slot|slots?)\s+(?:batao|bataiye|btao|dikhao|dikhaiye|bhejo)\b"
-    r"|\b(?:batao|bataiye|btao|dikhao|dikhaiye|bhejo)\b[^.!?]{0,40}?\b(?:time|timings?|slot|slots?)\b",
-    flags=re.IGNORECASE,
-)
-
-
-def _asks_for_available_slots(message_text: str | None) -> bool:
-    """True when the customer explicitly asks for the slot/timing list."""
-    text = str(message_text or "").strip()
-    if not text:
-        return False
-    return bool(_SLOT_REQUEST_RE.search(text))
+# Whether the customer asked for the slot/timing list comes from the MODEL
+# (structured `wants_slot_list` flag in its JSON output), never from keyword
+# code here: "tell me timings", "timings batao" and a hundred paraphrases in
+# every language mean the same thing, and no word list covers them. Unlike
+# idle chatter ("do you have parking?"), an explicit slot question MUST be
+# answered with the computed slot list — the graph has no inventory in its
+# prompt, so leaving its answer intact makes the bot say "I don't have a
+# list of open time slots" while slots exist.
 
 
 def _date_provided_this_turn(
@@ -978,6 +855,53 @@ def _guard_user_visible_booking_message(
             (field_meta or {}).get("label") or active_field.replace("_", " ")
         ).lower()
         return f"I couldn't save that {label}. {invalid_error}"
+
+    # Hollow saved-claim: the message asserts a field is on file ("I have
+    # your phone number on file") while it is still missing AND nothing
+    # failed validation this turn (the branch above only covers rejected
+    # values). Production: the claim stood, the customer believed the
+    # number was done, and the flow asked for it forever. Fires only when
+    # the claim names the still-missing field — a true claim about a saved
+    # field ("I've got your email" with email stored) passes untouched.
+    try:
+        _hc_raw_collected = getattr(chat_session, "collected_data", None)
+        _hc_collected = (
+            dict(_hc_raw_collected) if isinstance(_hc_raw_collected, dict) else {}
+        )
+    except Exception:
+        _hc_collected = {}
+    try:
+        if isinstance(fd_map, dict) and str(assistant_message or "").strip():
+            # Sentence-scoped: a true claim about a SAVED field ("I've got
+            # your email" + email stored) must not trip on a missing one.
+            # Only a sentence that BOTH names the missing field AND claims
+            # it saved counts.
+            _hc_sentences = re.split(
+                r"(?<=[.!?])\s+", str(assistant_message or "").strip()
+            )
+            for _hc_name, _hc_fd in fd_map.items():
+                if not bool(getattr(_hc_fd, "required", True)):
+                    continue
+                if str(_hc_collected.get(_hc_name) or "").strip():
+                    continue
+                _hc_label = str(getattr(_hc_fd, "label", "") or _hc_name).strip()
+                _hc_words = {
+                    _w
+                    for _w in re.split(r"[^a-z]+", _hc_label.lower())
+                    if len(_w) > 2
+                } | {str(_hc_name).lower().replace("_", " ")}
+                _hc_hit = False
+                for _hc_sent in _hc_sentences:
+                    _hc_sent_lower = _hc_sent.lower()
+                    if not any(_w in _hc_sent_lower for _w in _hc_words):
+                        continue
+                    if looks_like_field_saved_claim(_hc_sent, _hc_name):
+                        _hc_hit = True
+                        break
+                if _hc_hit:
+                    return f"Could you please share your {_hc_label.lower()}?"
+    except Exception:
+        pass
 
     # Required-field waiver: the model agreed to drop a field that is still
     # missing ("I understand. I can skip the phone number too."). The
@@ -2254,6 +2178,21 @@ async def process_message_with_graph(
     # cancellation flow instead of applying booking state.
     llm_intent = str((structured_assistant_payload or {}).get("user_intent") or "")
     if cancel_flow.is_cancel_intent(message_text, llm_user_intent=llm_intent):
+        # The confirm screen offers "Cancel to stop": on a complete but
+        # unbooked draft that means the DRAFT, never an existing booking.
+        _aborted = await cancel_flow.maybe_abort_unbooked_draft(
+            db, chat_session, message_text, org_config=org_config, org=org
+        )
+        if _aborted is not None:
+            await _persist_transcript_best_effort(
+                db,
+                session_id=session_id,
+                user_message=_transcript_user_text, user_external_id=_inbound_id,
+                assistant_message=_aborted.message,
+                directive=_aborted.widget_directive or "TEXT_INPUT",
+                intent=chat_session.current_intent,
+            )
+            return _aborted
         action = await cancel_flow.start_cancel_flow(
             db, chat_session, message_text, org_config=org_config
         )
@@ -2291,8 +2230,17 @@ async def process_message_with_graph(
             # question is answered on its merits instead of swallowed.
             await decline_flow.record_decline(db, chat_session)
         else:
+            # The model's own decline wording flows when substantive (it was
+            # instructed to mirror the user's topic warmly); the canned
+            # farewell covers trivial/empty model text. Either way the latch
+            # is recorded inside start_decline.
             return await decline_flow.start_decline(
-                db, org, chat_session, message_text, inbound_message_id=_inbound_id
+                db,
+                org,
+                chat_session,
+                message_text,
+                inbound_message_id=_inbound_id,
+                reply_override=assistant_message,
             )
     elif _verdict and decline_flow.is_declined(chat_session):
         await decline_flow.clear_decline(db, chat_session)
@@ -2317,6 +2265,15 @@ async def process_message_with_graph(
     if isinstance(collected_fields, dict):
         merged_collected_data = dict(existing_collected_data)
         merged_collected_data.update(collected_fields)
+        # Second half of the no-clobber rule (see state_merge): if the graph
+        # returned a null/empty for something already saved, keep the saved
+        # value. Production lost email/phone/date this way on outage and
+        # off-topic turns, then re-asked for them as if never given.
+        for _keep_key, _keep_value in existing_collected_data.items():
+            if _keep_value not in (None, "") and merged_collected_data.get(
+                _keep_key
+            ) in (None, ""):
+                merged_collected_data[_keep_key] = _keep_value
         if isinstance(validated_field_metadata, dict):
             phone_meta = validated_field_metadata.get("phone")
             if isinstance(phone_meta, dict):
@@ -2924,22 +2881,28 @@ async def process_message_with_graph(
                                                 else None
                                             ),
                                         )
-                                        # An explicit "show me the timings" question
-                                        # must render the computed list even on
-                                        # a question turn: the graph has no
-                                        # inventory in its prompt, so its answer
-                                        # is an honest-but-wrong "I don't have
-                                        # a list". Idle chatter keeps the
-                                        # graph's answer (re-rendering the grid
-                                        # there trapped customers in identical
-                                        # slot lists).
-                                        _explicit_slot_request = bool(
-                                            _asks_for_available_slots(message_text)
+                                        # Time step shows the computed list — no
+                                        # interrogation ("what time works for
+                                        # you?") without options. The graph has
+                                        # no inventory in its prompt, so without
+                                        # this its answer is an honest-but-wrong
+                                        # "I don't have a list". Skipped ONLY
+                                        # for genuine knowledge answers (a real
+                                        # answer must never be buried under a
+                                        # grid); idle chatter gets answer PLUS
+                                        # the list via attach_knowledge_answer
+                                        # downstream, never a bare question.
+                                        _has_real_answer = bool(
+                                            (result.get("knowledge_answer") or False)
+                                            or (
+                                                isinstance(field_meta, dict)
+                                                and field_meta.get("knowledge_answer")
+                                            )
                                         )
                                         if (
                                             not _is_time_attempt
                                             and not _provided_this_turn
-                                            and not _explicit_slot_request
+                                            and _has_real_answer
                                             and str(
                                             getattr(chat_session, "current_intent", "")
                                         ) in ("ASK_QUESTION", "PROVIDE_DATA")
@@ -3093,22 +3056,86 @@ async def process_message_with_graph(
                             field_meta[_k] = _v
         except Exception as _e:
             logger.exception(f"Directive create failed: {_e}")
-    # WhatsApp date step presentation.
-    #
-    # The customer is told the booking window in words, not shown a list of day
-    # names:
+    # WhatsApp date step presentation: horizon words ONLY — never a day
+    # list. The customer picks the date themselves ("10th of October");
+    # a day menu is explicitly unwanted here. Exact shape:
     #
     #   Select your preferred date
     #
     #   We are available from 29 September 2026 to 29 September 2027, please
     #   choose a date within this horizon. (All dates in Africa/Algiers.)
-    #
-    # A "Available dates: Thu, Oct 01 ..." line was tried and reverted. It
-    # reads as a menu, and any day on it can turn out to be full, so the
-    # customer picks from it and is then told the day is unavailable. The
-    # horizon plus the closed-day note is what they need, and it cannot go
-    # stale between being sent and being used.
-    if _is_whatsapp and directive == "REQUIRE_DATE_PICKER":
+    # The horizon must ride along on EVERY WhatsApp turn that asks for the
+    # date — not only REQUIRE_DATE_PICKER turns. Date asks also go out as
+    # TEXT_INPUT (evaluator choice, silent/partial graph results with empty
+    # follow-ups, draft-abort, recovery messages), and those arrived with no
+    # horizon at all, so customers picked blindly and got bounced.
+    # Fresh missing computed from merged collected data — NOT the
+    # missing_fields column, which stays stale when the graph returns a
+    # silent/partial result (empty follow-ups skip the sync). Production:
+    # a combined name+email+phone turn saved all three but left the column
+    # at the previous turn's list, so the date ask went out horizon-less.
+    try:
+        from app.schemas.agent import get_required_field_names as _wa_req_names
+
+        _wa_req = (
+            _wa_req_names(field_definitions)
+            if isinstance(field_definitions, list)
+            else []
+        )
+        _wa_collected_now = dict(chat_session.collected_data or {})
+        _wa_missing_now = [
+            _f
+            for _f in _wa_req
+            if not str(_wa_collected_now.get(_f) or "").strip()
+        ]
+        if not _wa_missing_now:
+            _wa_missing_now = list(chat_session.missing_fields or [])
+    except Exception:
+        try:
+            _wa_missing_now = list(chat_session.missing_fields or [])
+        except Exception:
+            _wa_missing_now = []
+    # _reply_asks_pending distinguishes collection turns (reply asks the
+    # pending field) from pure knowledge answers (reply answers something
+    # else). Uses the FRESH missing above, never the possibly-stale column.
+    # Same flag gates the knowledge early-return below, so the two can never
+    # disagree: collection asks keep their horizon/list, answers pass through.
+    _reply_asks_pending = False
+    try:
+        if (
+            _wa_missing_now
+            and str(current_intent) in ("START_BOOKING", "PROVIDE_DATA")
+            and isinstance(assistant_message, str)
+            and assistant_message.strip()
+        ):
+            _pfd_now = fd_map.get(_wa_missing_now[0]) if isinstance(fd_map, dict) else None
+            _plabel_now = (
+                str(getattr(_pfd_now, "label", "") or "") if _pfd_now is not None else ""
+            )
+            _reply_asks_pending = bool(
+                message_processor._response_asks_for_field(
+                    assistant_message, _wa_missing_now[0], _plabel_now or None
+                )
+            )
+    except Exception:
+        _reply_asks_pending = False
+    # Scoped to date on purpose: _reply_asks_pending covers ANY pending
+    # field, and OR-ing it here would staple the horizon onto phone/email
+    # asks too. Date-pending turns are covered by the missing clause.
+    # Both clauses require the date to be genuinely outstanding: a stale
+    # REQUIRE_DATE_PICKER on a fully-collected turn (confirm screen) must
+    # NOT staple a date list onto the summary. Production: "Would you like
+    # me to confirm this booking now?" went out with the whole date menu.
+    _wa_asks_date = (
+        len(_wa_missing_now) > 0 and _wa_missing_now[0] == "date"
+    ) or (
+        directive == "REQUIRE_DATE_PICKER" and "date" in _wa_missing_now
+    )
+    # Horizon text stash: date-reset refusals (below) replace the whole
+    # message with the verdict, which would drop the horizon appended
+    # above. Keeping it here lets the refusal carry it along.
+    _wa_horizon_text = ""
+    if _is_whatsapp and _wa_asks_date:
         try:
             from app.engine.message_processor import (
                 _format_available_dates_for_prompt as _fmt_wa_date,
@@ -3122,15 +3149,60 @@ async def process_message_with_graph(
                 _wa_max = (await _wa_horizon(db, org.id, org_config))[0]
             except Exception:
                 _wa_max = 90
-            _wa_desc = _fmt_wa_date(_wa_tz, _wa_max)
-            if _wa_desc and isinstance(assistant_message, str) and assistant_message.strip():
-                _wa_head = "Select your preferred date"
-                if _wa_desc not in assistant_message:
+            # Closed-days note ("We are closed on Sunday."): without it the
+            # customer only learns about closed days by trial and error.
+            try:
+                from app.engine.message_processor import (
+                    fetch_closed_weekdays as _wa_closed,
+                )
+
+                _wa_closed_days = await _wa_closed(db, org.id)
+            except Exception:
+                _wa_closed_days = []
+            _wa_desc = _fmt_wa_date(
+                _wa_tz, _wa_max, closed_weekdays=_wa_closed_days
+            )
+            _wa_horizon_text = str(_wa_desc or "").strip()
+            # No day list on WhatsApp, by product requirement: the date step
+            # is ask + head + horizon window only. Concrete day menus are
+            # fully restricted on this channel (a listed day can still turn
+            # out full, and the list reads as noise next to the horizon).
+            # The time step still lists its slots — the customer has to see
+            # them to reply with one.
+            # Empty model text still gets a complete standalone ask (head +
+            # horizon). Otherwise the turn leaves here with nothing and a
+            # downstream deterministic fill asks bare, horizon-less.
+            if _wa_desc and isinstance(assistant_message, str):
+                _wa_msg_lower = str(assistant_message or "").lower()
+                if not _wa_msg_lower.strip():
                     assistant_message = (
-                        f"{assistant_message.rstrip()}\n\n{_wa_head}\n\n{_wa_desc}"
-                        if _wa_head.lower() not in assistant_message.lower()
-                        else f"{assistant_message.rstrip()}\n\n{_wa_desc}"
+                        f"Select your preferred date.\n\n{_wa_desc}"
                     )
+                    _wa_msg_lower = assistant_message.lower()
+                # Head ends with a period on purpose: if any downstream
+                # render ever joins the lines, it still reads as two clean
+                # sentences instead of a glued fragment.
+                _wa_head = "Select your preferred date."
+                # The model learns the date-step shape and sometimes states
+                # the range itself ("...from 5 October to 4 December"), often
+                # shortened. Exact-substring dedupe misses the variant and
+                # the full horizon lands twice, glued mid-sentence. The
+                # template's own invariant prefix is the robust signal (this
+                # recognizes OUR generated text, never user input).
+                _wa_msg_lower = assistant_message.lower()
+                _wa_has_horizon = (
+                    _wa_desc in assistant_message
+                    or "we are available from" in _wa_msg_lower
+                )
+                if not _wa_has_horizon:
+                    # The head ALWAYS rides along when absent (even if the
+                    # model already asks): the required shape is ask + head
+                    # + horizon, exactly as specified.
+                    _wa_parts = [assistant_message.rstrip()]
+                    if _wa_head.lower() not in _wa_msg_lower:
+                        _wa_parts.append(_wa_head)
+                    _wa_parts.append(_wa_desc)
+                    assistant_message = "\n\n".join(_wa_parts)
                 logger.info("DATE_STEP_FORMAT_APPLIED tz=%s", _wa_tz)
         except Exception as _wa_date_err:
             logger.warning("date step format failed: %s", _wa_date_err)
@@ -3196,6 +3268,37 @@ async def process_message_with_graph(
                 "date_reset_required": True,
             }
         )
+        # The LLM writes its reply BEFORE validation runs, so on a rejected
+        # date its text routinely accepts what the validator just refused
+        # ("Got it, October 05...", "a preferred time for yesterday?").
+        # The validator's verdict IS the visible message — one string in
+        # both slots, so transports with no inline-error UI (WhatsApp) and
+        # transports with one (web) show the same single story, and the
+        # dedupe in whatsapp_client collapses them to one rendering.
+        # Trigger is the validator's own error string — never the user's words.
+        _date_errs = result.get("validation_errors") or {}
+        _date_err = (
+            _date_errs.get("date")
+            if isinstance(_date_errs, dict)
+            else None
+        )
+        if isinstance(_date_err, str) and _date_err.strip():
+            # Replace any stale validation_error (e.g. a time-step message
+            # left in field_meta when the evaluator still pointed at "time")
+            # with the fresh date error so the widget shows one story.
+            field_meta["validation_error"] = _date_err.strip()
+            assistant_message = _date_err.strip()
+            # Keep the horizon on refusals: the customer was just told their
+            # date is unusable, and the very next thing they need is the
+            # window they CAN pick from. Without this the refusal strands
+            # them with no valid range. (No day list on WhatsApp, by
+            # product requirement.)
+            try:
+                _hz = str(_wa_horizon_text or "").strip()
+            except Exception:
+                _hz = ""
+            if _hz and _hz not in assistant_message:
+                assistant_message = f"{assistant_message.rstrip()}\n\n{_hz}"
 
     if result.get("slot_unavailable"):
         refreshed_slots = result.get("refreshed_slots")
@@ -3350,8 +3453,8 @@ async def process_message_with_graph(
                     f"Email: {_dup_booking.customer_email}\n"
                     f"{'Phone: ' + str(_dup_booking.customer_phone) + chr(10) if _dup_booking.customer_phone else ''}"
                     f"We allow only one active booking at a time. "
-                    f"To book a new slot, please cancel the existing one first — "
-                    f"just say 'cancel my booking'."
+                    f"To book a new slot, please cancel the existing one first. "
+                    f"Just say 'cancel my booking'."
                 )
                 field_meta["duplicate_booking"] = True
                 field_meta["booking_id"] = str(_dup_booking.id)
@@ -3553,7 +3656,25 @@ async def process_message_with_graph(
     _is_knowledge_turn = bool(result.get("knowledge_answer") or field_meta.get("knowledge_answer")) or str(
         current_intent
     ) == "ASK_QUESTION" or _behavior_knowledge
-    if not booking_gate_handled and _is_knowledge_turn:
+    # A booking-flow verdict wins over the knowledge early-return: on turns
+    # where the graph rejected the date or reported no slots, the directive
+    # must stay REQUIRE_DATE_PICKER (field_meta already says name=date).
+    # Otherwise a same-day refusal renders as a plain TEXT_INPUT widget.
+    _booking_verdict_turn = bool(
+        result.get("date_reset_required") or result.get("slot_unavailable")
+    )
+    # Collection turns are not Q&A: _reply_asks_pending (computed once
+    # above, from fresh missing state) tells whether the reply already asks
+    # the pending field. Hijacking such a turn as a "knowledge answer"
+    # strips the ask (plus the horizon/list the date step attached) and
+    # strands the flow on a bare TEXT_INPUT. Real answers and declines never
+    # ask the pending field, so they still take the early return unchanged.
+    if (
+        not booking_gate_handled
+        and _is_knowledge_turn
+        and not _booking_verdict_turn
+        and not _reply_asks_pending
+    ):
         # Deliberately NOT gated on a pending OTP. This branch is the single
         # place an off-topic answer is produced, so gating it on
         # phone_otp_required meant the off-topic guardrail only ran mid-booking:
@@ -3575,14 +3696,13 @@ async def process_message_with_graph(
         field_meta["channel"] = "phone"
         field_meta["knowledge_answer"] = True
         # Normalise the decline so the customer gets one consistent, warm
-        # answer naming THEIR topic ("you're asking about ..."). The model
-        # reaches for several different cold phrasings ("...in our knowledge
-        # materials", "the company knowledge materials don't include...",
-        # "I don't have information about that") which read as a brush-off
-        # and mention internal machinery the customer has never heard of.
-        # Passing the user's message keeps consecutive declines distinct so
-        # the bot never reads as stuck on one reply.
-        _knowledge_reply = _normalise_offtopic_decline(_knowledge_reply, message_text)
+        # answer. The model reaches for several different cold phrasings
+        # ("...in our knowledge materials", "the company knowledge
+        # materials don't include...", "I don't have information about
+        # that") which read as a brush-off and mention internal machinery
+        # the customer has never heard of. Topic acknowledgement is the
+        # model's job (prompt-instructed), not keyword code.
+        _knowledge_reply = _normalise_offtopic_decline(_knowledge_reply)
         # A question between booking steps is answered on its own terms. The
         # "back to your booking" push is removed so the answer stands alone;
         # the pending step is re-asked on the next turn.
@@ -3609,7 +3729,7 @@ async def process_message_with_graph(
         # appointment is booked for October 2, 2026 at 3:00 PM" with no Booking
         # row on disk.
         _k_final_msg = _knowledge_reply or (
-            "I'm a booking assistant, so I can only help with appointments — "
+            "I'm a booking assistant, so I can only help with appointments. "
             "I don't have information about that."
         )
         _k_guarded = await _guard_confirmation_claim(
@@ -4213,8 +4333,39 @@ async def process_message_with_graph(
             _is_question_turn = current_intent == "ASK_QUESTION"
             _llm_user_intent = str((structured_assistant_payload or {}).get("user_intent") or "").lower()
             _is_off_topic = _llm_user_intent == "off_topic"
+            # Fallback need: when the evaluator produced no field
+            # (silent/partial graph result — model chatted without emitting
+            # anything), the guards below go silent too and wrong-field text
+            # stands uncorrected. First missing required field, computed
+            # from live collected state — never from the user's words.
+            _fallback_need = ""
+            _fallback_label = ""
+            try:
+                from app.schemas.agent import get_required_field_names as _req_names_f1
+
+                _req_f1 = (
+                    _req_names_f1(field_definitions)
+                    if isinstance(field_definitions, list)
+                    else []
+                )
+                _coll_f1 = dict(chat_session.collected_data or {})
+                for _cand_f1 in _req_f1:
+                    if not str(_coll_f1.get(_cand_f1) or "").strip():
+                        _fallback_need = _cand_f1
+                        break
+                if _fallback_need:
+                    for _fd_f1 in (field_definitions or []):
+                        if str(getattr(_fd_f1, "name", "") or "") == _fallback_need:
+                            _fallback_label = str(
+                                getattr(_fd_f1, "label", "") or ""
+                            ).strip()
+                            break
+                    if not _fallback_label:
+                        _fallback_label = _fallback_need.replace("_", " ")
+            except Exception:
+                _fallback_need, _fallback_label = "", ""
             if _is_knowledge or _is_question_turn or _is_off_topic:
-                _need_field = str((field_meta or {}).get("name") or "")
+                _need_field = str((field_meta or {}).get("name") or "") or _fallback_need
                 _visibly_asks = (
                     message_processor._response_asks_for_field(
                         assistant_message,
@@ -4263,15 +4414,39 @@ async def process_message_with_graph(
                 # validation error), the LLM's answer is KEPT and the
                 # deterministic ask is appended, so answers are never
                 # squashed by the flow.
-                _need_field = str((field_meta or {}).get("name") or "")
+                _meta_need = str((field_meta or {}).get("name") or "")
+                _need_field = _meta_need or _fallback_need
+                _need_label = str((field_meta or {}).get("label") or "") or _fallback_label
                 _collection_intent = str(chat_session.current_intent or "")
+                # Stale-meta correction: the evaluator's field can lag the
+                # flow (asks date while time is pending). The first-missing
+                # field is authoritative in collection intents — except for
+                # non-required fields (meeting_type, edit flows), which are
+                # intentional deviations the guard must not touch.
+                try:
+                    _req_names_f1 = {
+                        str(getattr(_fd, "name", "") or "")
+                        for _fd in (field_definitions or [])
+                        if isinstance(getattr(_fd, "name", ""), str)
+                    }
+                except Exception:
+                    _req_names_f1 = set()
+                if (
+                    _meta_need
+                    and _fallback_need
+                    and _meta_need != _fallback_need
+                    and _meta_need in _req_names_f1
+                    and _collection_intent in ("START_BOOKING", "PROVIDE_DATA")
+                ):
+                    _need_field = _fallback_need
+                    _need_label = _fallback_label
                 # Debris check: raw JSON containing the field name would fool
                 # the cue test into thinking the reply asks for the field.
                 _visibly_asks = (
                     message_processor._response_asks_for_field(
                         assistant_message,
                         _need_field,
-                        (field_meta or {}).get("label"),
+                        _need_label or None,
                     )
                     and not looks_like_json_debris(assistant_message)
                 )
@@ -4282,21 +4457,62 @@ async def process_message_with_graph(
                 ):
                     _deterministic_ask = message_processor._build_context_aware_response(
                         directive=directive,
-                        field_meta=field_meta,
+                        field_meta=dict(field_meta or {}, name=_need_field)
+                        if _need_field and not (field_meta or {}).get("name")
+                        else field_meta,
                         collected_data=dict(chat_session.collected_data or {}),
                         valid_data={},
                         errors={},
                         llm_generated_msg=assistant_message,
                     )
+                    if not _deterministic_ask.strip() and _need_label:
+                        # The builder deliberately stays silent for some
+                        # fields (e.g. name, left to the greeting) — but the
+                        # reply demonstrably asks the WRONG field, so a
+                        # label-derived ask (admin-configured words, never
+                        # hardcoded copy) is the only correction left.
+                        _deterministic_ask = (
+                            f"Could you please share your {_need_label.lower()}?"
+                        )
                     _had_validation_error = bool(
                         str((field_meta or {}).get("validation_error") or "").strip()
                     )
+                    # Wrong-field reply: the message asks for a DIFFERENT
+                    # required field than the one needed. Appending would
+                    # stack two asks in one bubble ("...preferred date?
+                    # ...share your phone number?") — replace instead.
+                    # Genuine answers (ask nothing) still get the ask
+                    # appended, never squashed. Output-side cue check only.
+                    _asks_other_field = False
+                    try:
+                        for _other_f in (_req_f1 or []):
+                            if not _other_f or _other_f == _need_field:
+                                continue
+                            _other_fd = (
+                                fd_map.get(_other_f)
+                                if isinstance(fd_map, dict)
+                                else None
+                            )
+                            _other_label = (
+                                str(getattr(_other_fd, "label", "") or "")
+                                if _other_fd is not None
+                                else ""
+                            )
+                            if message_processor._response_asks_for_field(
+                                assistant_message, _other_f, _other_label or None
+                            ):
+                                _asks_other_field = True
+                                break
+                    except Exception:
+                        _asks_other_field = False
                     # Machine debris is never appended — it would leak raw
                     # JSON into the chat. Replace unconditionally.
                     if not _deterministic_ask.strip():
                         pass
-                    elif _had_validation_error or looks_like_json_debris(
-                        assistant_message
+                    elif (
+                        _had_validation_error
+                        or looks_like_json_debris(assistant_message)
+                        or _asks_other_field
                     ):
                         logger.info(
                             "next_field_guard(graph): reply missed '%s'; using deterministic ask",
@@ -4366,6 +4582,32 @@ async def process_message_with_graph(
         field_meta=field_meta,
         fd_map=fd_map,
     )
+
+    # Identity invariant: only the admin's organization name may be claimed
+    # as the business. Knowledge-base poisoning (another company's website
+    # in this org's materials) made the model say "for Dotstark" despite a
+    # correct prompt — so the outbound text is verified, not trusted.
+    if isinstance(assistant_message, str) and assistant_message.strip():
+        try:
+            from app.engine.business_identity import (
+                enforce_identity as _enforce_identity,
+            )
+            from app.engine.business_identity import (
+                resolve_agent_name as _resolve_agent,
+            )
+            from app.engine.business_identity import (
+                resolve_business_name as _resolve_business,
+            )
+
+            _id_cfg = org_config_dict if isinstance(org_config_dict, dict) else {}
+            _biz = _resolve_business(
+                _id_cfg, str(getattr(org, "name", "") or "")
+            )
+            assistant_message = _enforce_identity(
+                assistant_message, _biz, _resolve_agent(_id_cfg)
+            )
+        except Exception:
+            pass
 
     # Truthfulness invariant: a confirmation claim needs a persisted booking.
     #

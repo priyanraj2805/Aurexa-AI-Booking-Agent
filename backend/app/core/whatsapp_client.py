@@ -171,7 +171,16 @@ def format_action_for_whatsapp(action_payload) -> dict:
     try:
         field_meta = getattr(action_payload, "field_meta", None) or {}
         correction = str(field_meta.get("validation_error") or "").strip()
-        if correction and correction.replace("**", "*").lower() not in message.lower():
+        # Normalise whitespace before the containment check: the body is
+        # line-wrapped for WhatsApp ("future\ndate") while the correction
+        # carries spaces ("future date") — without this the same sentence
+        # renders twice.
+        import re as _re_ws
+
+        def _norm(s: str) -> str:
+            return _re_ws.sub(r"\s+", " ", str(s or "").replace("**", "*")).strip().lower()
+
+        if correction and _norm(correction) not in _norm(message):
             message = f"{correction}\n\n{message}" if message else correction
             # Re-format: the correction is prepended after the first pass, so
             # it must go through the same WhatsApp formatting rules.

@@ -69,6 +69,21 @@ def _normalize_header_line(line: str) -> str:
     return candidate.strip().upper().replace("'", "")
 
 
+# Full instruction sentences that should never be shown to a customer.
+# The header-strip above only removes all-caps section names; the following
+# sentence bodies of those leaked blocks slipped past the guard unchanged.
+_LEAK_INSTRUCTION_FRAGMENTS = (
+    "answer questions about opening hours",
+    "booking rules directly from this block",
+    "only start the booking flow",
+    "answer timing questions from this",
+    "never echo the prompt",
+    "response_text must never",
+    "response_message must never",
+    "answer from this block",
+)
+
+
 def strip_leaked_headers(text: str) -> str:
     """Remove prompt/template scaffolding that leaked into a reply.
 
@@ -89,10 +104,15 @@ def strip_leaked_headers(text: str) -> str:
     if not lines:
         return text
     normalized = {_normalize_header_line(line) for line in lines}
-    if not any(name in _LEAKED_HEADERS for name in normalized):
+    if not any(name in _LEAKED_HEADERS for name in normalized) and not any(
+        fragment in line.lower() for line in lines for fragment in _LEAK_INSTRUCTION_FRAGMENTS
+    ):
         return text
     kept = [
-        line for line in lines if _normalize_header_line(line) not in _LEAKED_HEADERS
+        line
+        for line in lines
+        if _normalize_header_line(line) not in _LEAKED_HEADERS
+        and not any(fragment in line.lower() for fragment in _LEAK_INSTRUCTION_FRAGMENTS)
     ]
     return "\n".join(kept)
 

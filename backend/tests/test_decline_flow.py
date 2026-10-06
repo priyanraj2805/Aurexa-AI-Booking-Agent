@@ -147,10 +147,10 @@ async def test_start_decline_sets_flag_and_farewell(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_start_decline_with_question_acknowledges_it(db_session: AsyncSession):
-    """Mixed turn: the farewell must visibly acknowledge the question half
-    instead of swallowing it (production: GDP question got only the canned
-    farewell). Flag still latches; pure declines keep legacy wording."""
+async def test_start_decline_prefers_model_wording_when_substantive(db_session: AsyncSession):
+    """The model's own decline wording (prompt-instructed to mirror the
+    topic) flows when substantive; trivial text keeps the canned farewell.
+    Either way the latch sets."""
     from types import SimpleNamespace
 
     row = await _row(db_session)
@@ -159,8 +159,12 @@ async def test_start_decline_with_question_acknowledges_it(db_session: AsyncSess
         db_session,
         SimpleNamespace(name="Acme"),
         state,
-        "but i dont want to book any appointment. "
-        "i wanted to ask you about the gdp of india",
+        "nahi book karna",
+        reply_override=(
+            "No problem — noted. On GDP of India: I don't have information "
+            "about that — I'm a booking assistant, so I can only help with "
+            "appointments."
+        ),
     )
     assert "gdp of india" in action.message.lower()
     assert "booking assistant" in action.message.lower()

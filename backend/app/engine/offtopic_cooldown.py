@@ -89,7 +89,14 @@ def record_offtopic(data: dict) -> int:
     if data is None:
         return 0
     if not is_cooling_down(data):
-        data.pop(_UNTIL_KEY, None)
+        if _UNTIL_KEY in data:
+            # Expired window: drop the stale strike count with the deadline.
+            # Otherwise a single later turn re-opens a full cooldown on old
+            # strikes — production: 45 minutes of silence, one "hello", and
+            # a fresh 5-minute window. Strikes below the limit (no window
+            # ever opened) still accumulate across turns as before.
+            data.pop(_UNTIL_KEY, None)
+            data.pop(_COUNT_KEY, None)
 
     count = strike_count(data) + 1
     data[_COUNT_KEY] = count

@@ -140,6 +140,39 @@ def test_invented_email_is_still_blocked():
     assert "bogus@nowhere.example" in ents
 
 
+def test_user_own_lookup_value_is_never_masked():
+    """Production: "We couldn't find an upcoming appointment for
+    **+6350063338**" reached WhatsApp as "...for [hidden]." — the gate
+    masked the customer's OWN just-typed lookup value because it sat in
+    neither org facts nor session details. Echoes are never inventions."""
+    from app.engine.knowledge_guards import guard_final_text
+
+    body = (
+        "We couldn't find an upcoming appointment for **+6350063338**. "
+        "Please double-check and try again."
+    )
+    safe, blocked, entities = guard_final_text(
+        body, org_facts=[], session_details=[], user_text="63500 63338"
+    )
+    assert blocked is False
+    assert entities == []
+    assert "[hidden]" not in safe
+    assert "+6350063338" in safe
+
+
+def test_truly_invented_number_still_masked():
+    """The exemption is narrow: a number appearing nowhere (not facts,
+    not session, not the user's message) must still mask."""
+    from app.engine.knowledge_guards import guard_final_text
+
+    body = "Your manager can be reached at +91 98147 32658 for help."
+    safe, blocked, entities = guard_final_text(
+        body, org_facts=[], session_details=[], user_text="what are your hours?"
+    )
+    assert blocked is True
+    assert "[hidden]" in safe
+
+
 def test_known_phone_from_org_facts_passes():
     safe, blocked, _ = guards.guard_final_text(
         "Call us at +91 98765 43210.",

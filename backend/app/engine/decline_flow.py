@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.organization import Organization
 from app.schemas.agent import ActionPayload, ChatSessionState
 from app.crud import chat as crud_chat
+from app.engine.user_visible_text import looks_like_json_debris
 
 logger = logging.getLogger(__name__)
 
@@ -106,13 +107,7 @@ _QUESTION_CLAUSE_RE = re.compile(
     r"\b(?:who|what|when|where|why|how|which|whose|whom)\b"
     r"|\b(?:can|could|would|do|does|did|is|are|was|will)\s+(?:you|there|it|i|we)\b"
     r"|\b(?:tell|show|list|explain|describe)\s+me\b"
-    r"|\bany\s+(?:idea|information|details)\b"
-    # Ask-to-know shapes ("i wanted to ask you about the GDP of India",
-    # "i want to know about X"): no auxiliary verb, no question mark, but
-    # unmistakably a question. Without these, a decline+question turn reads
-    # as a pure refusal and the question is swallowed silently.
-    r"|\bask(?:ed|ing)?\s+(?:you\s+)?about\b"
-    r"|\bwant(?:ed|s)?\s+to\s+(?:know|ask|learn|understand)\b",
+    r"|\bany\s+(?:idea|information|details)\b",
     flags=re.IGNORECASE,
 )
 _CLAUSE_SPLIT_RE = re.compile(r"[.!?\n]+")
@@ -201,8 +196,16 @@ async def start_decline(
     chat_session: ChatSessionState,
     message_text: str = "",
     inbound_message_id: Optional[str] = None,
+    reply_override: Optional[str] = None,
 ) -> ActionPayload:
-    """Record the decline and answer gracefully — no field interrogation."""
+    """Record the decline and answer gracefully — no field interrogation.
+
+    The reply is the MODEL's own decline wording when provided and
+    substantive (the model was instructed to mirror the user's topic
+    warmly), falling back to the formal canned farewell otherwise.
+    Callers pass the model's sanitized reply as ``reply_override``;
+    trivial/empty overrides keep the exact legacy farewell.
+    """
     collected = dict(chat_session.collected_data or {})
     collected[BOOKING_DECLINED_KEY] = True
     chat_session.collected_data = collected
@@ -212,26 +215,24 @@ async def start_decline(
         pass
     # Formal decline — trained via system prompt (prompts.py 9c), not example lists.
     # Keep fallback concise and formal, no service examples.
-    #
-    # Mixed turn (decline + question): the question half must be visibly
-    # acknowledged, never swallowed. "but i dont want to book any
-    # appointment. i wanted to ask you about the gdp of india" got only the
-    # farewell while the customer clearly asked something — the reply names
-    # their question and honestly bounds it instead of pretending the second
-    # half was never said. Pure declines keep the exact legacy farewell.
     msg = (
         "No problem. That's completely okay. If you'd like to book in the future, "
         "feel free to reach out anytime."
     )
-    if message_text and carries_knowledge_question(message_text):
-        _question = question_part(message_text).strip()
-        if _question:
-            _short = re.sub(r"\s+", " ", _question).strip()[:120]
-            msg = (
-                "No problem — no booking, noted. "
-                f"On \"{_short}\": I don't have information about that — "
-                "I'm a booking assistant, so I can only help with appointments."
+    _override = str(reply_override or "").strip()
+    if len(_override) >= 40 and not looks_like_json_debris(_override):
+        # The override must itself read as a decline (not an answer or a
+        # booking question misrouted here); otherwise the canned farewell
+        # stands. Shape-checked, never keyword-matched on the user input.
+        try:
+            from app.engine.offtopic_cooldown import (
+                looks_like_decline as _is_decline_shape,
             )
+
+            if _is_decline_shape(_override):
+                msg = _override
+        except Exception:
+            pass
     action = ActionPayload(message=msg, widget_directive="TEXT_INPUT", field_meta=None)
     try:
         # Persist the user's ACTUAL words — an empty row destroys the inbox
@@ -349,24 +350,6 @@ _FIELD_REFUSAL_PATTERNS = (
     r"\brefuse\s+to\s+(?:share|give|provide)\b",
     r"\bdon'?t\s+ask\b",
     r"\bskip\s+(?:it|this|that)\b",
-    r"\bskip\s+(?:the\s+|my\s+)?(?:contact\s+)?(?:email|phone|number|mobile|e-?mail|name|otp|details?)\b",
-    # Proceed-without shapes ("proceed without email", "bina email ke
-    # proceed krte hai"): the customer refuses the pending field and asks
-    # to move on. Production waived required contact fields on exactly
-    # this shape because no English refusal verb was present.
-    r"\bwithout\s+(?:my|the|an?)?\s*(?:email|phone|number|mobile|e-?mail|name|details?|otp)\b",
-    r"\bproceed\s+without\b",
-    r"\bcontinue\s+without\b",
-    r"\bno\s+need\s+(?:for\s+|of\s+)?(?:email|phone|number|mobile|e-?mail|name|otp|details?)\b",
-    # Hinglish refusals ("bina email ke proceed krte hai", "number rehne
-    # do", "email mat mango", "skip kar do"). Matched conservatively with
-    # skip/without markers so ordinary Hinglish chatter never trips them.
-    r"\bbina\s+[\w\s]{0,30}?\bke\s+(?:proceed|aage|book)\b",
-    r"\b[\w\s]{0,20}?\bke\s+bina\b",
-    r"\bskip\s+kar(?:o|do|de|na)?\b",
-    r"\b(?:rehne|rehnde|rehne)\s+do\b",
-    r"\b(?:chor|chhor|chhod)\s+do\b",
-    r"\bmat\s+(?:mango|maango|puchho|puchho|poocho)\b",
 )
 
 _BARE_NEGATION_RE = re.compile(

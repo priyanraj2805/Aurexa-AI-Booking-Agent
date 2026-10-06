@@ -1,4 +1,6 @@
-from datetime import datetime, timezone
+import json
+import uuid
+from datetime import datetime, time, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -6,7 +8,10 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 from app.engine.agent.graph import call_model
-from app.engine.scheduling_policy import build_schedule_business_hours_answer
+from app.engine.scheduling_policy import (
+    build_schedule_business_hours_answer,
+    lookup_schedule_business_hours_answer,
+)
 
 
 def _base_weekly_schedule():
@@ -136,4 +141,46 @@ async def test_flow05_graph_routes_schedule_question_to_policy_first_without_llm
     payload = json.loads(result["messages"][-1].content)
     assert payload["response_text"] == "Our hours on Monday (2026-06-01) are 9:00 AM to 5:00 PM (America/New_York)."
     assert result["schedule_answer"]["source"] == "policy"
-import json
+
+
+@pytest.mark.asyncio
+async def test_generic_hours_question_answered_mid_booking_flow(db_session):
+    """Production: "What are your working hours?" mid-booking (name already
+    collected) fell through to RAG and the customer got "I don't have
+    information about that" for hours we configure. The weekly summary
+    must answer with booking progress untouched."""
+    from app.models.booking import BusinessSchedule, ScheduleDay
+
+    org_id = uuid.uuid4()
+    db_session.add(
+        BusinessSchedule(
+            org_id=org_id,
+            slot_duration_minutes=60,
+            booking_window_days=60,
+            timezone="UTC",
+        )
+    )
+    for dow in range(7):
+        db_session.add(
+            ScheduleDay(
+                org_id=org_id,
+                day_of_week=dow,
+                is_active=dow < 5,
+                open_time=time(9, 0),
+                close_time=time(17, 0),
+            )
+        )
+    await db_session.commit()
+
+    answer = await lookup_schedule_business_hours_answer(
+        db=db_session,
+        org_id=str(org_id),
+        user_message="What are your working hours?",
+        effective_timezone="UTC",
+        org_timezone="UTC",
+        in_booking_flow=True,
+    )
+    assert answer is not None
+    assert answer["status"] == "weekly_hours"
+    assert "Monday" in answer["response_text"]
+    assert "Sunday" in answer["response_text"] or "closed" in answer["response_text"].lower()

@@ -43,6 +43,65 @@ def _is_monotonic_run(digits: str) -> bool:
     return asc or desc
 
 
+_WEEKDAY_NAMES = (
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+)
+
+
+def _resolve_relative_date(value: str, tz_name: str = "UTC") -> Optional[str]:
+    """Resolve a RELATIVE day word to ISO YYYY-MM-DD, else None.
+
+    Full-string match only ("tomorrow", "next Friday") — never fuzzy inside
+    longer text, so absolute dates and sentences pass through untouched.
+    Weekday arithmetic runs in the org timezone: "this X" is the nearest
+    X on/after today, "next X" the nearest strictly after today.
+    """
+    text = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    if not text:
+        return None
+    try:
+        tz = ZoneInfo(tz_name or "UTC")
+    except Exception:
+        try:
+            tz = ZoneInfo("UTC")
+        except Exception:
+            return None
+    today = datetime.now(tz).date()
+    if text in ("today", "aaj", "aj"):
+        return today.isoformat()
+    if text in ("tomorrow", "tomorow", "kal"):
+        return (today + timedelta(days=1)).isoformat()
+    # Past-relative words resolve too — the date validator (not the parser)
+    # decides past vs future, so "yesterday" flows into the normal
+    # past-date refusal instead of becoming a name or an off-topic verdict.
+    if text in ("yesterday", "yester day"):
+        return (today - timedelta(days=1)).isoformat()
+    if text in ("day before yesterday", "day-before-yesterday"):
+        return (today - timedelta(days=2)).isoformat()
+    if text in ("day after tomorrow", "day-after-tomorrow", "parso", "parson"):
+        return (today + timedelta(days=2)).isoformat()
+    match = re.fullmatch(r"(this|next|coming)\s+(mon|tue|tues|wed|wednes|thu|thur|thurs|fri|sat|satur|sun)(day)?", text)
+    if not match:
+        return None
+    prefix, stem = match.group(1), match.group(2)
+    weekday = next(
+        (index for index, name in enumerate(_WEEKDAY_NAMES) if name.startswith(stem)),
+        None,
+    )
+    if weekday is None:
+        return None
+    delta = (weekday - today.weekday()) % 7
+    if prefix == "next" and delta == 0:
+        delta = 7
+    return (today + timedelta(days=delta)).isoformat()
+
+
 def _looks_like_fake_number(digits: str) -> bool:
     """Heuristic fake-number screen for the lenient digit fallback.
 
@@ -72,17 +131,46 @@ class DataValidator:
 
     @staticmethod
     def _validate_date(
-        date_str: str, tz_name: str = "UTC", max_days_ahead: int = 90
+        date_str: str,
+        tz_name: str = "UTC",
+        max_days_ahead: int = 90,
+        allow_same_day_booking: bool = True,
     ) -> Tuple[Optional[str], Optional[str]]:
+        # Relative dates ("tomorrow", "next Friday") never survive dateutil,
+        # so an LLM outage turn dropped them and the flow pinned to a stale
+        # date ("No slots for 2026-10-05" forever after saying "Tomorrow").
+        # Resolve against the org timezone first; absolute parsing below is
+        # unchanged. Full-string match only — never fuzzy inside sentences.
         try:
-            parsed_date = parse(date_str)
+            _relative_iso = _resolve_relative_date(date_str, tz_name)
+        except Exception:
+            _relative_iso = None
+        try:
+            parsed_date = (
+                parse(_relative_iso)
+                if _relative_iso
+                else parse(date_str)
+            )
             try:
                 tz = ZoneInfo(tz_name)
             except Exception:
                 tz = ZoneInfo("UTC")
             now_in_tz = datetime.now(tz).date()
             if parsed_date.date() < now_in_tz:
-                return None, "Booking date cannot be in the past."
+                # Full customer-facing sentence (not a fragment): on
+                # date-reset turns the visible message IS this verdict, so
+                # it must read complete next to the date picker — and match
+                # it exactly so transports don't render it twice.
+                return (
+                    None,
+                    "I'm sorry, but we can't book appointments for past dates. "
+                    "Could you please choose a future date?",
+                )
+            if not allow_same_day_booking and parsed_date.date() == now_in_tz:
+                return (
+                    None,
+                    "Same-day booking isn't available. Please choose a future date.",
+                )
             max_date = now_in_tz + timedelta(days=max_days_ahead)
             if parsed_date.date() > max_date:
                 return (
@@ -93,7 +181,7 @@ class DataValidator:
         except ValueError:
             return (
                 None,
-                "Invalid date format. Please use YYYY-MM-DD .",
+                "Invalid date format. Please use YYYY-MM-DD.",
             )
 
     @staticmethod
@@ -289,6 +377,18 @@ class DataValidator:
             return None, "Name is too long (max 100 chars)."
         if len(value) < 2:
             return None, "Please provide your full name."
+        # A calendar day is never a person's name ("yesterday", "tomorrow",
+        # "next friday" as name). Reuses the date parser as the check — no
+        # separate word list. Timezone only shifts day boundaries; any hit
+        # means the value is a date-word in every timezone.
+        try:
+            if _resolve_relative_date(value, "UTC") is not None:
+                return (
+                    None,
+                    "That looks like a date, not a name. Please share your real name.",
+                )
+        except Exception:
+            pass
         # Names should not contain digits
         if any(c.isdigit() for c in value):
             return (
@@ -347,6 +447,7 @@ class DataValidator:
         max_booking_days: int = 90,
         field_meta: Optional[Dict[str, Any]] = None,
         include_metadata: bool = False,
+        allow_same_day_booking: bool = True,
     ):
         """
         Validates extracted data using field definitions (type-aware).
@@ -399,10 +500,17 @@ class DataValidator:
                 # as the customer's name on any path.
                 result, error = DataValidator._validate_name(value)
             elif fd:
-                validator = DataValidator.TYPE_VALIDATORS.get(
-                    fd.type, lambda v, _fd, _tz, _md: DataValidator._validate_text(v)
-                )
-                result, error = validator(value, fd, timezone, max_booking_days)
+                if field == "date" or fd.type == "date":
+                    # Thread the admin's same-day policy through the typed
+                    # route too (TYPE_VALIDATORS lambdas carry no flag slot).
+                    result, error = DataValidator._validate_date(
+                        value, timezone, max_booking_days, allow_same_day_booking
+                    )
+                else:
+                    validator = DataValidator.TYPE_VALIDATORS.get(
+                        fd.type, lambda v, _fd, _tz, _md: DataValidator._validate_text(v)
+                    )
+                    result, error = validator(value, fd, timezone, max_booking_days)
             else:
                 if field == "email":
                     result, error = DataValidator._validate_email(value)
@@ -414,7 +522,7 @@ class DataValidator:
                         metadata[field] = phone_meta
                 elif field == "date":
                     result, error = DataValidator._validate_date(
-                        value, timezone, max_booking_days
+                        value, timezone, max_booking_days, allow_same_day_booking
                     )
                 elif field == "time":
                     result, error = DataValidator._validate_time(value)

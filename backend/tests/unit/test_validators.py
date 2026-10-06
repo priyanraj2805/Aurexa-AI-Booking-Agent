@@ -227,3 +227,105 @@ def test_phone_validation_returns_country_code_and_raw_input_metadata_phone():
     assert errors == {}
     assert metadata["phone"]["country_code"] == "GB"
     assert metadata["phone"]["raw_input"] == "020 7946 0018"
+
+
+def _today_iso(tz="UTC"):
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo(tz)).date().isoformat()
+
+
+def test_same_day_denied_when_flag_off():
+    result, error = DataValidator._validate_date(
+        _today_iso(), "UTC", 90, allow_same_day_booking=False
+    )
+    assert result is None
+    assert error is not None and "Same-day" in error
+
+
+def test_same_day_allowed_when_flag_on():
+    today = _today_iso()
+    result, error = DataValidator._validate_date(
+        today, "UTC", 90, allow_same_day_booking=True
+    )
+    assert result == today
+    assert error is None
+
+
+def test_future_date_valid_when_same_day_denied():
+    future = (_utc_today() + timedelta(days=2)).isoformat()
+    result, error = DataValidator._validate_date(
+        future, "UTC", 90, allow_same_day_booking=False
+    )
+    assert result == future
+    assert error is None
+
+
+def test_validate_entities_same_day_denied_plain_route():
+    valid, errors = DataValidator.validate_entities(
+        {"date": _today_iso()},
+        timezone="UTC",
+        max_booking_days=90,
+        allow_same_day_booking=False,
+    )
+    assert "date" not in valid
+    assert "Same-day" in errors.get("date", "")
+
+
+def test_validate_entities_same_day_denied_typed_route():
+    fds = [
+        FieldDefinition(name="date", type="date", label="Date", required=True, order=0)
+    ]
+    valid, errors = DataValidator.validate_entities(
+        {"date": _today_iso()},
+        field_definitions=fds,
+        timezone="UTC",
+        max_booking_days=90,
+        allow_same_day_booking=False,
+    )
+    assert "date" not in valid
+    assert "Same-day" in errors.get("date", "")
+
+
+def test_validate_entities_same_day_default_stays_permissive():
+    today = _today_iso()
+    valid, errors = DataValidator.validate_entities({"date": today}, timezone="UTC")
+    assert valid.get("date") == today
+    assert errors == {}
+
+
+def _utc_today():
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo("UTC")).date()
+
+
+def test_yesterday_resolves_to_past_date_and_is_refused():
+    from app.engine.validators import _resolve_relative_date
+
+    iso = _resolve_relative_date("yesterday", "UTC")
+    assert iso == (_utc_today() + timedelta(days=-1)).isoformat()
+    result, error = DataValidator._validate_date("yesterday", "UTC", 90)
+    assert result is None
+    assert error is not None and "past" in error.lower()
+
+
+def test_day_before_yesterday_resolves():
+    from app.engine.validators import _resolve_relative_date
+
+    iso = _resolve_relative_date("day before yesterday", "UTC")
+    assert iso == (_utc_today() + timedelta(days=-2)).isoformat()
+
+
+def test_date_words_are_never_names():
+    for word in ("yesterday", "today", "tomorrow", "next friday"):
+        result, error = DataValidator._validate_name(word)
+        assert result is None, word
+        assert "date" in (error or "").lower(), word
+
+
+def test_real_names_still_pass_including_may():
+    for name in ("Rohan Sharma", "May", "Aarav"):
+        result, error = DataValidator._validate_name(name)
+        assert error is None, name
+        assert result is not None

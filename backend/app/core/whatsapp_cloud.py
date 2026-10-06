@@ -61,6 +61,12 @@ async def send_cloud_text(to: str, body: str) -> dict[str, Any]:
         return {"success": False, "mock": True, "reason": "missing_whatsapp_cloud_config"}
     if not body or not digits:
         return {"success": False, "reason": "empty_body_or_recipient"}
+    try:
+        from app.core.wa_text import format_outbound
+
+        body = format_outbound(body)
+    except Exception:
+        pass
     url = f"https://graph.facebook.com/{version}/{phone_id}/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {

@@ -150,6 +150,11 @@ _CANCEL_INTENT_PATTERNS = (
     r"\bi'?d\s+like\s+to\s+cancel\b",
     r"\bplease\s+cancel\b",
     r"\bcancel\s+my\b",
+    # Bare "cancel" (whole message): zero ambiguity, no LLM judgment needed.
+    # Production: bare "Cancel" matched nothing here, so routing fell through
+    # to the model verdict, which flip-flopped across turns (summary card,
+    # farewell, summary, lookup) for the identical input.
+    r"^\s*cancel\s*[.!…?]*$",
 )
 
 _RESEND_RE = re.compile(
@@ -460,6 +465,131 @@ def clear_cancel_flow(chat_session: ChatSessionState) -> None:
         data.pop(CANCEL_FLOW_KEY, None)
 
 
+async def maybe_abort_unbooked_draft(
+    db: AsyncSession,
+    chat_session: ChatSessionState,
+    message_text: str,
+    org_config=None,
+    org=None,
+) -> Optional[ActionPayload]:
+    """Abort a complete-but-unbooked draft when the user says cancel/stop.
+
+    The confirm screen offers "Cancel to stop", so a cancel here means the
+    DRAFT — not an existing appointment. Routing it into the cancel-lookup
+    flow traps the user (asks phone, finds nothing). Fires ONLY when:
+      - no cancel flow is already active,
+      - the session is not a finished (CONFIRMED) booking,
+      - every required field is already collected (complete draft),
+      - NO persisted upcoming booking exists for the collected identity.
+    That last check is load-bearing, not belt-and-braces: session_status
+    alone cannot prove "nothing booked" (the booking may belong to an older
+    session while this one is ACTIVE). Production: the duplicate-guard said
+    "say 'cancel my booking'", the user did, and the abort replied
+    "Nothing was booked" while the appointment stood untouched.
+    Mid-draft cancels keep the existing lookup behavior. Identity
+    (name/email/phone) is kept; booking specifics are cleared so the next
+    turn starts clean on every channel. Returns None when not applicable.
+    On DB error returns None (the OTP-gated lookup is the safe fallback —
+    it never deletes without a code).
+    """
+    try:
+        if get_cancel_flow(chat_session) or bool(
+            getattr(chat_session, "pending_cancel", False)
+        ):
+            return None
+        if str(getattr(chat_session, "session_status", "") or "").upper() == "CONFIRMED":
+            return None
+        from app.schemas.agent import (
+            get_required_field_names,
+            parse_field_definitions,
+        )
+
+        _fds = []
+        try:
+            _fds = parse_field_definitions(
+                getattr(org_config, "field_definitions", None)
+                or getattr(org_config, "required_fields", None)
+            )
+        except Exception:
+            _fds = []
+        _required = get_required_field_names(_fds) or [
+            "name",
+            "email",
+            "phone",
+            "date",
+            "time",
+        ]
+        _collected = dict(chat_session.collected_data or {})
+        if any(not str(_collected.get(_f) or "").strip() for _f in _required):
+            return None
+        # A complete draft is not proof of "nothing booked": the appointment
+        # may belong to an older session while this one is ACTIVE. Check the
+        # persisted upcoming bookings by collected identity first — same
+        # matching the cancel lookup itself uses. Any hit means this cancel
+        # targets the booking: stand down for the OTP-gated flow.
+        try:
+            _org_id = getattr(org, "id", None)
+            if _org_id is None:
+                return None
+            _id_email = str(_collected.get("email") or "").strip()
+            _id_phone = re.sub(r"\D", "", str(_collected.get("phone") or ""))
+            for _kind, _val in (("email", _id_email), ("phone", _id_phone)):
+                if not _val:
+                    continue
+                _existing, _ = await _find_upcoming_booking(db, org, _kind, _val)
+                if _existing is not None:
+                    logger.info(
+                        "draft_abort_skipped_existing_booking",
+                        extra={
+                            "session_id": chat_session.session_id,
+                            "kind": _kind,
+                        },
+                    )
+                    return None
+        except Exception:
+            return None
+        # Complete draft, nothing booked: stop it in place.
+        for _stale in (
+            "date",
+            "time",
+            "selected_slot_id",
+            "selected_slot_start_utc",
+            "locked_slot_id",
+            "locked_slot_start_utc",
+        ):
+            _collected.pop(_stale, None)
+        clear_cancel_flow(chat_session)
+        chat_session.pending_cancel = False
+        chat_session.collected_data = _collected
+        chat_session.missing_fields = [
+            _f for _f in _required if not str(_collected.get(_f) or "").strip()
+        ]
+        chat_session.current_intent = "START_BOOKING"
+        await _persist_session(
+            db,
+            chat_session,
+            remove_keys=(
+                "date",
+                "time",
+                "selected_slot_id",
+                "selected_slot_start_utc",
+                "locked_slot_id",
+                "locked_slot_start_utc",
+            ),
+        )
+        return ActionPayload(
+            message=(
+                "No problem, I've cancelled this booking request. "
+                "Nothing was booked. If you'd like to start again, just "
+                "share a preferred date."
+            ),
+            widget_directive="TEXT_INPUT",
+            field_meta={"draft_aborted": True},
+        )
+    except Exception:
+        return None
+
+
 def _lookup_action(
     message: str,
     *,
@@ -670,7 +800,7 @@ async def start_cancel_flow(
     await _persist_session(db, chat_session)
     return _lookup_action(
         _lookup_contact_prompt(
-            "Sure — I can help with that. Please enter the {contact} you used "
+            "Sure, I can help with that. Please enter the {contact} you used "
             "for the appointment.",
             org_config,
             channel or str(getattr(chat_session, "channel", "") or ""),
@@ -694,6 +824,38 @@ async def _find_upcoming_booking(
     else:
         stmt = stmt.where(Booking.customer_phone.ilike(f"%{value[-10:]}%"))
     stmt = stmt.order_by(TimeSlot.start_time.asc())
+    rows = (await db.execute(stmt)).all()
+    for booking, start_time in rows:
+        if kind == "email":
+            return booking, start_time
+        stored_digits = re.sub(r"\D", "", str(booking.customer_phone or ""))
+        if stored_digits and (
+            stored_digits == value or stored_digits.endswith(value[-10:])
+        ):
+            return booking, start_time
+    return None, None
+
+
+async def _find_past_booking(
+    db: AsyncSession, org: Organization, kind: str, value: str
+) -> Tuple[Optional[Booking], Optional[datetime]]:
+    """Most recent ELAPSED booking for a contact, or (None, None).
+
+    Same matching as _find_upcoming_booking but looks backwards: used only
+    to explain a "not found" with a helpful hint, never to cancel (past
+    appointments cannot be cancelled).
+    """
+    now = datetime.now(timezone.utc)
+    stmt = (
+        select(Booking, TimeSlot.start_time)
+        .join(TimeSlot, Booking.slot_id == TimeSlot.id)
+        .where(Booking.org_id == org.id, TimeSlot.start_time < now)
+    )
+    if kind == "email":
+        stmt = stmt.where(func.lower(Booking.customer_email) == value.lower())
+    else:
+        stmt = stmt.where(Booking.customer_phone.ilike(f"%{value[-10:]}%"))
+    stmt = stmt.order_by(TimeSlot.start_time.desc()).limit(1)
     rows = (await db.execute(stmt)).all()
     for booking, start_time in rows:
         if kind == "email":
@@ -817,7 +979,7 @@ async def _handle_lookup_stage(
         if classification == "RESUME_FLOW":
             action = _lookup_action(
                 _lookup_contact_prompt(
-                    "Sure — let's keep going. Please enter the {contact} you used "
+                    "Sure, let's keep going. Please enter the {contact} you used "
                     "for the appointment.",
                     org_config,
                     str(getattr(chat_session, "channel", "") or ""),
@@ -833,7 +995,7 @@ async def _handle_lookup_stage(
 
         reply = str(analysis.get("reply") or "").strip() or _lookup_contact_prompt(
             "I'm sorry, I didn't quite get that. To find your appointment, "
-            "please enter the {contact} you used — or say "
+            "please enter the {contact} you used, or say "
             "'book a new appointment' to start a fresh booking.",
             org_config,
             str(getattr(chat_session, "channel", "") or ""),
@@ -852,10 +1014,54 @@ async def _handle_lookup_stage(
     kind, value = parsed
     booking, start_time = await _find_upcoming_booking(db, org, kind, value)
     if booking is None:
-        display = value if kind == "email" else f"+{value}"
+        # Echo the contact exactly as typed. The old code fabricated E.164
+        # ("63500 63338" -> "+6350063338") by prepending "+" to bare digits
+        # with no country code — a number that was never the customer's.
+        display = (
+            value
+            if kind == "email"
+            else str(message_text or "").strip()
+        )
+        # Past-appointment hint, privacy-gated: revealing another person's
+        # past booking date to anyone who types their number is a leak. The
+        # hint shows ONLY when the lookup contact is provably the sender's
+        # own (WhatsApp sender digits, or the collected email). Anyone else
+        # gets a plain not-found with no booking details at all.
+        _is_own_contact = False
+        try:
+            if kind == "phone":
+                _sender_digits = re.sub(
+                    r"\D", "", str(getattr(chat_session, "channel_user_id", "") or "")
+                )
+                if _sender_digits and len(value) >= 10 and len(_sender_digits) >= 7:
+                    _is_own_contact = value[-10:] == _sender_digits[-10:]
+            else:
+                _own_email = str(
+                    (chat_session.collected_data or {}).get("email") or ""
+                ).strip().lower()
+                _is_own_contact = bool(_own_email) and _own_email == value.lower()
+        except Exception:
+            _is_own_contact = False
+        _past_note = ""
+        if _is_own_contact:
+            try:
+                _past_booking, _past_start = await _find_past_booking(
+                    db, org, kind, value
+                )
+                if _past_booking is not None and _past_start is not None:
+                    _past_note = (
+                        f" Your most recent appointment was on "
+                        f"{_past_start.strftime('%d %b %Y')}, and since it already "
+                        f"happened, there is nothing to cancel."
+                    )
+            except Exception:
+                _past_note = ""
         action = _lookup_action(
-            f"We couldn't find an upcoming appointment for **{display}**. "
-            "Please double-check and try again, or start a new booking if you meant to book."
+            f"We couldn't find an upcoming appointment for *{display}*."
+            f"{_past_note} "
+            "Please double-check and try again, or start a new booking if you meant to book.",
+            org_config=org_config,
+            channel=str(getattr(chat_session, "channel", "") or ""),
         )
         await _save_transcript(
             db, session_id, message_text, action.message, action.widget_directive,
@@ -1035,14 +1241,14 @@ async def _send_cancel_otp(
         _masked = _mask_phone(_phone)
         _via = "WhatsApp"
         message = (
-            f"I found your appointment — **{slot_label}**. To cancel it, "
-            f"I've sent a verification code to **{_masked}** via {_via}. "
+            f"I found your appointment, *{slot_label}*. To cancel it, "
+            f"I've sent a verification code to *{_masked}* via {_via}. "
             "Please enter the code below to confirm."
         )
     else:
         message = (
-            f"I found your appointment — **{slot_label}**. To cancel it, "
-            f"I've sent a verification code to **{booking.customer_email}**. "
+            f"I found your appointment, *{slot_label}*. To cancel it, "
+            f"I've sent a verification code to *{booking.customer_email}*. "
             "Please enter the code below to confirm."
         )
     action = ActionPayload(
@@ -1080,7 +1286,7 @@ async def _handle_otp_stage(
         set_cancel_flow(chat_session, stage="lookup", otp_verified=False)
         await _persist_session(db, chat_session)
         action = _lookup_action(
-            "No problem — please enter the email or phone number you used for the appointment."
+            "No problem, please enter the email or phone number you used for the appointment."
         )
         await _save_transcript(
             db, chat_session.session_id, message_text, action.message,
@@ -1153,7 +1359,7 @@ async def _handle_otp_stage(
                 except Exception:
                     pass
                 action = ActionPayload(
-                    message=f"That code is incorrect or has expired. Please enter the correct code sent to **{_dest_label}**.",
+                    message=f"That code is incorrect or has expired. Please enter the correct code sent to *{_dest_label}*.",
                     widget_directive="REQUIRE_OTP_MODAL",
                     field_meta=meta,
                 )
@@ -1175,7 +1381,7 @@ async def _handle_otp_stage(
         except Exception:
             pass
         action = ActionPayload(
-            message=f"Please enter the verification code sent to **{_dest_label}** in the code box below to confirm the cancellation.",
+            message=f"Please enter the verification code sent to *{_dest_label}* in the code box below to confirm the cancellation.",
             widget_directive="REQUIRE_OTP_MODAL",
             field_meta=meta,
         )
@@ -1236,7 +1442,7 @@ async def _handle_otp_stage(
             else str(flow.get("email") or "your email address")
         )
         action = ActionPayload(
-            message=f"Sure — please enter the verification code sent to **{_dest_label}** to confirm the cancellation.",
+            message=f"Sure, please enter the verification code sent to *{_dest_label}* to confirm the cancellation.",
             widget_directive="REQUIRE_OTP_MODAL",
             field_meta={"cancel_flow": True},
         )
@@ -1253,7 +1459,7 @@ async def _handle_otp_stage(
     )
     reply = str(analysis.get("reply") or "").strip() or (
         f"I'm sorry, I didn't quite get that. To cancel, please enter the "
-        f"verification code I sent to **{_dest_label}** — or say 'book a new "
+        f"verification code I sent to *{_dest_label}*, or say 'book a new "
         "appointment' to start a fresh booking."
     )
     meta: Dict[str, Any] = {"cancel_flow": True}
@@ -1320,7 +1526,7 @@ async def _handle_cancel_resend(
                 raise RuntimeError(delivery_error(_result))
             _dest = _phone or "your phone"
             _via = _otp_channel_label("phone", org_config)
-            message = f"I've sent a new verification code to **{_dest}** via {_via}."
+            message = f"I've sent a new verification code to *{_dest}* via {_via}."
         else:
             if not email:
                 await invalidate_otp_delivery(db, session_id, "email", context_key=idem_key)
@@ -1338,7 +1544,7 @@ async def _handle_cancel_resend(
             ):
                 await invalidate_otp_delivery(db, session_id, "email", context_key=idem_key)
                 raise RuntimeError(delivery_error(_result))
-            message = f"I've sent a new verification code to **{email}**. Please check your inbox."
+            message = f"I've sent a new verification code to *{email}*. Please check your inbox."
         meta.update(policy_meta)
         directive = "REQUIRE_OTP_MODAL"
     except ValueError as otp_err:
@@ -1409,7 +1615,7 @@ async def _execute_cancellation(
             else str(flow.get("email") or "your email address")
         )
         action = ActionPayload(
-            message=f"Please enter the verification code sent to **{_dest}** to confirm the cancellation.",
+            message=f"Please enter the verification code sent to *{_dest}* to confirm the cancellation.",
             widget_directive="REQUIRE_OTP_MODAL",
             field_meta={"cancel_flow": True},
         )
@@ -1428,7 +1634,7 @@ async def _execute_cancellation(
             db, chat_session, remove_keys=(CANCEL_FLOW_KEY, *SESSION_RESET_REMOVE_KEYS)
         )
         message = (
-            "Good news — that appointment has already been cancelled. "
+            "Good news, that appointment has already been cancelled. "
             "No further action is needed."
         )
         action = ActionPayload(message=message, widget_directive="TEXT_INPUT")
@@ -1634,7 +1840,7 @@ async def _execute_cancellation(
         else "I couldn't send the cancellation email right now, but your appointment is cancelled."
     )
     message = (
-        f"**{slot_label}** has been cancelled, and the slot is now free. {footer}"
+        f"*{slot_label}* has been cancelled, and the slot is now free. {footer}"
     )
     action = ActionPayload(
         message=message,

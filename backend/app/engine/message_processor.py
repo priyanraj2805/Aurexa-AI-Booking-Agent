@@ -477,37 +477,20 @@ def _looks_like_keyboard_mash(word: str) -> bool:
     return any(row in lowered or lowered in row for row in _KEYBOARD_ROWS)
 
 
-# Self-introduction wrappers stripped before name checks. Without these,
-# "I am Rohan Verma" either fails the word-count cap (re-ask loop) or —
-# worse — passes a loose validator whole and is BOOKED as the customer's
-# name. Hinglish variants included ("mera naam Rohan hai", "main Rohan
-# hoon"): the Hindi copula trails, so it is stripped from the END, never
-# the front (a front-strip would eat the name itself). The remainder still
-# faces every strict check below.
-_INTRO_PREFIX_RE = re.compile(
-    r"^(?:i\s+am|i'?m|my\s+name\s+is|this\s+is|myself|it'?s\s+me|"
-    r"mera\s+naam|main)\b\s*",
-    flags=re.IGNORECASE,
-)
-_INTRO_SUFFIX_RE = re.compile(
-    r"\s*\b(?:hai|hoon|hu)\s*$",
-    flags=re.IGNORECASE,
-)
-
-
 def extract_opening_name(message_text: str) -> str:
     """Pull a person's name out of a customer's OPENING message.
 
         "Hi Yash"          -> "Yash"
         "Amanpreet Kaur"   -> "Amanpreet Kaur"
         "Hello! Amanpreet" -> "Amanpreet"
-        "I am Rohan Verma" -> "Rohan Verma"
 
     Returns "" for anything that is not a bare name, so a question, an email,
     a phone number, a date, a greeting on its own, or keysmash garbage is
     never adopted as the customer's identity. Deliberately conservative: a
     false positive would greet someone by a nonsense word, and a false
     negative only means the customer is asked for their name as before.
+    Self-introductions ("I am Rohan Verma") are the MODEL's job to parse —
+    no keyword stripping here.
     """
     raw = " ".join(str(message_text or "").split())
     if not raw:
@@ -515,10 +498,6 @@ def extract_opening_name(message_text: str) -> str:
     without_greeting = _GREETING_PREFIX_RE.sub("", raw).strip(" .!,…?")
     if not without_greeting:
         return ""
-    without_intro = _INTRO_PREFIX_RE.sub("", without_greeting)
-    without_intro = _INTRO_SUFFIX_RE.sub("", without_intro).strip(" .!,…?")
-    if without_intro:
-        without_greeting = without_intro
     # Anything structured is a different field, not a name.
     if any(ch.isdigit() for ch in without_greeting):
         return ""
@@ -694,10 +673,11 @@ def _extract_entities_without_llm(
             continue
 
         if parseable_name:
-            # Strict shared extractor (strips "I am ...", greetings, Hinglish
-            # wrappers and rejects sentences/keysmash). The old code validated
-            # the RAW message, so "I am Rohan Verma" passed as a name and was
-            # BOOKED verbatim. A rejection here only re-asks — safe.
+            # Strict shared extractor (greetings stripped, sentences and
+            # keysmash rejected). The old code validated the RAW message, so
+            # "I am Rohan Verma" passed as a name and was BOOKED verbatim.
+            # Self-introductions are the model's job to parse; here a
+            # rejection only re-asks — safe.
             candidate = extract_opening_name(message_text)
             if not candidate:
                 continue
@@ -1522,6 +1502,7 @@ async def process_message(
             db=db,
             business_name=getattr(org_config, "business_name", None),
             org_name=getattr(org, "name", None),
+            is_first_turn=is_opening_turn(chat_session),
         )
 
     intent = unified_result.get("intent", chat_session.current_intent or "PROVIDE_DATA")
@@ -2028,6 +2009,11 @@ async def process_message(
         field_definitions,
         timezone=org_timezone,
         max_booking_days=max_booking_days,
+        # Same admin same-day policy as the graph path (default deny,
+        # matching _slot_policy_kwargs).
+        allow_same_day_booking=bool(
+            getattr(org_config, "allow_same_day_booking", False)
+        ),
     )
     logger.info(f"Valid fields: {list(valid_data.keys())}")
     if errors:
@@ -2990,8 +2976,8 @@ async def _handle_booking_flow(
                 f"Email: {_dup_booking.customer_email}\n"
                 f"{'Phone: ' + str(_dup_booking.customer_phone) + chr(10) if _dup_booking.customer_phone else ''}"
                 f"We allow only one active booking at a time. "
-                f"To book a new slot, please cancel the existing one first — "
-                f"just say 'cancel my booking'."
+                f"To book a new slot, please cancel the existing one first. "
+                f"Just say 'cancel my booking'."
             )
             # NOTE: no transcript write here — every _handle_booking_flow
             # caller persists (user_msg, agent_msg) after return.
@@ -3498,8 +3484,8 @@ async def _handle_post_booking(
     # ── Reschedule a CONFIRMED booking (cancel + reopen with existing data) ──
     if status == "CONFIRMED" and _is_reschedule_info_request(user_msg_lower):
         msg = (
-            "Sure — here's the rescheduling procedure:\n"
-            "1) Say **'reschedule my booking'**\n"
+            "Sure, here's the rescheduling procedure:\n"
+                "1) Say *'reschedule my booking'*\n"
             "2) I'll reopen your booking flow while keeping your name/email/phone\n"
             "3) You'll choose a new date and time, then confirm.\n\n"
             "No changes have been made to your current booking yet."
@@ -3578,8 +3564,8 @@ async def _handle_post_booking(
             )
             if _is_cancellation_info_request(user_msg_lower):
                 msg = (
-                    "Great question — your booking is still active. "
-                    "To cancel, just say **'Cancel'** and I'll ask for a final yes/no confirmation "
+                    "Great question, your booking is still active. "
+                    "To cancel, just say *'Cancel'* and I'll ask for a final yes/no confirmation "
                     "before cancelling. Once confirmed, the slot is released immediately."
                 )
                 action = ActionPayload(
@@ -3620,8 +3606,8 @@ async def _handle_post_booking(
                 "AMBIGUOUS",
             }:
                 msg = (
-                    "Your booking is still active. If you want to cancel it, reply **yes**. "
-                    "If you only want the steps, say **'show cancellation steps'**."
+                    "Your booking is still active. If you want to cancel it, reply *yes*. "
+                    "If you only want the steps, say *'show cancellation steps'*."
                 )
                 action = ActionPayload(
                     message=msg, widget_directive="TEXT_INPUT", is_terminal=False
@@ -3651,10 +3637,10 @@ async def _handle_post_booking(
             )
         ):
             msg = (
-                "Sure — here's the cancellation procedure:\n"
-                "1) Say **'cancel my booking'**\n"
+                "Sure, here's the cancellation procedure:\n"
+                "1) Say *'cancel my booking'*\n"
                 "2) Enter the email/phone used for the appointment\n"
-                "3) Enter the **verification code** I send you — the booking is cancelled only after the code verifies.\n\n"
+                "3) Enter the *verification code* I send you. The booking is cancelled only after the code verifies.\n\n"
                 "No changes have been made to your current booking."
             )
             action = ActionPayload(
@@ -3666,10 +3652,21 @@ async def _handle_post_booking(
             return action
 
         if explicit_cancel or soft_cancel or inferred_cancel_action:
-            # OTP-gated cancel: never delete on yes/no. Start the
-            # OTP-protected cancel flow (lookup → verification code → delete).
+            # The confirm screen offers "Cancel to stop": on a complete but
+            # unbooked draft that means the DRAFT, never an existing booking.
             from app.engine import cancel_flow as _cancel_flow_mod2
 
+            _aborted = await _cancel_flow_mod2.maybe_abort_unbooked_draft(
+                db, chat_session, message_text, org_config=org_config, org=org
+            )
+            if _aborted is not None:
+                await _save_transcript(
+                    db, chat_session.session_id, _transcript_user_text, _aborted.message,
+                    _aborted.widget_directive or "TEXT_INPUT",
+                )
+                return _aborted
+            # OTP-gated cancel: never delete on yes/no. Start the
+            # OTP-protected cancel flow (lookup → verification code → delete).
             action = await _cancel_flow_mod2.start_cancel_flow(
                 db, chat_session, message_text, org_config=org_config
             )
@@ -5033,9 +5030,9 @@ def _build_summary_card(
         icon = fd.icon if fd else "📋"
         label = fd.label if fd else key.replace("_", " ").title()
         display_val = _format_display_value(key, val, fd)
-        summary_lines.append(f"{icon} **{label}**: {display_val}")
+        summary_lines.append(f"{icon} *{label}*: {display_val}")
     if not summary_lines:
-        summary_lines.append("📋 **Details**: Please review the details above before confirming.")
+        summary_lines.append("📋 *Details*: Please review the details above before confirming.")
     summary_text = (
         "Perfect! Let's double check your details:\n\n"
         + "\n".join(summary_lines)
@@ -5067,9 +5064,9 @@ def _build_edit_summary(
         label = fd.label if fd else key.replace("_", " ").title()
         display_val = _format_display_value(key, val, fd)
         mark = " ✏️" if key in edited_keys else ""
-        summary.append(f"{icon} **{label}:** {display_val}{mark}")
+        summary.append(f"{icon} *{label}:* {display_val}{mark}")
     if not summary:
-        summary.append("📋 **Details:** No editable fields collected yet.")
+        summary.append("📋 *Details:* No editable fields collected yet.")
     return (
         f"Got it, I've updated that for you! Here's your revised summary:\n\n"
         + "\n".join(summary)
@@ -5229,6 +5226,14 @@ async def maybe_greet_opening_name(
     candidate = extract_opening_name(message_text)
     if not candidate:
         return None
+    # The opener extractor is syntactic (shape of a name); the validator is
+    # the semantic gate. Without it a day-word opening ("yesterday") was
+    # persisted as the customer's name. Reuses the same name validator as
+    # every other path — no separate rules here.
+    _parsed_candidate, _candidate_err = DataValidator._validate_name(candidate)
+    if _candidate_err or not _parsed_candidate:
+        return None
+    candidate = _parsed_candidate
 
     collected = dict(chat_session.collected_data or {})
     collected["name"] = candidate

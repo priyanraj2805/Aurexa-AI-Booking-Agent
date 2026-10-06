@@ -418,6 +418,11 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
             _active_id = None
             if isinstance(chat_session.collected_data, dict):
                 _active_id = chat_session.collected_data.get("active_directive_id")
+            # BookingDirective is a web-widget concept and is fully out of
+            # the WhatsApp path: taps arrive as plain text and parse through
+            # the normal validators. Never honor a directive pointer here —
+            # not even a stale one lingering in collected_data from before.
+            _active_id = None
             if _active_id:
                 from app.engine.booking_directive.service import get_by_id as _get_dir
                 from app.engine.booking_directive import handler as _dir_handler
@@ -891,6 +896,11 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
             except Exception:
                 pass
             # ── Simple text booking system — directive interactive disabled ──
+            # BookingDirective is a web-widget concept and is fully out of
+            # the WhatsApp path: taps arrive as plain text and parse through
+            # the normal validators. Never honor a directive pointer here —
+            # not even a stale one lingering in collected_data from before.
+            _active_id_after = None
             wa_msg = None
             if _active_id_after:
                 try:
@@ -1068,7 +1078,8 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                 pass
                             _sess0 = [str(_cd0.get(k) or "") for k in ("name", "email", "phone", "date", "time")]
                             _safe0, _blocked0, _ents0 = _kb_guards.guard_final_text(
-                                _body0, org_facts=_facts0, session_details=_sess0
+                                _body0, org_facts=_facts0, session_details=_sess0,
+                                user_text=str(text or ""),
                             )
                             if _blocked0:
                                 logger.warning("whatsapp KB entity gate blocked reply (cloud) with unlisted %s", _ents0)

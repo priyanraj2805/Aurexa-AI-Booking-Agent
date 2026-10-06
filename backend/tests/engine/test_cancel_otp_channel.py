@@ -87,6 +87,50 @@ class TestLookupAsksOnlyOtpChannel:
 
 
 @pytest.mark.asyncio
+async def test_find_past_booking_ignores_upcoming(db_session):
+    """Past lookup mirrors the upcoming matcher but backwards: most recent
+    elapsed booking wins; a future booking is never returned as past."""
+    import uuid
+    from datetime import datetime, timedelta, timezone
+
+    from app.engine.cancel_flow import _find_past_booking
+    from app.models.booking import Booking, TimeSlot
+
+    org_id = uuid.uuid4()
+    past_start = datetime.now(timezone.utc) - timedelta(days=3)
+    past_slot = TimeSlot(
+        org_id=org_id, start_time=past_start, end_time=past_start + timedelta(hours=1)
+    )
+    db_session.add(past_slot)
+    await db_session.commit()
+    await db_session.refresh(past_slot)
+    db_session.add(
+        Booking(
+            org_id=org_id,
+            slot_id=past_slot.id,
+            customer_name="Old",
+            customer_email="old@test.com",
+            customer_phone="+919814732658",
+        )
+    )
+    await db_session.commit()
+
+    from types import SimpleNamespace
+
+    org = SimpleNamespace(id=org_id)
+    booking, start = await _find_past_booking(
+        db_session, org, "phone", "9814732658"  # type: ignore[arg-type]
+    )
+    assert booking is not None
+    assert booking.customer_name == "Old"
+    assert start is not None
+    none_booking, _ = await _find_past_booking(
+        db_session, org, "email", "nobody@test.com"  # type: ignore[arg-type]
+    )
+    assert none_booking is None
+
+
+@pytest.mark.asyncio
 async def test_cancel_otp_goes_to_booking_phone_despite_email_lookup(
     db_session, monkeypatch
 ):
@@ -164,3 +208,133 @@ async def test_cancel_otp_goes_to_booking_phone_despite_email_lookup(
     )
     assert sent_to.get("phone") == "+919814732658"
     assert action.widget_directive == "REQUIRE_OTP_MODAL"
+
+
+def _draft_state(**overrides):
+    from types import SimpleNamespace
+
+    from app.schemas.agent import ChatSessionState
+
+    base = dict(
+        session_id="00000000-0000-0000-0000-000000000001",
+        org_id="00000000-0000-0000-0000-000000000002",
+        channel="web",
+        collected_data={
+            "name": "Rohan Sharma",
+            "email": "rohan@example.com",
+            "phone": "+919822047136",
+            "date": "2026-10-06",
+            "time": "1:30 PM",
+        },
+        missing_fields=[],
+        current_intent="PROVIDE_DATA",
+        session_status="ACTIVE",
+    )
+    base.update(overrides)
+    return ChatSessionState(**base), SimpleNamespace(
+        id="00000000-0000-0000-0000-000000000002"
+    )
+
+
+@pytest.mark.asyncio
+async def test_abort_unbooked_draft_fires_on_complete_draft(db_session):
+    from app.engine import cancel_flow
+
+    state, org = _draft_state()
+    action = await cancel_flow.maybe_abort_unbooked_draft(
+        db_session, state, "Cancel", org_config=None, org=org
+    )
+    assert action is not None
+    assert "Nothing was booked" in action.message
+    assert "date" not in state.collected_data
+    assert "time" not in state.collected_data
+    assert state.collected_data["name"] == "Rohan Sharma"
+    assert set(state.missing_fields) == {"date", "time"}
+
+
+@pytest.mark.asyncio
+async def test_abort_unbooked_draft_skips_incomplete_draft(db_session):
+    from app.engine import cancel_flow
+
+    state, org = _draft_state(
+        collected_data={"name": "Rohan Sharma"},
+        missing_fields=["email", "phone", "date", "time"],
+    )
+    assert (
+        await cancel_flow.maybe_abort_unbooked_draft(
+            db_session, state, "Cancel", org_config=None, org=org
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_abort_unbooked_draft_skips_confirmed_booking(db_session):
+    from app.engine import cancel_flow
+
+    state, org = _draft_state(session_status="CONFIRMED")
+    assert (
+        await cancel_flow.maybe_abort_unbooked_draft(
+            db_session, state, "Cancel", org_config=None, org=org
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_abort_unbooked_draft_skips_active_cancel_flow(db_session):
+    from app.engine import cancel_flow
+
+    state, org = _draft_state()
+    cancel_flow.set_cancel_flow(state, stage="lookup", otp_verified=False)
+    assert (
+        await cancel_flow.maybe_abort_unbooked_draft(
+            db_session, state, "Cancel", org_config=None, org=org
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_abort_unbooked_draft_skips_existing_upcoming_booking(db_session):
+    """Production: duplicate-guard said "say 'cancel my booking'", the user
+    did, and the abort replied "Nothing was booked" while the appointment
+    stood. A persisted upcoming booking for the collected identity must
+    stand the abort down for the OTP-gated cancel flow."""
+    import uuid
+    from datetime import datetime, timedelta, timezone
+
+    from app.engine import cancel_flow
+    from app.models.booking import Booking, TimeSlot
+
+    state, _ = _draft_state()
+    org_id = uuid.UUID(state.org_id)
+    future_start = datetime.now(timezone.utc) + timedelta(days=30)
+    slot = TimeSlot(
+        org_id=org_id, start_time=future_start, end_time=future_start + timedelta(hours=1)
+    )
+    db_session.add(slot)
+    await db_session.commit()
+    await db_session.refresh(slot)
+    db_session.add(
+        Booking(
+            org_id=org_id,
+            slot_id=slot.id,
+            customer_name="Rohan Sharma",
+            customer_email="rohan@example.com",
+            customer_phone="+919822047136",
+        )
+    )
+    await db_session.commit()
+
+    from types import SimpleNamespace
+
+    org = SimpleNamespace(id=org_id)
+    assert (
+        await cancel_flow.maybe_abort_unbooked_draft(
+            db_session, state, "cancel my booking", org_config=None, org=org
+        )
+        is None
+    )
+    # Draft untouched — the cancel lookup owns this turn now.
+    assert state.collected_data["date"] == "2026-10-06"

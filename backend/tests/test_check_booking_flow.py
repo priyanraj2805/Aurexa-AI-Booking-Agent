@@ -162,6 +162,70 @@ async def test_past_bookings_listed_separately(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
+async def test_resume_offer_skips_name_on_displayed_booking(
+    db_session: AsyncSession,
+):
+    """Production: after showing Raghav Jhulelal's appointment the bot said
+    "next I'll need your name" — the name was right there in the booking.
+    The resume offer must skip details already known."""
+    org = await _make_org(db_session)
+    sess = await _make_session(
+        db_session,
+        org.id,
+        collected_data={"email": "raghav@test.com"},
+        missing_fields=["name", "email", "phone", "date", "time"],
+    )
+    cfg = await _org_config(db_session, org)
+    await _make_booking(
+        db_session, org, sess.session_id,
+        "raghav@test.com", "+15550003333", start_offset_hours=48,
+    )
+    # Name the booking Raghav Jhulelal like the screenshot.
+    from app.models.booking import Booking
+    from sqlalchemy.future import select
+
+    row = (
+        await db_session.execute(
+            select(Booking).where(Booking.session_id == sess.session_id)
+        )
+    ).scalars().first()
+    row.customer_name = "Raghav Jhulelal"
+    await db_session.commit()
+    action = await flow.handle_check_booking(
+        db_session, org, cfg, sess,
+        contact_override=("email", "raghav@test.com"),
+    )
+    assert "Raghav Jhulelal" in action.message
+    assert "next I'll need your name" not in action.message
+
+
+def test_resume_offer_plain_invite_when_nothing_missing() -> None:
+    from app.engine.check_booking_flow import _resume_offer
+
+    sess = _sync_session(
+        collected_data={"name": "A", "email": "a@b.com"},
+        missing_fields=[],
+    )
+    out = _resume_offer(sess)
+    assert "just say the word" in out
+    assert "next I'll need" not in out
+
+
+def _sync_session(**state):
+    from app.schemas.agent import ChatSessionState
+
+    return ChatSessionState(
+        session_id="00000000-0000-0000-0000-000000000000",
+        org_id="00000000-0000-0000-0000-000000000000",
+        channel="web",
+        collected_data=dict(state.get("collected_data") or {}),
+        missing_fields=list(state.get("missing_fields") or []),
+        current_intent="START_BOOKING",
+        session_status="ACTIVE",
+    )
+
+
+@pytest.mark.asyncio
 async def test_pending_ignores_non_contact_message(db_session: AsyncSession):
     org = await _make_org(db_session)
     sess = await _make_session(db_session, org.id)

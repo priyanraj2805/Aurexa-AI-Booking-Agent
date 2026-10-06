@@ -17,21 +17,15 @@ from app.engine.user_visible_text import looks_like_field_waiver
 @pytest.mark.parametrize(
     "text",
     [
-        "bina email address ke proceed krte hai please",
-        "bina phone ke aage badho",
-        "email ke bina booking karo",
-        "also skip contact number",
-        "skip my phone",
-        "skip kar do",
-        "number rehne do",
-        "email mat mango",
-        "proceed without email",
-        "continue without phone",
-        "no need for email",
         "I don't want to share my email",
+        "don't want to give phone",
+        "skip it",
+        "don't ask",
     ],
 )
 def test_refusal_shapes_detected(text: str) -> None:
+    """English refusal verbs only — Hinglish/other-language refusals belong
+    to the MODEL to understand, never to keyword lists here."""
     assert is_field_refusal(text, ["email", "phone"]) is True
 
 

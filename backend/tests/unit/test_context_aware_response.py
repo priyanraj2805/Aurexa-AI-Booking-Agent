@@ -148,9 +148,10 @@ class TestExtractEntitiesWithoutLlm:
         )
         assert "name" not in result
 
-    def test_intro_sentence_yields_bare_name_not_sentence(self):
-        """Production: "I am Rohan Verma" was validated whole and BOOKED as
-        the customer name. The fallback must strip the introduction."""
+    def test_intro_sentence_never_becomes_a_name(self):
+        """"I am Rohan Verma" was once validated whole and BOOKED verbatim.
+        Parsing introductions belongs to the model; the deterministic
+        fallback must capture nothing here so the flow safely re-asks."""
         result = _extract_entities_without_llm(
             message_text="I am Rohan Verma",
             missing_fields=["name"],
@@ -158,7 +159,7 @@ class TestExtractEntitiesWithoutLlm:
             timezone_name="UTC",
             max_booking_days=90,
         )
-        assert result.get("name") == "Rohan Verma"
+        assert "name" not in result
 
     def test_question_never_becomes_name(self):
         result = _extract_entities_without_llm(

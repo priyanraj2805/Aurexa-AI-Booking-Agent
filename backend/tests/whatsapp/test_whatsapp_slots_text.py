@@ -99,3 +99,65 @@ async def test_whatsapp_date_shows_slots_as_plain_text(client: AsyncClient, db_s
     assert "reply" in text.lower() or "preferred time" in text.lower(), f"No instruction in {text}"
     # Should NOT be interactive directive
     assert reply["type"] != "interactive_buttons" and reply["type"] != "interactive_list", "Should be plain text, not directive"
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_date_step_shows_horizon_never_day_menu(client: AsyncClient, db_session, monkeypatch):
+    """Date options are SHOWN, never interrogated: even idle chatter on the
+    date step gets the bookable-day list, so the customer picks instead of
+    being quizzed."""
+    monkeypatch.setattr(settings, "WA_GATEWAY_SERVICE_KEY", "test-gw-key")
+    headers = {"X-Gateway-Key": "test-gw-key"}
+
+    org = Organization(name="WA Dates Org", api_key=f"ds_test_{uuid.uuid4().hex[:16]}", is_active=True)
+    db_session.add(org)
+    await db_session.flush()
+    config = OrgConfig(org_id=org.id, required_fields=["name", "email", "phone", "date", "time"], timezone="UTC", require_otp=False, require_phone_otp=False)
+    db_session.add(config)
+    tomorrow = (datetime.now(timezone.utc) + timedelta(days=2)).date()
+    for i in range(7):
+        d = tomorrow + timedelta(days=i)
+        existing = await db_session.execute(select(ScheduleDay).where(ScheduleDay.org_id == org.id, ScheduleDay.day_of_week == d.weekday()))
+        if not existing.scalars().first():
+            db_session.add(ScheduleDay(org_id=org.id, day_of_week=d.weekday(), is_active=True, open_time=time(9,0), close_time=time(17,0)))
+    db_session.add(BusinessSchedule(org_id=org.id, slot_duration_minutes=60, booking_window_days=60, timezone="UTC"))
+    await db_session.commit()
+    await db_session.refresh(org)
+
+    row = WhatsAppConnection(org_id=org.id, status="CONNECTED", phone_number="919999999998", whatsapp_booking_enabled=True)
+    db_session.add(row)
+    await db_session.commit()
+    await db_session.refresh(row)
+
+    from app.models.session import ChatSession as CS
+    pre_session = CS(
+        org_id=org.id,
+        channel="whatsapp",
+        channel_user_id="919888888887",
+        state_data={"name": "Date User", "email": "dateuser@test.com", "phone": "9998887776"},
+        missing_fields=["date", "time"],
+        current_intent="PROVIDE_DATA",
+        session_status="ACTIVE",
+        otp_verified=True,
+        phone_otp_verified=True,
+    )
+    db_session.add(pre_session)
+    await db_session.commit()
+    await db_session.refresh(pre_session)
+
+    payload = {
+        "connectionId": str(row.id),
+        "messageId": f"wamid.test_{uuid.uuid4().hex[:8]}",
+        "from": "919888888887",
+        "chatJid": "919888888887@s.whatsapp.net",
+        "text": "hello",
+    }
+    r = await client.post("/api/v1/internal/whatsapp-qr/inbound", json=payload, headers=headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok", body
+    text = (body["reply"] or {}).get("body") or ""
+    flat = " ".join(text.split())
+    # Date step shows the horizon window — never a day menu.
+    assert "Available dates:" not in flat, f"Day menu leaked: {text[:200]}"
+    assert "within this horizon" in flat

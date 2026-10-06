@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Literal, Optional, Sequence
@@ -572,8 +573,15 @@ async def lookup_schedule_business_hours_answer(
 ) -> Optional[dict[str, Any]]:
     if not is_schedule_business_hours_query(user_message):
         return None
-    if in_booking_flow:
-        return None
+    # No in_booking_flow gate: hours questions mid-booking ("What are your
+    # working hours?" with a name already collected) must be answered from
+    # the weekly schedule, not declined. Both callers (graph early-return
+    # and legacy answer+re-ask) preserve booking progress; only the
+    # question phrasing gates (statements like "that timing works" never
+    # match). Production: the question fell through to RAG and the customer
+    # got "I don't have information about that" for hours we configure.
+    # in_booking_flow stays in the signature so callers need no changes.
+    _ = in_booking_flow
     if db is None or not hasattr(db, "execute"):
         return None
 
@@ -601,6 +609,30 @@ async def lookup_schedule_business_hours_answer(
     # so the user sees hours as per message flow.
     if target_date is None:
         if not _looks_like_question(user_message):
+            return None
+        # Anaphoric timing references ("is that timing okay?", "that timing
+        # works") ask about a SPECIFIC proposed time, not general hours —
+        # they fall through so the slot/time logic judges the actual time.
+        # Bare general-hours phrasing ("what are your working hours") gets
+        # the weekly table. Pure phrasing shapes, never topic judgments.
+        _hours_text_l = str(user_message or "").strip().lower()
+        _anaphoric_timing = bool(
+            re.search(r"\b(that|this|it)\b", _hours_text_l)
+        ) and not any(
+            _general in _hours_text_l
+            for _general in (
+                "working hours",
+                "business hours",
+                "office hours",
+                "opening hours",
+                "open hours",
+                "hours of operation",
+                "timings",
+                "when are you open",
+                "when do you open",
+            )
+        )
+        if _anaphoric_timing:
             return None
         if not schedule:
             return {
@@ -873,11 +905,9 @@ async def lookup_available_dates(
             "effective_timezone": biz_tz,
         }
     labels = [d.strftime("%a, %b %d") for d in found]
-    # Horizon wording (never a day menu): a list of day names reads as a
-    # menu, and any day on it can still turn out full — the customer picks
-    # from it and is then told the day is unavailable. The horizon window
-    # cannot go stale between being sent and being used. The day labels
-    # stay in the payload for transports that render their own pickers.
+    # Horizon wording (never a day menu on WhatsApp): the customer-facing
+    # text is the booking window, while the slot-checked day labels stay in
+    # the payload for transports that render their own pickers.
     try:
         from app.engine.message_processor import (
             _format_available_dates_for_prompt as _horizon_text,

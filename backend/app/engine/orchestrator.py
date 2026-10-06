@@ -113,7 +113,10 @@ class LLMOrchestrator:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ],
-            "temperature": 0.0,
+            "temperature": 0.5,
+            # Bounded completions (rerank scores, short helpers): keeps
+            # per-minute token accounting tight on metered free tiers.
+            "max_tokens": 1000,
         }
         
         if json_mode:
@@ -212,6 +215,10 @@ class LLMOrchestrator:
         if not isinstance(parsed.get("response_message"), str):
             parsed["response_message"] = str(parsed.get("response_message", ""))
 
+        # Structured slot-list request flag (prompted in the contract).
+        # Normalised to bool; absent/false means "not asked".
+        parsed["wants_slot_list"] = bool(parsed.get("wants_slot_list", False))
+
         return parsed
 
     async def process_turn(
@@ -226,6 +233,7 @@ class LLMOrchestrator:
         db: Optional[Any] = None,
         business_name: Optional[str] = None,
         org_name: Optional[str] = None,
+        is_first_turn: bool = False,
     ) -> Dict[str, Any]:
         """
         Unified Orchestration Call.
@@ -263,6 +271,7 @@ class LLMOrchestrator:
             rag_context=rag_context,
             business_name=business_name,
             org_name=org_name,
+            is_first_turn=is_first_turn,
         )
 
         result = await self._call_llm(

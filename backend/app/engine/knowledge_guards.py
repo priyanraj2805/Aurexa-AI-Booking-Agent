@@ -253,6 +253,7 @@ def find_unlisted_entities(
     allowed_texts: List[str],
     *,
     kinds: Tuple[str, ...] = ("phone", "email", "price"),
+    echo_texts: Optional[List[str]] = None,
 ) -> List[str]:
     """Entities in `answer` absent from every allowed text.
 
@@ -279,6 +280,17 @@ def find_unlisted_entities(
         if text_value:
             pooled_groups |= _digit_groups(str(text_value))
     pooled_lower = " ".join(str(t or "") for t in (allowed_texts or [])).lower()
+    # Echo exemption: entities the CUSTOMER just wrote (lookup values,
+    # corrections) are echoes, not inventions — "We couldn't find anything
+    # for +6350063338" must never render as "for [hidden]". Production
+    # masked the user's own lookup input because it was in neither org
+    # facts nor session details.
+    echo_groups: Set[str] = set()
+    echo_lower = ""
+    for echo_value in echo_texts or []:
+        if echo_value:
+            echo_groups |= _digit_groups(str(echo_value))
+            echo_lower += " " + str(echo_value).lower()
     found: List[str] = []
 
     def _looks_like_date(candidate: str) -> bool:
@@ -296,7 +308,11 @@ def find_unlisted_entities(
         if _looks_like_date(candidate):
             return False
         if digit_compare:
+            if _digits_only(candidate) in echo_groups:
+                return False
             return _digits_only(candidate) not in pooled_groups
+        if candidate.lower() in echo_lower:
+            return False
         return candidate.lower() not in pooled_lower
 
     _patterns = {
@@ -440,6 +456,7 @@ def guard_final_text(
     *,
     org_facts: List[str],
     session_details: List[str],
+    user_text: str = "",
 ) -> Tuple[str, bool, List[str]]:
     """Final gate for an outgoing reply: block invented contact/money data.
 
@@ -449,9 +466,10 @@ def guard_final_text(
     from the knowledge base.
     Otherwise every entity must appear in the allowed material (org facts
     like business profile, plus the customer's own session details echoed
-    back in confirmations). Payment-transaction texts skip price
-    enforcement (amounts come from live payment attempts, not the KB).
-    Returns (safe_body, blocked, entities).
+    back in confirmations). Entities from the customer's CURRENT message
+    (``user_text``) are echoes, never inventions. Payment-transaction texts
+    skip price enforcement (amounts come from live payment attempts, not
+    the KB). Returns (safe_body, blocked, entities).
     """
     kinds: Tuple[str, ...] = ("phone", "email", "price")
     lowered = (body or "").lower()
@@ -467,7 +485,10 @@ def guard_final_text(
     if any(word in lowered for word in _PAYMENT_TXN_WORDS):
         kinds = ("phone", "email")
     entities = find_unlisted_entities(
-        body, [*(org_facts or []), *(session_details or [])], kinds=kinds
+        body,
+        [*(org_facts or []), *(session_details or [])],
+        kinds=kinds,
+        echo_texts=[user_text] if user_text else [],
     )
     if not entities:
         return body, False, []

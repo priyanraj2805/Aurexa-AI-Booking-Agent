@@ -107,8 +107,12 @@ def apply_state_merge(
 
     for field in reopen_fields or []:
         next_optional_skips.discard(field)
-        if field in allowed_fields:
-            merged.pop(field, None)
+    # NOTE: reopen never deletes the stored value. An earlier version popped
+    # it, but persistence merges (never prunes) — the next turn resurrected
+    # the "deleted" value from the row and the correction was silently lost
+    # ("change my number" acknowledged, old number kept). The field is
+    # re-asked via reopened_missing below; the stored value stands until a
+    # fresh one arrives.
 
     for field in skipped_fields or []:
         if field in optional_field_set:
@@ -127,6 +131,14 @@ def apply_state_merge(
             continue
         if key in conflict_map:
             continue
+        # Never clobber a saved value with null/empty: an LLM "null" for an
+        # already-collected field is an omission, not a deletion. There is no
+        # clear-field UX, so empty can never be fresher than stored data.
+        if (value is None or value == "") and merged.get(key) not in (
+            None,
+            "",
+        ):
+            continue
         if merged.get(key) != value:
             merged[key] = value
             deltas[key] = value
@@ -139,12 +151,14 @@ def apply_state_merge(
 
     # Reopened fields must lead the follow-up queue so the widget asks for
     # the field being changed (not the next missing one) first. A field is
-    # only re-asked when no fresh value was captured in this same turn.
+    # only re-asked when no fresh value was captured in this same turn
+    # (deltas carries exactly this turn's accepted values — the stored value
+    # no longer distinguishes fresh from stale since reopen keeps it).
     reopened_missing = [
         field
         for field in (reopen_fields or [])
         if field in allowed_fields
-        and field not in merged
+        and field not in deltas
         and field not in next_optional_skips
     ]
     if reopened_missing:

@@ -148,6 +148,14 @@ CONFIRMATION_CLAIM_PATTERN = re.compile(
     # slot was taken with no Booking row ever written. Only the booking nouns
     # qualify, so mid-flow phrasing like "the date is set" is not affected.
     r"(?:booking|appointment|reservation|slot)\s+(?:is\s+|are\s+|has\s+been\s+|have\s+been\s+|was\s+|were\s+)?(?:set|locked\s+in)\b|"
+    # Date/time subjects with an explicit completion adverb ("that date is
+    # ALREADY confirmed") assert completion just as strongly — production
+    # sent exactly that with no Booking row. The adverb is mandatory so
+    # mid-flow phrasing ("your date is confirmed?" as a question, "the date
+    # is set") stays unaffected: questions are excluded below and bare
+    # "date is confirmed" without an adverb does not match.
+    r"(?:date|time)\s+(?:is\s+|was\s+)?(?:already|still|successfully|now)\s+"
+    r"(?:confirmed|booked|reserved|scheduled|finalized)\b|"
     r"(?:we|i)\s+(?:have\s+|has\s+)?(?:booked|confirmed|reserved|scheduled)\s+(?:your|the)\b|"
     r"successfully\s+(?:booked|confirmed|reserved|scheduled)|"
     r"(?:booked|confirmed|reserved|scheduled)\s+successfully|"
@@ -245,14 +253,20 @@ def looks_like_field_saved_claim(message: str, field_name: str) -> bool:
 # "availability") are deliberately NOT matched — only instruction phrasing
 # a receptionist would never say to a customer.
 _INSTRUCTION_ECHO_RES = (
-    # The exact production leak (scheduling_policy BUSINESS HOURS block).
+    # The production leak (scheduling_policy BUSINESS HOURS block) and its
+    # paraphrases: "openings hours", dropped commas, reshuffled clauses.
+    # Matched loosely on purpose — no customer reply should ever contain
+    # meta-instructions about answering hours/timings questions.
     re.compile(
-        r"answer\s+questions?\s+about\s+opening\s+hours,?\s+timings?,?\s+"
-        r"(?:availability\s+windows?\s+or\b|availability\b)",
+        r"answer\s+questions?\s+about\s+openings?\s+hours",
         flags=re.IGNORECASE,
     ),
     re.compile(
         r"answer\s+(?:timing|time|hours?)\s+questions?\s+from\s+this",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r"timings?,?\s+availability\s+windows?\s+or\b",
         flags=re.IGNORECASE,
     ),
     re.compile(r"only\s+start\s+the\s+booking\s+flow", flags=re.IGNORECASE),
@@ -421,6 +435,13 @@ def sanitize_user_visible_text(raw_message: Any) -> str:
     stripped = strip_instruction_echo(text)
     if not stripped:
         return _FALLBACK_TEXT
+    # Human-texting style, all channels: em/en dashes read as AI-generated
+    # (the prompt forbids them, but the model still slips them, e.g.
+    # "Sure — I can help"). Same normalization the WhatsApp transport
+    # applies — lifted here so web/admin surfaces get it too.
+    stripped = (
+        stripped.replace(" — ", ", ").replace("—", ",").replace("–", "-")
+    )
     return stripped
 
 

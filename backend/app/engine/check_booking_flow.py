@@ -178,7 +178,10 @@ async def handle_check_booking(
         if kind == "email" and not collected.get("email"):
             collected["email"] = value
         elif kind == "phone" and not collected.get("phone"):
-            collected["phone"] = f"+{value}" if value.isdigit() else value
+            # Never fabricate E.164: bare digits stay bare. The old
+            # f"+{value}" invented a country code the customer never gave
+            # and persisted it into the session identity.
+            collected["phone"] = value
         collected.pop(CHECK_PENDING_KEY, None)
         chat_session.collected_data = collected
         _drop_satisfied_missing(chat_session, collected)
@@ -215,11 +218,13 @@ async def handle_check_booking(
         logger.warning("check-booking past lookup failed", exc_info=True)
         past = []
 
-    resume = _resume_offer(chat_session)
+    resume = _resume_offer(
+        chat_session, _known_booking_contact(list(upcoming) + list(past))
+    )
     if not upcoming and not past:
         identity = email or (f"+{phone_digits}" if phone_digits else "those details")
         msg = (
-            f"I checked, and you don't have any previous bookings under **{identity}**."
+            f"I checked, and you don't have any previous bookings under *{identity}*."
             f"{resume}"
         )
         action = ActionPayload(
@@ -237,8 +242,8 @@ async def handle_check_booking(
         )
         parts.append(header)
         parts.extend(
-            f"• **{_format_booking_line(b, st, tz_name)}**"
-            + (f" — {b.customer_name}" if b.customer_name else "")
+            f"• *{_format_booking_line(b, st, tz_name)}*"
+            + (f", {b.customer_name}" if b.customer_name else "")
             for b, st in upcoming
         )
     if past:
@@ -248,7 +253,7 @@ async def handle_check_booking(
         )
         parts.extend(
             f"• {_format_booking_line(b, st, tz_name)}"
-            + (f" — {b.customer_name}" if b.customer_name else "")
+            + (f", {b.customer_name}" if b.customer_name else "")
             for b, st in past
         )
     msg = "\n".join(parts) + resume
@@ -317,17 +322,53 @@ def _drop_satisfied_missing(
         pass
 
 
-def _resume_offer(chat_session: ChatSessionState) -> str:
+def _known_booking_contact(bookings) -> dict:
+    """Contact details from displayed bookings, for the resume offer.
+
+    The lookup session itself rarely holds the name (only the email/phone
+    used to find the booking), but the booking just shown usually does.
+    Naming an already-known field as "needed next" reads as forgetting.
+    """
     try:
-        missing = list(chat_session.missing_fields or [])
+        if bookings:
+            first = bookings[0][0]
+            return {
+                "name": str(getattr(first, "customer_name", "") or ""),
+                "email": str(getattr(first, "customer_email", "") or ""),
+                "phone": str(getattr(first, "customer_phone", "") or ""),
+            }
+    except Exception:
+        pass
+    return {}
+
+
+def _resume_offer(chat_session: ChatSessionState, known=None) -> str:
+    """Invite to a new booking without re-asking known details.
+
+    The old version named ``missing_fields[0]`` blindly, so after showing
+    an appointment for Raghav Jhulelal it still said "next I'll need your
+    name". Fields already in the session OR on the displayed booking are
+    skipped; when nothing is missing only the plain invite goes out.
+    """
+    try:
+        collected = dict(chat_session.collected_data or {})
+        if isinstance(known, dict):
+            for key, value in known.items():
+                if value and not str(collected.get(key) or "").strip():
+                    collected[key] = value
+        missing = [
+            field
+            for field in (chat_session.missing_fields or [])
+            if field and not str(collected.get(field) or "").strip()
+        ]
         if missing:
             return (
                 f"\n\nIf you'd like to make a new booking, just say the word"
-                f" — next I'll need your {missing[0].replace('_', ' ')}."
+                f". Next I'll need your {missing[0].replace('_', ' ')}."
             )
     except Exception:
         pass
-    return ""
+    return "\n\nIf you'd like to make a new booking, just say the word."
 
 
 async def _persist_state(db: AsyncSession, chat_session: ChatSessionState) -> None:

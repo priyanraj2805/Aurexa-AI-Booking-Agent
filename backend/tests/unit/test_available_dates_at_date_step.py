@@ -110,9 +110,9 @@ async def test_scan_runs_without_any_question_phrase() -> None:
 @pytest.mark.asyncio
 async def test_scan_output_uses_horizon_wording_not_day_menu() -> None:
     """Customer-facing text is the horizon window ("We are available from
-    ... to ..., please choose a date within this horizon."), never a day
-    menu — a listed day can still turn out full by the time it is picked.
-    The machine-readable day labels stay in the payload for pickers."""
+    ... to ..., please choose a date within this horizon.") — day lists are
+    fully restricted on WhatsApp. The machine-readable day labels stay in
+    the payload for pickers."""
     db = _FakeDB(sched_row=_sched_row())
     answer = await lookup_available_dates(
         db=db, org_id=ORG_ID, effective_timezone="UTC", org_timezone="UTC"
@@ -313,15 +313,15 @@ def test_step_render_sits_next_to_the_time_render() -> None:
 
 
 def test_orchestrator_does_not_send_a_separate_dates_message() -> None:
-    """The available-dates prose is answered on request; it is not injected
-    into every date-step reply."""
+    """The available-dates prose is answered on request; no day list is
+    injected into WhatsApp date-step replies (fully restricted)."""
     import inspect
 
     from app.engine import langgraph_orchestrator as orch
 
     source = inspect.getsource(orch)
     assert "available_dates_appended" not in source
-    assert "Here are our next available dates" not in source
+    assert "Available dates:" not in source
 
 
 # â”€â”€ the question gate is unchanged â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -373,16 +373,15 @@ async def test_concrete_date_is_still_a_value_not_an_inquiry() -> None:
 
 # â”€â”€ the orchestrator gate that appends the list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def test_orchestrator_appends_dates_at_the_date_step() -> None:
-    """The append was tried and reverted: the date picker is a built-in
-    feature, so a separate prose list is redundant. Guard the revert."""
+    """The append was tried and reverted: day lists are fully restricted
+    on WhatsApp, so no prose list is injected. Guard the revert."""
     import inspect
 
     from app.engine import langgraph_orchestrator as orch
 
     source = inspect.getsource(orch)
-    assert "lookup_available_dates" not in source
     assert "available_dates_appended" not in source
-    assert "Here are our next available dates" not in source
+    assert "Available dates:" not in source
 
 
 # -- the step guard must not trap the customer -----------------------------

@@ -92,6 +92,7 @@ Output:"""
         rag_context: Optional[List[Dict[str, Any]]] = None,
         business_name: Optional[str] = None,
         org_name: Optional[str] = None,
+        is_first_turn: bool = False,
     ) -> str:
         """
         UNIFIED PROMPT:
@@ -238,9 +239,26 @@ Output:"""
                 + KNOWLEDGE_IDENTITY_NOTE
             )
 
+        _opening_block = ""
+        if is_first_turn:
+            _house_greeting = str((persona or {}).get("greeting_message") or "").strip()
+            _greet_line = (
+                f' House greeting to use verbatim at the start: "{_house_greeting}"'
+                if _house_greeting
+                else ""
+            )
+            _opening_block = (
+                "\n### FIRST MESSAGE OF THE CONVERSATION:\n"
+                "This is the customer's very first message — nothing is collected "
+                "yet. ALWAYS open your response_message with a warm greeting "
+                "(Hello! ...) before anything else, whatever they sent — even "
+                "if they already shared their name, details, or a question. "
+                "If they shared their name, greet them BY name."
+                f"{_greet_line}\n"
+            )
         prompt = f"""You are the Unified Intelligence Core for a generalized AI Booking Assistant.
 {persona_block}
-
+{_opening_block}
 {business_scope_block}
 
 ### SESSION CONTEXT (ALWAYS USE THIS - DO NOT HALLUCINATE):
@@ -272,19 +290,21 @@ Output:"""
   3. GENERATE a polite, humble, and conversational RESPONSE to the user.
     - Write like a human texting: short plain sentences, no em dashes (use commas/periods), no AI boilerplate ("As an AI", "Great question", "I hope this helps", "delve", "furthermore"). Answer directly.
     - NEVER ECHO THE PROMPT: response_message must NEVER contain, quote, or paraphrase any text from these prompt sections — BUSINESS HOURS, BUSINESS SCOPE, FIELD DEFINITIONS, COMPANY KNOWLEDGE CONTEXT, SESSION CONTEXT, OUTPUT FORMAT — or from these instructions themselves (e.g. never write "answer timing questions", "only start the booking flow", "do not hallucinate", "missing field", "extracted_entities", "authoritative"). Reply only in natural customer-facing language a receptionist would use.
+    - NEVER CLAIM UNCOLLECTED DATA: never write that you have, saved, or will skip a field unless Currently Collected Data above shows it with a real value. No "You're right, I should have that" and no "I can skip that" for missing fields — ask instead.
     - If the user asked a question or expressed concern (e.g. "why do I need this?", "what is this for?"), answer naturally and helpfully. Then gently guide them back to the booking. Do NOT force the next field if they're asking questions.
     - REFUSAL vs MEMORY LAPSE: only an explicit refusal ("don't want to give/share", "skip it") lets you move past a field — and then only to the next REQUIRED field in order. "I don't remember / forgot / not sure" is NOT a refusal: help briefly and keep asking for the SAME field. NEVER waive or postpone a required field on your own.
     - NEVER AGREE TO SKIP A REQUIRED FIELD: if the user asks to proceed without / skip a required field (email, phone, or any required field), do NOT say "I can skip that" or move on — explain briefly why it is needed (verification / confirmation) and ask for the SAME field again, or offer to cancel the booking. Waiving is only ever allowed for explicitly OPTIONAL fields.
     - If the user corrects YOU ("I never gave X"), acknowledge it plainly first, then continue correctly. Keep replies to praise/jokes to a few words and return to the booking — never let them advance or waive a field.
     - Gibberish, keyboard-mashing, or random syllables are NEVER field values: leave extracted_entities EMPTY and re-ask the same next field. Never advance the flow or claim anything was saved.
-    - KNOWLEDGE HONESTY: every person name or factual claim in response_message must come from COMPANY KNOWLEDGE CONTEXT above — never from general knowledge. If it isn't there, say you don't have it. If the user disputes a fact you stated, concede rather than defend: acknowledge you may be wrong and only re-assert what the materials support. Never invent excuses about your tools, access, or earlier turns.
+    - KNOWLEDGE HONESTY: every person name or factual claim in response_message must come from COMPANY KNOWLEDGE CONTEXT above — never from general knowledge. EXCEPTION: your own business/agent identity comes ONLY from the persona/IDENTITY lines above — never from knowledge context, even if it names another company. If it isn't there, say you don't have it. If the user disputes a fact you stated, concede rather than defend: acknowledge you may be wrong and only re-assert what the materials support. Never invent excuses about your tools, access, or earlier turns.
     - If the user just provided a value for a field, acknowledge it warmly, THEN ask for the next missing field: {next_field_label}
     - If the user is just chatting or greeting, respond naturally and guide them toward the booking.
     - CRITICAL: You MUST ask for EXACTLY ONE missing field at a time. Your response_message MUST ask for ONLY the next field: {next_field_label}. Do NOT mention any other missing fields. Do NOT list requirements. It is overwhelming.
     - If there are errors (e.g., invalid email), explain politely and ask they try again.
     - If ALL information is collected, tell them you're sending a verification code to their email.
     - You are a booking assistant for THIS BUSINESS ONLY as defined in BUSINESS SCOPE and COMPANY KNOWLEDGE CONTEXT above. You must NOT hallucinate services outside your scope. If user asks to book a professional/service NOT in your scope (e.g., engineer/beautician when you are Medical), do NOT say you can book it. Politely clarify your actual scope and ask if they want to proceed with a valid service within your scope.
-    - If the user asks about the company, services, pricing, hours, or anything covered by your context - answer helpfully using provided knowledge. If the user asks something completely unrelated (general knowledge, trivia) - politely say that's outside your expertise and steer back to booking.
+    - If the user asks about the company, services, pricing, hours, or anything covered by your context - answer helpfully using provided knowledge. If the user asks something completely unrelated (general knowledge, trivia) - politely say that's outside your expertise and steer back to booking. When declining, briefly mirror their topic in your own words so they feel heard.
+    - SLOT-LIST REQUEST: if the customer asks for available times/slots/timings in ANY words or language (not a specific time value), set "wants_slot_list" to true in your output. The system renders the computed list.
     - For schedule/business-hours answers, policy data is authoritative: do NOT hallucinate or invent open/closed hours.
 
 ### OUTPUT FORMAT:
@@ -292,6 +312,7 @@ You MUST return ONLY a valid JSON object with these keys:
 - "intent": (string)
 - "extracted_entities": (object — any of: {extraction_keys}; include every missing field you could confidently extract, not just {next_field_label})
 - "response_message": (string - your polite reply asking ONLY for the next still-missing field after your extractions)
+- "wants_slot_list": (boolean - true when the customer asked for available times/slots/timings in any words; omit or false otherwise)
 
 Output ONLY valid JSON. Do not include explanations, greetings, markdown fences, or any text outside the single JSON object. Your ENTIRE response must be exactly one parseable JSON object, with the conversational reply confined to the response_message string value. No other text is allowed before or after the JSON object."""
         return prompt

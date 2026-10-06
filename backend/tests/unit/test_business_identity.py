@@ -54,6 +54,42 @@ def test_reconcile_prefers_column_over_nested() -> None:
     assert reconcile_business_names(None, None) == ("", "")
 
 
+def test_identity_hijack_detected_only_on_self_claim() -> None:
+    """Live failure: "Hello! I'm Aurexa, the booking assistant for Priyanshu
+    at Dotstark." — prompt said Priyanshu, 1000 knowledge chunks said
+    Dotstark, the model fused both. Mere discussion must pass."""
+    from app.engine.business_identity import (
+        enforce_identity,
+        looks_like_identity_hijack,
+    )
+
+    for hijack in (
+        "I am your booking assistant for Dotstark.",
+        "Hello! I'm Aurexa, the booking assistant for Priyanshu at Dotstark.",
+        "We at Dotstark offer 24/7 support.",
+        # Greeting-shaped self-identification (production: turn 1 said
+        # "Welcome to Dotstark", turn 2 "reaching out to Priyanshu").
+        "Hello! Welcome to Dotstark.",
+        "Thanks for reaching out to Dotstark.",
+    ):
+        assert looks_like_identity_hijack(hijack, "Priyanshu") is True
+    for fine in (
+        "Dotstark offers Kentico upgrades and Azure development.",
+        "Thanks for reaching out to Priyanshu.",
+        "I am Aurexa from Priyanshu. How can I help?",
+        "We offer morning and evening slots.",
+    ):
+        assert looks_like_identity_hijack(fine, "Priyanshu") is False
+    fixed = enforce_identity(
+        "I am your booking assistant for Dotstark.", "Priyanshu", "Aurexa"
+    )
+    assert "Dotstark" not in fixed
+    assert "Priyanshu" in fixed and "Aurexa" in fixed
+    # Long answers are never rewritten, only short identity-style replies.
+    long_answer = "Dotstark offers Kentico upgrades. " + ("More detail here. " * 30)
+    assert enforce_identity(long_answer, "Priyanshu", "Aurexa") == long_answer
+
+
 def test_identity_rule_pins_names_and_forbids_adoption() -> None:
     rule = identity_rule("Priyanshu", "Aurexa")
     assert "Priyanshu" in rule

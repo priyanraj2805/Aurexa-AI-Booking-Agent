@@ -29,6 +29,19 @@ def test_production_echo_shape_keeps_human_reply() -> None:
     assert message == "Thanks! What date would you like to book for?"
 
 
+def test_openings_variant_also_stripped() -> None:
+    """Second production shape ("openings hours" with an s): the matcher
+    must catch paraphrases, not just the verbatim block."""
+    raw = (
+        "Answer questions about openings hours, timings, availability "
+        "windows or Thanks! What date works best for your appointment?"
+    )
+    message, _ = extract_user_visible_text(raw)
+    assert "openings hours" not in message.lower()
+    assert "availability windows or" not in message.lower()
+    assert "What date works best for your appointment?" in message
+
+
 def test_full_echo_falls_back_never_leaks() -> None:
     raw = (
         "Answer questions about opening hours, timings, availability windows or "
