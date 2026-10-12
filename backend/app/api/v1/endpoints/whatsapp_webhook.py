@@ -973,10 +973,20 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                                     _weekly_c2 = None
                                     _excs_c2 = None
                                     try:
-                                        _sdc2_res = await db.execute(_Selc2(_SDc2).where(_SDc2.org_id == org.id))
+                                        _sdc2_res = await db.execute(
+                                            _Selc2(_SDc2).where(
+                                                _SDc2.org_id == org.id,
+                                                _SDc2.provider_id.is_(None),
+                                            )
+                                        )
                                         _sdc2 = _sdc2_res.scalars().all()
                                         _weekly_c2 = [{"day_of_week": r.day_of_week, "is_active": r.is_active, "open_time": r.open_time, "close_time": r.close_time} for r in _sdc2]
-                                        _sec2_res = await db.execute(_Selc2(_SEc2).where(_SEc2.org_id == org.id))
+                                        _sec2_res = await db.execute(
+                                            _Selc2(_SEc2).where(
+                                                _SEc2.org_id == org.id,
+                                                _SEc2.provider_id.is_(None),
+                                            )
+                                        )
                                         _sec2 = _sec2_res.scalars().all()
                                         _excs_c2 = [{"exception_date": r.exception_date, "exception_type": str(r.exception_type), "custom_open": r.custom_open, "custom_close": r.custom_close} for r in _sec2]
                                     except Exception:

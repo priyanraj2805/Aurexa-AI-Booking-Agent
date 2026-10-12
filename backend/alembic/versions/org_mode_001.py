@@ -132,10 +132,8 @@ def upgrade() -> None:
     )
     op.create_index("ix_timeslots_provider", "time_slots", ["provider_id"])
     # Drop old global unique that blocked two doctors at same time
-    try:
-        op.drop_constraint("uq_timeslot_org_start", "time_slots", type_="unique")
-    except Exception:
-        pass
+    # (IF EXISTS: never wrap op.* in try/except — it aborts the transaction)
+    op.execute("ALTER TABLE time_slots DROP CONSTRAINT IF EXISTS uq_timeslot_org_start")
     # Partial uniques: individual (provider NULL) vs per-doctor
     op.execute(
         """

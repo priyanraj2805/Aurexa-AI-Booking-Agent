@@ -258,7 +258,11 @@ class TestSingleActiveBooking:
         await self._seed_upcoming(db_session, org, "dup_block@example.com")
         sess = await _make_session(
             db_session, org, missing=[], intent="CONFIRM_BOOKING",
-            collected=dict(FULL_CONTACT, email="dup_block@example.com"))
+            collected=dict(
+                FULL_CONTACT,
+                email="dup_block@example.com",
+                _review_presented=True,
+            ))
         cfg = (await db_session.execute(
             _sel(OrgConfig).where(
                 OrgConfig.org_id == org.id))).scalars().first()
@@ -572,7 +576,11 @@ class TestLLMBeatsKeywords:
                 OrgConfig.org_id == org.id))).scalars().first()
         sess = await _make_session(
             db_session, org, missing=[], intent="CONFIRM_BOOKING",
-            collected=dict(FULL_CONTACT, email="d4_hijack@example.com"))
+            collected=dict(
+                FULL_CONTACT,
+                email="d4_hijack@example.com",
+                _review_presented=True,
+            ))
         _mock_llm_intent(monkeypatch, "CONFIRM_BOOKING")
         spy = AsyncMock(return_value=ActionPayload(
             message="resent", widget_directive="REQUIRE_OTP_MODAL"))

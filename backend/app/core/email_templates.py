@@ -133,10 +133,38 @@ def render_auth_otp_email(code: str, purpose: str) -> tuple[str, str]:
     return title, _base(title, f"Your {label.lower()} code: {code}", content, header_color="#ef5d25", header_icon="🔐")
 
 
+def render_staff_invite_email(org_name: str, role_label: str, link: str) -> tuple[str, str]:
+    title = f"You're invited to join {org_name}"
+    content = f"""
+<p style="margin:0 0 20px;font-size:14px;color:#52525b;line-height:1.6;">
+    {_esc(org_name)} invited you to join as <strong>{_esc(role_label)}</strong>.
+    Click the button below to set your password and activate your login. The link expires in 48 hours.
+</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+<tr><td align="center" style="padding:8px 0 24px;">
+    <a href="{_esc(link)}" style="display:inline-block;background-color:#3b82f6;color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;padding:13px 34px;border-radius:10px;">
+        Accept invitation
+    </a>
+</td></tr>
+</table>
+
+<p style="margin:0;font-size:12px;color:#71717a;line-height:1.6;">
+    Button not working? Paste this link in your browser:<br />
+    <span style="word-break:break-all;">{_esc(link)}</span>
+</p>
+"""
+    return title, _base(title, f"Join {org_name} on DotStark", content, header_color="#3b82f6", header_icon="✉️")
+
+
 def render_booking_confirmation_customer(details: dict) -> tuple[str, str]:
     name = _esc(details.get("name", "Customer"))
     date = _esc(details.get("date", "TBD"))
     time = _esc(details.get("time", "TBD"))
+    unit_name = _esc(details.get("unit_name") or "")
+    provider_name = _esc(details.get("provider_name") or "")
+    provider_role = _esc(details.get("provider_role") or "")
+    fee_display = _esc(details.get("fee_display") or "")
     source = _esc(details.get("source_channel", "Web Widget"))
     meeting_type = details.get("meeting_type_snapshot") or "OFFLINE"
     meeting_status = details.get("meeting_link_status") or "NOT_REQUIRED"
@@ -172,6 +200,27 @@ def render_booking_confirmation_customer(details: dict) -> tuple[str, str]:
     <hr style="border:none;border-top:1px solid #e5e5e5;margin:12px 0;">
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
     <tr>{_label_value("Booked via", source)}</tr>
+    </table>
+</td></tr>
+</table>
+"""
+
+    # Department / team-member / fee block (org bookings carry these keys;
+    # individual bookings omit them and the email renders exactly as before).
+    _extra_rows = ""
+    if unit_name:
+        _extra_rows += f'<tr>{_label_value("Department", unit_name)}</tr>'
+    if provider_name:
+        _who = provider_name + (f" ({provider_role})" if provider_role else "")
+        _extra_rows += f'<tr>{_label_value("With", _who)}</tr>'
+    if fee_display:
+        _extra_rows += f'<tr>{_label_value("Fee", fee_display)}</tr>'
+    if _extra_rows:
+        content += f"""
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
+<tr><td style="padding:16px;background-color:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+    {_extra_rows}
     </table>
 </td></tr>
 </table>
@@ -251,6 +300,10 @@ def render_booking_confirmation_admin(details: dict, *, frontend_url: str = "") 
     org_end = details.get("org_slot_end_at") or ""
     has_user_tz = bool(user_tz and user_start and user_end)
     has_org_tz = bool(org_tz and org_start and org_end)
+    unit_name = _esc(details.get("unit_name") or "")
+    provider_name = _esc(details.get("provider_name") or "")
+    provider_role = _esc(details.get("provider_role") or "")
+    fee_display = _esc(details.get("fee_display") or "")
 
     title = "New Booking"
 
@@ -282,6 +335,25 @@ def render_booking_confirmation_admin(details: dict, *, frontend_url: str = "") 
     <hr style="border:none;border-top:1px solid #e5e5e5;margin:12px 0;">
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
     <tr>{_label_value("Source", source)}</tr>
+    </table>
+</td></tr>
+</table>
+"""
+
+    _extra_rows = ""
+    if unit_name:
+        _extra_rows += f'<tr>{_label_value("Department", unit_name)}</tr>'
+    if provider_name:
+        _who = provider_name + (f" ({provider_role})" if provider_role else "")
+        _extra_rows += f'<tr>{_label_value("With", _who)}</tr>'
+    if fee_display:
+        _extra_rows += f'<tr>{_label_value("Fee", fee_display)}</tr>'
+    if _extra_rows:
+        content += f"""
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:16px;">
+<tr><td style="padding:16px;background-color:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+    {_extra_rows}
     </table>
 </td></tr>
 </table>

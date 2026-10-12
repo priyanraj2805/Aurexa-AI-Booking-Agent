@@ -1350,10 +1350,12 @@ def _is_user_confirmation(message_text: str) -> bool:
     fuzzy allowance is deliberately narrow to avoid reopening the original
     defect, where substring matching treated any sentence containing the letter
     k ("I want to know about dotstark") as a confirmation:
-      * at most three words, so a full sentence can never match
+      * every alphabetic token must be a known confirm token, a known
+        filler word, or within one edit of a confirm token
       * no question mark, so a question is never a confirmation
-      * every alphabetic token must be a known confirm token or within one
-        edit of one
+      * longer polite sentences (4-8 words, e.g. "Yes, please confirm the
+        booking.") additionally need a hard commit word (confirm/book/
+        proceed/done/lock...) — a bare "yes" can never carry them
     """
     text = str(message_text or "").strip()
     if not text or "?" in text:
@@ -1365,7 +1367,41 @@ def _is_user_confirmation(message_text: str) -> bool:
     import difflib as _difflib
 
     tokens = re.findall(r"[a-z']+", text.lower())
-    if not tokens or len(tokens) > 3:
+    if not tokens:
+        return False
+
+    def _token_is_confirmish(token: str) -> bool:
+        if token in _CONFIRM_TOKENS_FOR_BOOKING or token in _CONFIRM_FILLER_WORDS:
+            return True
+        return any(
+            _difflib.SequenceMatcher(None, token, known).ratio() >= 0.8
+            for known in _CONFIRM_TOKENS_FOR_BOOKING
+            if abs(len(known) - len(token)) <= 2
+        )
+
+    _norm = re.sub(r"[^a-z]+", " ", text.lower())
+    _has_cancel_edit = bool(
+        re.search(r"\b(?:cancel|edit|change|modify|back)\b", _norm)
+    )
+
+    # Longer polite confirmations ("Yes, please confirm the booking.",
+    # "Sure, please go ahead and book it") looped forever when capped at
+    # three words. Accept them ONLY when every token passes the whitelist
+    # AND a hard commit word is present — a stray topic word ("price",
+    # "dotstark") still fails, so long sentences can never confirm by
+    # accident.
+    if 3 < len(tokens) <= 8:
+        if _has_cancel_edit:
+            return False
+        _commit_words = {
+            "confirm", "confirmed", "book", "booked", "proceed",
+            "finalize", "finalise", "done", "lock",
+        }
+        if not any(t in _commit_words for t in tokens):
+            return False
+        return all(_token_is_confirmish(t) for t in tokens)
+
+    if len(tokens) > 3:
         return False
 
     # Interactive buttons arrive as their ID, not as prose: tapping "Confirm"
@@ -1374,23 +1410,53 @@ def _is_user_confirmation(message_text: str) -> bool:
     # Confirm re-displayed the summary forever instead of moving on to
     # verification. Underscores and emoji are stripped before matching, and a
     # cancel/edit tap is explicitly excluded.
-    _norm = re.sub(r"[^a-z]+", " ", text.lower())
     if "confirm" in _norm.split():
-        if not re.search(r"\b(?:cancel|edit|change|modify|back)\b", _norm):
+        if not _has_cancel_edit:
             return True
 
     for token in tokens:
-        if token in _CONFIRM_TOKENS_FOR_BOOKING or token in _CONFIRM_FILLER_WORDS:
-            continue
-        if any(
-            _difflib.SequenceMatcher(None, token, known).ratio() >= 0.8
-            for known in _CONFIRM_TOKENS_FOR_BOOKING
-            if abs(len(known) - len(token)) <= 2
-        ):
+        if _token_is_confirmish(token):
             continue
         return False
     return True
 
+
+def _session_mode(chat_session) -> Optional[str]:
+    """Widget conversation mode pinned in collected_data["_mode"].
+
+    "ask" = knowledge Q&A only (never book), "booking" = guided booking
+    only (off-topic steered back to the current step). None = legacy flow.
+    """
+    try:
+        _cd = getattr(chat_session, "collected_data", None)
+        if isinstance(_cd, dict):
+            _m = str(_cd.get("_mode") or "").strip().lower()
+            if _m in ("ask", "booking"):
+                return _m
+    except Exception:
+        pass
+    return None
+
+
+# Booking-family directives: collection UI + confirm + verify + pay.
+# TEXT_INPUT is the neutral fallback these get downgraded to in Ask mode.
+_BOOKING_DIRECTIVES = frozenset({
+    "REQUIRE_DATE_PICKER",
+    "REQUIRE_TIME_SLOT_GRID",
+    "REQUIRE_PROVIDER_PICKER",
+    "REQUIRE_SELECT",
+    "SELECT_DROPDOWN",
+    "REQUIRE_PHONE_INPUT",
+    "REQUIRE_EMAIL_INPUT",
+    "REQUIRE_NUMBER_INPUT",
+    "REQUIRE_TEXTAREA",
+    "REQUEST_CONFIRMATION",
+    "BOOKING_SUMMARY_CARD",
+    "PROCESS_BOOKING",
+    "REQUIRE_OTP_MODAL",
+    "REQUIRE_PAYMENT",
+    "BOOKING_CONFIRMED_CARD",
+})
 
 def should_run_booking_gate(
     *,
@@ -1401,6 +1467,7 @@ def should_run_booking_gate(
     otp_verified: bool,
     phone_otp_verified: bool,
     user_confirmed: Optional[bool] = None,
+    mode: Optional[str] = None,
 ) -> bool:
     """Whether the booking/OTP gate must run for this turn.
 
@@ -1418,6 +1485,9 @@ def should_run_booking_gate(
     before the customer has agreed to the booking. With None (callers that
     cannot report a confirmation) the previous behaviour is kept.
     """
+    if mode == "ask":
+        # Ask-AI mode never books and never sends OTP codes.
+        return False
     if not (require_otp or require_phone_otp):
         return False
     _otp_satisfied = bool(
@@ -1664,6 +1734,33 @@ async def process_message_with_graph(
             db, org, org_config, chat_session, message_text, background_tasks
         )
 
+    # Org dept flow: resolve a post-date team-member choice ("2", name, id).
+    # Runs before the graph so a tap/typed pick pins the member and the turn
+    # proceeds straight to that member's slots. No pending offer → no-op.
+    try:
+        from app.services.catalog_service import resolve_pending_provider as _rpp
+
+        _picked = await _rpp(db, org.id, chat_session, message_text)
+        if _picked is not None:
+            try:
+                await crud_chat.update_chat_session(
+                    db, chat_session.session_id, chat_session
+                )
+            except Exception:
+                pass
+            logger.info(
+                "provider_choice_pinned",
+                extra={
+                    "session_id": session_id,
+                    "provider": str(_picked.get("full_name")),
+                },
+            )
+    except Exception as _rpp_err:
+        logger.warning(
+            "provider_choice_resolve_failed",
+            extra={"session_id": session_id, "error": str(_rpp_err)},
+        )
+
     # Booking decline is decided SOLELY by the LLM's classification
     # (user_intent == decline_booking), applied after the graph runs below.
     # No keyword/regex inspection of message_text happens here — the model
@@ -1750,15 +1847,38 @@ async def process_message_with_graph(
     # any decisive non-decline verdict clears a latched decline, so
     # "But i still want to book" always re-engages, in any language.
 
+    # Duplicate-booking reschedule: the dup guard fires in a NEW session
+    # while the existing booking lives in an old one, so session-scoped
+    # reschedule cannot find it. Tapping "Reschedule booking" on the guard's
+    # buttons cancels the pinned booking BY ID (org-scoped, upcoming,
+    # contact-owned) and re-enters date/time collection. Cancel taps flow
+    # into the normal cancel intent below. Placed here (pre-LLM,
+    # deterministic) with the other gates.
+    try:
+        _dup_reschedule_action = await message_processor.maybe_reschedule_dup_booking(
+            db, org, chat_session, message_text, background_tasks,
+        )
+    except Exception as _dup_reschedule_err:
+        logger.warning(
+            "dup reschedule intercept failed, falling through: %s", _dup_reschedule_err
+        )
+        _dup_reschedule_action = None
+    if _dup_reschedule_action is not None:
+        return _dup_reschedule_action
+
     # Opening greeting: a customer whose FIRST message is their name ("Hi
     # Yash", "Amanpreet Kaur") was told "Hello! Could you please share your
     # full name?" -- the name they had just given was ignored and they were
     # asked for it again. Capture it, acknowledge them by name, and move on
     # to the next missing field.
     #
+    # Skipped in Ask-AI mode: a name typed there is a question topic, not
+    # the start of collection (it greeted "priyanshu" and asked for email).
+    #
     # Placed after the cancel / post-booking / decline / cooldown gates so
     # none of those can be bypassed, and before the LLM so the salutation is
     # deterministic and cannot greet the customer by the wrong name.
+    _opening_allowed = _session_mode(chat_session) != "ask"
     try:
         _opening_fds = order_field_definitions(
             parse_field_definitions(
@@ -1766,16 +1886,19 @@ async def process_message_with_graph(
                 or getattr(org_config, "required_fields", None)
             )
         )
-        _greeting_action = await message_processor.maybe_greet_opening_name(
-            db,
-            org,
-            org_config,
-            chat_session,
-            message_text,
-            field_definitions=_opening_fds,
-            inbound_message_id=_inbound_id,
-            background_tasks=background_tasks,
-        )
+        if _opening_allowed:
+            _greeting_action = await message_processor.maybe_greet_opening_name(
+                db,
+                org,
+                org_config,
+                chat_session,
+                message_text,
+                field_definitions=_opening_fds,
+                inbound_message_id=_inbound_id,
+                background_tasks=background_tasks,
+            )
+        else:
+            _greeting_action = None
     except Exception as _greet_err:
         logger.warning("opening greeting failed, falling through: %s", _greet_err)
         _greeting_action = None
@@ -2177,7 +2300,11 @@ async def process_message_with_graph(
     # request and no cancel flow is active, branch into the deterministic
     # cancellation flow instead of applying booking state.
     llm_intent = str((structured_assistant_payload or {}).get("user_intent") or "")
-    if cancel_flow.is_cancel_intent(message_text, llm_user_intent=llm_intent):
+    # Ask-AI mode never runs the destructive cancel flow — the turn falls
+    # through to the graph, which answers per its mode instructions. (No
+    # hardcoded reply here; the model does the talking.)
+    _ask_no_cancel = _session_mode(chat_session) == "ask"
+    if not _ask_no_cancel and cancel_flow.is_cancel_intent(message_text, llm_user_intent=llm_intent):
         # The confirm screen offers "Cancel to stop": on a complete but
         # unbooked draft that means the DRAFT, never an existing booking.
         _aborted = await cancel_flow.maybe_abort_unbooked_draft(
@@ -2299,7 +2426,7 @@ async def process_message_with_graph(
             if "time" not in existing_follow_ups:
                 existing_follow_ups.insert(0, "time")
         else:
-            for stale_key in ("selected_slot_id", "selected_slot_start_utc", "time", "date"):
+            for stale_key in ("selected_slot_id", "selected_slot_start_utc", "time", "date", "_review_presented"):
                 if isinstance(chat_session.collected_data, dict):
                     chat_session.collected_data.pop(stale_key, None)
             existing_follow_ups = ["date"]
@@ -2308,7 +2435,14 @@ async def process_message_with_graph(
             result["fallback_next_step"] = fallback_next_step
 
         follow_up_fields = existing_follow_ups
-    if isinstance(follow_up_fields, list):
+    # Ask-AI mode: strictly Q&A — no field-collection state may survive the
+    # graph turn. The graph already returns empty follow-ups in ask mode;
+    # resetting here as well keeps seeded booking state (fresh sessions)
+    # and the deterministic guards below from resurrecting collection turns.
+    _ask_mode_post = _session_mode(chat_session) == "ask"
+    if _ask_mode_post and isinstance(follow_up_fields, list):
+        follow_up_fields = []
+    if isinstance(follow_up_fields, list) and not _ask_mode_post:
         follow_up_fields = _enforce_runtime_contact_requirements(
             follow_up_fields,
             dict(chat_session.collected_data or {}),
@@ -2318,7 +2452,7 @@ async def process_message_with_graph(
     current_intent = str(
         _graph_verdict or chat_session.current_intent or "START_BOOKING"
     )
-    if isinstance(follow_up_fields, list) and not follow_up_fields:
+    if isinstance(follow_up_fields, list) and not follow_up_fields and not _ask_mode_post:
         # LLM-primary: the graph already classified this turn (current_intent).
         # Keyword fallbacks below fire ONLY when the graph was indecisive —
         # a decisive graph verdict (CONFIRM/EDIT/CANCEL/CHECK) always stands.
@@ -2328,10 +2462,22 @@ async def process_message_with_graph(
         user_msg_lower = message_text.lower().strip()
         _is_bare_edit = user_msg_lower in {"change", "edit", "modify", "update", "change details", "edit details"}
         _has_edit_signal = any(kw in user_msg_lower for kw in ("change", "edit", "modify", "update"))
-        if _graph_undecided and (message_processor._is_edit_details_request(user_msg_lower) or _is_bare_edit):
-            # Bare "change" without a field: ask which field with a picker,
-            # don't fall through to an assumed "name" ask.
-            if _is_bare_edit and not message_processor._is_edit_details_request(user_msg_lower):
+        _edit_request_now = message_processor._is_edit_details_request(user_msg_lower) or _is_bare_edit
+        # A deterministic edit request also overrides a CONFIRM_BOOKING graph
+        # verdict: "change" words can never authorise a booking (the confirm
+        # matcher rejects them), and swallowing the request just re-showed the
+        # summary card forever instead of letting the customer edit.
+        if (_graph_undecided or current_intent == "CONFIRM_BOOKING") and _edit_request_now:
+            # No field named and nothing new captured this turn → which-field
+            # picker, don't fall through to an assumed "name" ask.
+            _edit_names_field = any(
+                kw in user_msg_lower
+                for kw in ("name", "email", "phone", "date", "time", "slot", "doctor", "provider")
+            )
+            _edit_captured_value = bool(
+                isinstance(result.get("captured_deltas"), dict) and result["captured_deltas"]
+            )
+            if not _edit_names_field and not _edit_captured_value:
                 from app.schemas.agent import ActionPayload as _AP
                 _msg_pick = "Sure, which field would you like to change? You can say name, email, phone, date, or time."
                 _ap_pick = _AP(message=_msg_pick, widget_directive="TEXT_INPUT", field_meta={"name": "edit_choice", "type": "text", "label": "Field to change"})
@@ -2366,7 +2512,7 @@ async def process_message_with_graph(
                 elif _is_pure_confirm and current_intent not in ("CANCEL_BOOKING", "EDIT_DATA"):
                     current_intent = "CONFIRM_BOOKING"
     chat_session.current_intent = current_intent
-    if current_intent == "CONFIRM_BOOKING" and not follow_up_fields:
+    if current_intent == "CONFIRM_BOOKING" and not follow_up_fields and not _ask_mode_post:
         # current_intent is carried across turns, so a CONFIRM_BOOKING left
         # over from a previous turn would otherwise authorise a booking on
         # whatever the customer says next. The booking must be authorised by
@@ -2399,6 +2545,7 @@ async def process_message_with_graph(
         pass
     manual_time_requires_slot_selection = (
         _is_web
+        and not _ask_mode_post
         and "time" in prior_missing_fields
         and "time" not in (chat_session.missing_fields or [])
         and not str(chat_session.collected_data.get("selected_slot_id") or "").strip()
@@ -2438,7 +2585,8 @@ async def process_message_with_graph(
     # Skip if time was selected via a slot button (selected_slot_id set)
     # or if no schedule/inventory (tests with no BusinessSchedule).
     if (
-        "time" in prior_missing_fields
+        not _ask_mode_post
+        and "time" in prior_missing_fields
         and "time" not in (chat_session.missing_fields or [])
         and not str(chat_session.collected_data.get("selected_slot_id") or "").strip()
     ):
@@ -2670,7 +2818,13 @@ async def process_message_with_graph(
         from app.engine.message_processor import _normalize_meeting_mode as _normM
         _m = _normM(getattr(org_config, "meeting_mode", None))
         _allow = bool(getattr(org_config, "allow_hybrid_selection", False))
-        if not field_meta.get("follow_up_fields") and not _collected.get("meeting_type") and _m == _MM.HYBRID and _allow:
+        if (
+            not _ask_mode_post
+            and not field_meta.get("follow_up_fields")
+            and not _collected.get("meeting_type")
+            and _m == _MM.HYBRID
+            and _allow
+        ):
             # Check if user just sent Online/Offline
             _msg_lower = (message_text or "").strip().lower()
             if _msg_lower in ("online", "offline"):
@@ -2950,13 +3104,23 @@ async def process_message_with_graph(
                                         try:
                                             from app.models.booking import ScheduleDay as _SD3b, ScheduleException as _SE3b
                                             from sqlalchemy.future import select as _sel3b
-                                            _sd3b_res = await db.execute(_sel3b(_SD3b).where(_SD3b.org_id == org.id))
+                                            _sd3b_res = await db.execute(
+                                                _sel3b(_SD3b).where(
+                                                    _SD3b.org_id == org.id,
+                                                    _SD3b.provider_id.is_(None),
+                                                )
+                                            )
                                             _sd3b = _sd3b_res.scalars().all()
                                             _weekly3 = [
                                                 {"day_of_week": r.day_of_week, "is_active": r.is_active, "open_time": r.open_time, "close_time": r.close_time}
                                                 for r in _sd3b
                                             ]
-                                            _se3b_res = await db.execute(_sel3b(_SE3b).where(_SE3b.org_id == org.id))
+                                            _se3b_res = await db.execute(
+                                                _sel3b(_SE3b).where(
+                                                    _SE3b.org_id == org.id,
+                                                    _SE3b.provider_id.is_(None),
+                                                )
+                                            )
                                             _se3b = _se3b_res.scalars().all()
                                             _excs3 = [
                                                 {"exception_date": r.exception_date, "exception_type": str(r.exception_type), "custom_open": r.custom_open, "custom_close": r.custom_close}
@@ -3249,7 +3413,7 @@ async def process_message_with_graph(
 
     date_reset_required = bool(result.get("date_reset_required"))
     if date_reset_required:
-        for stale_key in ("selected_slot_id", "selected_slot_start_utc", "time", "date"):
+        for stale_key in ("selected_slot_id", "selected_slot_start_utc", "time", "date", "_review_presented"):
             if isinstance(chat_session.collected_data, dict):
                 chat_session.collected_data.pop(stale_key, None)
         follow_up_fields = ["date"]
@@ -3393,6 +3557,11 @@ async def process_message_with_graph(
         and not otp_required
         and not phone_otp_required
         and current_intent not in ("CONFIRM_BOOKING", "CANCEL_BOOKING", "EDIT_DATA", "CHECK_BOOKING")
+        # Ask-AI mode: the MODEL scopes the conversation (answers business
+        # questions, redirects booking intents to the button). The analyzer's
+        # "unclear" label must never suppress real answers or redirects with
+        # this booking-flow canned reply.
+        and _session_mode(chat_session) != "ask"
     )
     if _behavior_oos:
         _business = str(
@@ -3436,7 +3605,11 @@ async def process_message_with_graph(
                 _dup_booking, _dup_start = await _find_dup_booking(db, org, "email", _dup_email_for_check)
             if _dup_booking is None and _dup_phone_for_check:
                 _dup_booking, _dup_start = await _find_dup_booking(db, org, "phone", _dup_phone_for_check)
-            if _dup_booking is not None:
+            # Ask-AI mode: no booking-management UI here at all — fall
+            # through to the graph, which answers per its mode
+            # instructions. (No hardcoded reply; the model talks.)
+            _dup_is_ask = _session_mode(chat_session) == "ask"
+            if _dup_booking is not None and not _dup_is_ask:
                 _dup_slot = _dup_slot_label(_dup_start, org_config) if _dup_start else ""
                 _dup_date = ""
                 if _dup_start:
@@ -3453,13 +3626,27 @@ async def process_message_with_graph(
                     f"Email: {_dup_booking.customer_email}\n"
                     f"{'Phone: ' + str(_dup_booking.customer_phone) + chr(10) if _dup_booking.customer_phone else ''}"
                     f"We allow only one active booking at a time. "
-                    f"To book a new slot, please cancel the existing one first. "
-                    f"Just say 'cancel my booking'."
+                    f"Choose what to do below."
                 )
+                # Pin the existing booking id for the reschedule-by-id path
+                # (mirrors _handle_booking_flow duplicate guard).
+                try:
+                    _cd_dup2 = dict(chat_session.collected_data or {})
+                    _cd_dup2["_dup_booking_id"] = str(_dup_booking.id)
+                    chat_session.collected_data = _cd_dup2
+                    await crud_chat.update_chat_session(
+                        db, chat_session.session_id, chat_session
+                    )
+                except Exception:
+                    pass
                 field_meta["duplicate_booking"] = True
                 field_meta["booking_id"] = str(_dup_booking.id)
+                field_meta["name"] = "duplicate_action"
+                field_meta["type"] = "select"
+                field_meta["label"] = "Manage your booking"
+                field_meta["options"] = ["Reschedule booking", "Cancel booking"]
                 assistant_message = _dup_msg
-                directive = "TEXT_INPUT"
+                directive = "REQUIRE_SELECT"
                 # Do not send OTP — return duplicate info directly
                 # Persist and return (mirrors _handle_booking_flow early return)
                 action = ActionPayload(message=assistant_message, widget_directive=directive, field_meta=field_meta)
@@ -3500,6 +3687,24 @@ async def process_message_with_graph(
     # text with the whole-word confirm matcher, never from the model's intent
     # label. This is what authorises the booking itself.
     _user_confirmed = _is_user_confirmation(message_text)
+    # ── Widget conversation modes (Ask AI / guided booking) ──────────
+    # Ask mode: knowledge Q&A only. Booking-family directives are
+    # downgraded to plain text input (so _handle_booking_flow below can
+    # never run), and anything the knowledge base did not answer gets the
+    # fixed no-knowledge reply. Smalltalk passes through untouched.
+    _mode_now = _session_mode(chat_session)
+    # Ask-AI mode: the MODEL routes (mode instructions live in the system
+    # prompt). Code only strips booking UI cards so no booking flow can
+    # render, and the gate below blocks any booking/OTP execution. No
+    # hardcoded reply wording here — the model acknowledges, answers, and
+    # redirects in its own words.
+    if _mode_now == "ask":
+        if directive in _BOOKING_DIRECTIVES:
+            logger.info(
+                "ask_mode.downgrade_booking_directive",
+                extra={"session_id": session_id, "directive": directive},
+            )
+            directive = "TEXT_INPUT"
     if should_run_booking_gate(
         directive=directive,
         missing_fields=chat_session.missing_fields,
@@ -3511,6 +3716,7 @@ async def process_message_with_graph(
         otp_verified=bool(getattr(chat_session, "otp_verified", False)),
         phone_otp_verified=bool(getattr(chat_session, "phone_otp_verified", False)),
         user_confirmed=_user_confirmed,
+        mode=_mode_now,
     ):
         (
             assistant_message,
@@ -3702,7 +3908,10 @@ async def process_message_with_graph(
         # that") which read as a brush-off and mention internal machinery
         # the customer has never heard of. Topic acknowledgement is the
         # model's job (prompt-instructed), not keyword code.
-        _knowledge_reply = _normalise_offtopic_decline(_knowledge_reply)
+        # Ask-AI mode owns its own exact fallback sentence ("I don't have
+        # information regarding this.") — normalising here would eat it.
+        if _session_mode(chat_session) != "ask":
+            _knowledge_reply = _normalise_offtopic_decline(_knowledge_reply)
         # A question between booking steps is answered on its own terms. The
         # "back to your booking" push is removed so the answer stands alone;
         # the pending step is re-asked on the next turn.
@@ -3923,6 +4132,16 @@ async def process_message_with_graph(
                 chat_session, fd_map
             )
     elif not booking_gate_handled and directive == "PROCESS_BOOKING":
+        # NOTE (reverted mandatory-preview gate): the first version rerouted
+        # PROCESS_BOOKING to the review card whenever no card had gone out
+        # (Oct 7 session: time → "I'll confirm" → "Yes" → OTP, card never
+        # shown). It broke the established bare-confirm contract — 25 tests
+        # pin that an explicit confirm reaches the booking gate directly
+        # (test_bare_confirm_reaches_booking_gate et al). The card itself
+        # still renders on every normal completion turn (evaluator issues
+        # REQUEST_CONFIRMATION; verified live repeatedly), and the
+        # _review_presented marker records that for audit. Redefining the
+        # contract would mean rewriting those 25 tests — owner's call.
         (
             assistant_message,
             directive,
@@ -3984,6 +4203,9 @@ async def process_message_with_graph(
                 booking_row = _res.scalars().first()
                 if booking_row:
                     booking_details["booking_id"] = str(booking_row.id)
+                    # Feature 3: expose booking_id to the widget so the
+                    # confirmed card can offer an .ics download.
+                    field_meta["booking_id"] = str(booking_row.id)
                     if not booking_details.get("email") and booking_row.customer_email:
                         booking_details["email"] = booking_row.customer_email
                     if not booking_details.get("name") and booking_row.customer_name:
@@ -4004,6 +4226,13 @@ async def process_message_with_graph(
                         booking_details["org_timezone_snapshot"] = booking_row.org_timezone_snapshot
             except Exception as _enrich_err:
                 logger.warning(f"Failed to enrich booking_details with meeting link for email: {_enrich_err}")
+            if booking_row is not None:
+                try:
+                    from app.services.catalog_service import booking_email_context
+
+                    booking_details.update(await booking_email_context(db, booking_row))
+                except Exception:
+                    pass
             booking_details["source_channel"] = (
                 "WhatsApp"
                 if str(getattr(chat_session, "channel", "") or "").lower()
@@ -4082,6 +4311,95 @@ async def process_message_with_graph(
     if result.get("email_retrying") is True:
         field_meta["email_retrying"] = True
 
+    # Org dept flow: team-member choice comes AFTER the date, right here.
+    # When the session carries a department but no member yet, swap the slot
+    # grid for a member picker limited to members working that date — so the
+    # customer can never pick a date and then learn their member is off that
+    # day. Individuals (no unit) and already-pinned sessions skip this.
+    if directive == "REQUIRE_TIME_SLOT_GRID" and not field_meta.get("options"):
+        try:
+            _swap_unit = getattr(chat_session, "unit_id", None) or (chat_session.collected_data or {}).get("unit_id")
+            _swap_prov = getattr(chat_session, "provider_id", None) or (chat_session.collected_data or {}).get("provider_id")
+        except Exception:
+            _swap_unit, _swap_prov = None, None
+        if _swap_unit and not _swap_prov:
+            _swap_date_raw = (chat_session.collected_data or {}).get("date")
+            _swap_providers: list = []
+            _swap_date = None
+            if _swap_date_raw:
+                try:
+                    from dateutil.parser import parse as _swap_parse
+
+                    _swap_date = _swap_parse(str(_swap_date_raw)).date()
+                    from app.services.catalog_service import providers_for_date as _pfd
+
+                    _swap_providers = await _pfd(db, org.id, _swap_unit, _swap_date)
+                except Exception as _swap_err:
+                    logger.warning("provider_swap_lookup_failed", extra={"session_id": session_id, "error": str(_swap_err)})
+                    _swap_providers = []
+            if _swap_date is not None and not _swap_providers:
+                # Nobody from this department works that day — back to date.
+                directive = "REQUIRE_DATE_PICKER"
+                try:
+                    chat_session.collected_data.pop("date", None)
+                    chat_session.collected_data.pop("time", None)
+                    chat_session.collected_data.pop("selected_slot_id", None)
+                    chat_session.missing_fields = ["date"] + [
+                        f for f in (chat_session.missing_fields or []) if f != "date"
+                    ]
+                    await crud_chat.update_chat_session(db, session_id, chat_session)
+                except Exception:
+                    pass
+                field_meta.update(
+                    {
+                        "name": "date",
+                        "type": "date",
+                        "label": "Preferred Date",
+                        "validation_error": "No team members from this department work on that date. Please pick another date.",
+                        "follow_up_fields": ["date"],
+                    }
+                )
+                assistant_message = (
+                    "No team members from this department work on that date. "
+                    "Please choose another date."
+                )
+            elif _swap_date is not None and _swap_providers:
+                try:
+                    _cd_swap = dict(chat_session.collected_data or {})
+                    _cd_swap["_provider_options"] = [
+                        {"id": str(p.get("id")), "full_name": p.get("full_name")}
+                        for p in _swap_providers
+                    ]
+                    _cd_swap["_provider_unit"] = str(_swap_unit)
+                    chat_session.collected_data = _cd_swap
+                    await crud_chat.update_chat_session(db, session_id, chat_session)
+                except Exception:
+                    pass
+                directive = "REQUIRE_PROVIDER_PICKER"
+                _prov_lines = []
+                for _i, _p in enumerate(_swap_providers, start=1):
+                    _lbl = str(_p.get("full_name") or "").strip()
+                    if _p.get("fee_display"):
+                        _lbl += f" · {_p['fee_display']}"
+                    _prov_lines.append(f"{_i}. {_lbl}")
+                _date_nice = _swap_date.strftime("%A, %B %d")
+                assistant_message = (
+                    f"Who would you like to see on {_date_nice}?\n"
+                    + "\n".join(_prov_lines)
+                )
+                if str(getattr(chat_session, "channel", "") or "").lower() not in ("whatsapp", "whatsapp_cloud"):
+                    assistant_message = f"Who would you like to see on {_date_nice}?"
+                field_meta.update(
+                    {
+                        "name": "provider",
+                        "type": "provider",
+                        "label": "Choose team member",
+                        "unit_id": str(_swap_unit),
+                        "providers": _swap_providers,
+                    }
+                )
+            # else: unparseable date — fall through to the normal slot path.
+
     # Populate available time slots when the widget needs the time-slot grid.
     # The graph sets the REQUIRE_TIME_SLOT_GRID directive but does not compute
     # slot options itself, so we fetch them here (unless already provided by a
@@ -4113,8 +4431,13 @@ async def process_message_with_graph(
                 )
 
                 parsed_date = date_parse(target_date).date()
+                try:
+                    _sess_prov = getattr(chat_session, "provider_id", None) or (chat_session.collected_data or {}).get("provider_id")
+                except Exception:
+                    _sess_prov = None
                 inventory, availability_status = await compute_slot_inventory(
-                    db, org.id, parsed_date, org_config=org_config
+                    db, org.id, parsed_date, org_config=org_config,
+                    provider_id=_sess_prov,
                 )
                 timezone_resolution = resolve_effective_timezone_policy(
                     requested_tz=chat_session.collected_data.get("user_timezone"),
@@ -4166,6 +4489,14 @@ async def process_message_with_graph(
                             continue
                 field_meta["options"] = options
                 field_meta["availability_status"] = availability_status
+                # Suggestions-first (Feature 1): widget shows 3 pills +
+                # "Show more" instead of dumping the full grid. Full list
+                # stays in `options` for the expanded view / WhatsApp.
+                field_meta["display_mode"] = "suggestions_first"
+                field_meta["suggestion_limit"] = 3
+                field_meta["suggested_options"] = options[:3]
+                field_meta["has_more_slots"] = len(options) > 3
+                field_meta["total_available"] = len(options)
                 if policy_reason_code:
                     field_meta["policy_reason_code"] = policy_reason_code
                 logger.info(
@@ -4364,6 +4695,31 @@ async def process_message_with_graph(
                         _fallback_label = _fallback_need.replace("_", " ")
             except Exception:
                 _fallback_need, _fallback_label = "", ""
+            # ── Guided-booking mode: while required details are missing,
+            # off-topic / knowledge detours are steered back to the current
+            # step instead of chatting. The collection directive is kept, so
+            # the booking advances only through its UI cards + field inputs.
+            _mode_steer = _session_mode(chat_session)
+            if (
+                _mode_steer == "booking"
+                and (_is_knowledge or _is_question_turn or _is_off_topic)
+                and (_fallback_need or str((field_meta or {}).get("name") or ""))
+            ):
+                _steer_field = str((field_meta or {}).get("name") or "") or _fallback_need
+                _steer_label = str((field_meta or {}).get("label") or "") or _fallback_label or _steer_field.replace("_", " ")
+                assistant_message = (
+                    f"Please complete this step first — {_steer_label.strip() or 'your booking details'}."
+                )
+                _is_knowledge = False
+                _is_question_turn = False
+                _is_off_topic = False
+            # Ask-AI mode never collects: skip the deterministic field-ask
+            # patch entirely (it stapled "share your full name" onto the
+            # exact no-knowledge reply and onto every other answer).
+            if _mode_steer == "ask":
+                _is_knowledge = False
+                _is_question_turn = False
+                _is_off_topic = False
             if _is_knowledge or _is_question_turn or _is_off_topic:
                 _need_field = str((field_meta or {}).get("name") or "") or _fallback_need
                 _visibly_asks = (
@@ -4392,6 +4748,12 @@ async def process_message_with_graph(
                         assistant_message = _deterministic_ask
                     else:
                         assistant_message = f"{assistant_message}\n\n{_deterministic_ask}"
+            elif _mode_steer == "ask":
+                # Ask-AI mode: the reply is the product — answers, honest
+                # no-knowledge lines, redirects to the Book Appointment
+                # section. Never patch, steer, multi-ask-squash, or
+                # F1-replace it with deterministic collection copy.
+                pass
             elif _mentions > 1 or ("," in assistant_message and _mentions >= 2):
                 _multi_ask = message_processor._build_context_aware_response(
                     directive=directive,

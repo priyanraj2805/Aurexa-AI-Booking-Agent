@@ -12,6 +12,7 @@ interface User {
   full_name: string;
   org_id: string;
   org_name: string | null;
+  org_type?: string;
   avatar_url: string | null;
   is_active: boolean;
   created_at: string;
@@ -19,8 +20,21 @@ interface User {
   permissions: string[];
 }
 
+export interface StaffScope {
+  org_type: string;
+  roles: string[];
+  provider_id: string | null;
+  provider_name?: string | null;
+  unit_ids: string[];
+  unit_names?: string[];
+  provider_unit_names?: string[];
+}
+
 interface AuthContextType {
   user: User | null;
+  scope: StaffScope | null;
+  /** True for a linked doctor login — sees only own patients, no org management. */
+  isDoctor: boolean;
   isLoading: boolean;
   isAuthenticated: boolean;
   login: (email: string, password: string) => Promise<void>;
@@ -40,6 +54,7 @@ interface RegisterData {
   email: string;
   password: string;
   otp_code: string;
+  org_type?: "individual" | "organization";
 }
 
 interface TokenResponse {
@@ -48,12 +63,27 @@ interface TokenResponse {
   user: User;
 }
 
+// Cross-tab session sync: one browser = one HttpOnly cookie. If the user
+// logs in/out in another tab, that tab overwrites the shared cookie and
+// this tab would keep showing the OLD dashboard until manual refresh.
+// Broadcasting a localStorage ping lets every open tab re-validate itself.
+const AUTH_SYNC_KEY = "ds_auth_changed";
+
+export function notifyAuthChange() {
+  try {
+    localStorage.setItem(AUTH_SYNC_KEY, String(Date.now()));
+  } catch {
+    // private mode etc — single-tab case still works via cookie
+  }
+}
+
 // ── Context ──────────────────────────────────────
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [scope, setScope] = useState<StaffScope | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const router = useRouter();
 
@@ -69,8 +99,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!res.ok) throw new Error(`Auth check failed: ${res.status}`);
         return res.json();
       })
-      .then((freshUser) => setUser(freshUser))
-      .catch(() => setUser(null))
+      .then((freshUser) => {
+        setUser(freshUser);
+        // Best-effort staff scope (doctor link) for menu gating.
+        fetch(`${API_BASE}/staff/me/scope`, {
+          credentials: "include",
+          headers: { "X-Requested-With": "XMLHttpRequest" },
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((s) => setScope(s))
+          .catch(() => setScope(null));
+      })
+      .catch(() => {
+        setUser(null);
+        setScope(null);
+      })
       .finally(() => setIsLoading(false));
   }, []);
 
@@ -84,6 +127,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.addEventListener("auth:unauthorized", handleUnauthorized);
     return () => window.removeEventListener("auth:unauthorized", handleUnauthorized);
   }, [router]);
+
+  // If another tab changed the shared session cookie (login/logout there),
+  // silently re-validate so this tab never shows a stale account's dashboard.
+  // Focus check is throttled: at most once every 30s per tab.
+  useEffect(() => {
+    let lastCheck = 0;
+    const revalidate = async (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastCheck < 30000) return;
+      lastCheck = now;
+      const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api/v1";
+      try {
+        const res = await fetch(`${API_BASE}/auth/me`, {
+          credentials: "include",
+          headers: { "X-Requested-With": "XMLHttpRequest" },
+        });
+        if (!res.ok) throw new Error(`Auth check failed: ${res.status}`);
+        setUser(await res.json());
+      } catch {
+        // Keep the current user on transient failures — only the 401
+        // interceptor performs redirects.
+      }
+    };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === AUTH_SYNC_KEY) void revalidate(true);
+    };
+    const onFocus = () => {
+      void revalidate(false);
+    };
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
 
   const login = async (email: string, password: string) => {
     // URL-handoff code flow: credentials → single-use code (visible in URL)
@@ -158,6 +237,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!res.ok) throw new Error("refresh failed");
       const fresh = await res.json();
       setUser(fresh);
+      try {
+        const scopeRes = await fetch(`${API_BASE}/staff/me/scope`, {
+          credentials: "include",
+          headers: { "X-Requested-With": "XMLHttpRequest" },
+        });
+        setScope(scopeRes.ok ? await scopeRes.json() : null);
+      } catch {
+        // scope is best-effort
+      }
     } catch {
       // ignore
     }
@@ -170,13 +258,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Best-effort
     }
     setUser(null);
+    setScope(null);
+    notifyAuthChange();
     router.push("/login");
+  };
+
+  const setUserWrapped = (u: User | null) => {
+    setUser(u);
+    if (!u) setScope(null);
   };
 
   return (
     <AuthContext.Provider
       value={{
         user,
+        scope,
+        isDoctor: !!scope?.provider_id,
         isLoading,
         isAuthenticated: !!user,
         login,
@@ -186,7 +283,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         resetPassword,
         updateProfile,
         refresh,
-        setUser,
+        setUser: setUserWrapped,
         logout,
       }}
     >

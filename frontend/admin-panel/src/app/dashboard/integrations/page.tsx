@@ -324,6 +324,14 @@ export default function IntegrationsPage() {
   const [routeBusy, setRouteBusy] = useState(false);
   const [routePhone, setRoutePhone] = useState("");
   const [routeLegalName, setRouteLegalName] = useState("");
+  const [routeBizType, setRouteBizType] = useState("proprietorship");
+  const [routeLegalPan, setRouteLegalPan] = useState("");
+  const [routeLegalGst, setRouteLegalGst] = useState("");
+  const [routeStreet1, setRouteStreet1] = useState("");
+  const [routeStreet2, setRouteStreet2] = useState("");
+  const [routeCity, setRouteCity] = useState("");
+  const [routeState, setRouteState] = useState("");
+  const [routePostal, setRoutePostal] = useState("");
   const [stakeName, setStakeName] = useState("");
   const [stakePan, setStakePan] = useState("");
   const [settleAcct, setSettleAcct] = useState("");
@@ -361,8 +369,27 @@ export default function IntegrationsPage() {
       toast.error(err instanceof Error ? err.message : "Route request failed");
     } finally { setRouteBusy(false); }
   };
+  // Docs KYC table: company-type entities must provide Business PAN (+ GST per
+  // the KYC matrix); individual/not_yet_registered rely on stakeholder PAN.
+  const ROUTE_COMPANY_TYPES = new Set([
+    "llp", "partnership", "private_limited", "public_limited",
+    "trust", "ngo", "society", "educational_institutes", "other",
+  ]);
+  const needsLegalPan = ROUTE_COMPANY_TYPES.has(routeBizType);
+  const needsLegalGst = ROUTE_COMPANY_TYPES.has(routeBizType);
   const handleRouteStart = () => routeCall(
-    () => api.post<RouteSnapshot>("/dashboard/razorpay/route/linked-account", { phone: routePhone, legal_business_name: routeLegalName || undefined }),
+    () => api.post<RouteSnapshot>("/dashboard/razorpay/route/linked-account", {
+      phone: routePhone,
+      legal_business_name: routeLegalName || undefined,
+      business_type: routeBizType,
+      street1: routeStreet1,
+      street2: routeStreet2 || undefined,
+      city: routeCity,
+      state: routeState,
+      postal_code: routePostal,
+      legal_pan: routeLegalPan || undefined,
+      legal_gst: routeLegalGst || undefined,
+    }),
     "Payout account created",
   );
   const handleRouteStakeholder = () => routeCall(
@@ -839,7 +866,7 @@ export default function IntegrationsPage() {
         if(s!=="NOT_STARTED") return "bg-sky-500/10 text-sky-600";
         return "bg-muted text-muted-foreground";
       })(),
-      description: "Receive automatic provider payouts via Razorpay Route.",
+      description: "Receive automatic payouts to your bank account.",
     },
     {
       id: "widget",
@@ -950,7 +977,7 @@ export default function IntegrationsPage() {
           >
             <div className="flex items-center gap-3">
               <CreditCard className="size-4" />
-              Razorpay
+              Payments & Payouts
             </div>
             {routeStatus?.transfer_ready && <ChevronRight className="size-4 opacity-50 text-green-500" />}
           </button>
@@ -1206,10 +1233,40 @@ export default function IntegrationsPage() {
                     {(routeStatus?.onboarding_status||"NOT_STARTED")==="NOT_STARTED" && (
                       <div className="rounded-xl border border-dashed p-6 space-y-3 bg-secondary/20">
                         <div className="grid sm:grid-cols-2 gap-3">
+                          <select value={routeBizType} onChange={e=>setRouteBizType(e.target.value)} className="bg-background border rounded-lg px-3 py-2 text-sm" aria-label="Business type">
+                            <option value="individual">Individual</option>
+                            <option value="proprietorship">Proprietorship</option>
+                            <option value="partnership">Partnership</option>
+                            <option value="private_limited">Private Limited</option>
+                            <option value="public_limited">Public Limited</option>
+                            <option value="llp">LLP</option>
+                            <option value="trust">Trust</option>
+                            <option value="ngo">NGO</option>
+                            <option value="society">Society</option>
+                            <option value="not_yet_registered">Not yet registered</option>
+                            <option value="educational_institutes">Educational institute</option>
+                            <option value="other">Other</option>
+                          </select>
                           <input value={routePhone} onChange={e=>setRoutePhone(e.target.value)} placeholder="Business phone (8–15 digits)" className="bg-background border rounded-lg px-3 py-2 text-sm" />
-                          <input value={routeLegalName} onChange={e=>setRouteLegalName(e.target.value)} placeholder="Legal business name (optional)" className="bg-background border rounded-lg px-3 py-2 text-sm" />
                         </div>
-                        <button onClick={handleRouteStart} disabled={routeBusy || !routePhone} className="px-6 py-2.5 rounded-xl bg-sky-600 text-white text-sm font-medium hover:bg-sky-700 disabled:opacity-50">{routeBusy ? "Working…" : "Connect Bank Account"}</button>
+                        <input value={routeLegalName} onChange={e=>setRouteLegalName(e.target.value)} placeholder="Legal business name (optional)" className="bg-background border rounded-lg px-3 py-2 text-sm w-full" />
+                        {routeBizType !== "individual" && routeBizType !== "not_yet_registered" && (
+                          <div className="grid sm:grid-cols-2 gap-3">
+                            <input value={routeLegalPan} onChange={e=>setRouteLegalPan(e.target.value.toUpperCase())} placeholder={needsLegalPan ? "Business PAN (required)" : "Business PAN (optional)"} maxLength={10} className="bg-background border rounded-lg px-3 py-2 text-sm" />
+                            <input value={routeLegalGst} onChange={e=>setRouteLegalGst(e.target.value.toUpperCase())} placeholder={needsLegalGst ? "GSTIN (required)" : "GSTIN (if registered)"} maxLength={15} className="bg-background border rounded-lg px-3 py-2 text-sm" />
+                          </div>
+                        )}
+                        <div>
+                          <div className="text-xs text-muted-foreground mb-1.5">Registered business address (required for payout verification)</div>
+                          <div className="grid sm:grid-cols-2 gap-3">
+                            <input value={routeStreet1} onChange={e=>setRouteStreet1(e.target.value)} placeholder="Street / address line 1" className="bg-background border rounded-lg px-3 py-2 text-sm" />
+                            <input value={routeStreet2} onChange={e=>setRouteStreet2(e.target.value)} placeholder="Street line 2 (optional)" className="bg-background border rounded-lg px-3 py-2 text-sm" />
+                            <input value={routeCity} onChange={e=>setRouteCity(e.target.value)} placeholder="City" className="bg-background border rounded-lg px-3 py-2 text-sm" />
+                            <input value={routeState} onChange={e=>setRouteState(e.target.value)} placeholder="State" className="bg-background border rounded-lg px-3 py-2 text-sm" />
+                            <input value={routePostal} onChange={e=>setRoutePostal(e.target.value.replace(/\D/g, ""))} placeholder="Postal code (6 digits)" maxLength={6} className="bg-background border rounded-lg px-3 py-2 text-sm" />
+                          </div>
+                        </div>
+                        <button onClick={handleRouteStart} disabled={routeBusy || !routePhone || !routeStreet1 || !routeCity || !routeState || routePostal.length !== 6 || (needsLegalPan && !routeLegalPan) || (needsLegalGst && !routeLegalGst)} className="px-6 py-2.5 rounded-xl bg-sky-600 text-white text-sm font-medium hover:bg-sky-700 disabled:opacity-50">{routeBusy ? "Working…" : "Create Payout Account"}</button>
                       </div>
                     )}
                     {(routeStatus?.onboarding_status==="STAKEHOLDER_PENDING"||routeStatus?.onboarding_status==="ACCOUNT_CREATED") && (
@@ -1233,7 +1290,7 @@ export default function IntegrationsPage() {
                     {routeStatus?.onboarding_status==="BANK_DETAILS_PENDING" && (
                       <div className="rounded-xl border p-5 space-y-3">
                         <h4 className="text-sm font-semibold">Bank account for settlements</h4>
-                        <p className="text-xs text-muted-foreground">Sent directly to Razorpay. Only the last 4 digits are stored.</p>
+                        <p className="text-xs text-muted-foreground">Sent securely for verification. Only the last 4 digits are stored.</p>
                         <div className="grid sm:grid-cols-3 gap-3">
                           <input type="password" value={settleAcct} onChange={e=>setSettleAcct(e.target.value)} placeholder="Account number" autoComplete="off" className="bg-background border rounded-lg px-3 py-2 text-sm" />
                           <input value={settleIfsc} onChange={e=>setSettleIfsc(e.target.value.toUpperCase())} placeholder="IFSC" autoComplete="off" className="bg-background border rounded-lg px-3 py-2 text-sm" />
@@ -1258,7 +1315,7 @@ export default function IntegrationsPage() {
                     {(routeStatus?.onboarding_status==="SUSPENDED"||routeStatus?.onboarding_status==="FAILED") && (
                       <div className="rounded-xl border bg-red-50 dark:bg-red-950/20 p-5 border-red-200">
                         <p className="text-sm font-semibold text-red-700">Verification failed — action required</p>
-                        <p className="text-xs text-muted-foreground mt-1 whitespace-pre-wrap">{routeStatus?.failure_reason || "Razorpay needs more information."}</p>
+                        <p className="text-xs text-muted-foreground mt-1 whitespace-pre-wrap">{routeStatus?.failure_reason || "Verification needs more information."}</p>
                       </div>
                     )}
                     {routeStatus && routeStatus.onboarding_status !== "NOT_STARTED" && (

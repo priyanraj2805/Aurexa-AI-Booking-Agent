@@ -95,10 +95,7 @@ test.describe('Booking Widget E2E Flow', () => {
     await expect(widget).toBeVisible({ timeout: 10000 });
     
     // Click to open the widget
-    await widget.evaluate((el: any) => {
-      const launcher = el.shadowRoot?.querySelector('.widget-launcher');
-      if (launcher) (launcher as HTMLElement).click();
-    });
+    await openAndStart(widget);
     
     // Wait for chat container to become visible
     await page.waitForFunction(() => {
@@ -119,32 +116,37 @@ test.describe('Booking Widget E2E Flow', () => {
     return widget;
   }
 
-  test('should display greeting message on first open', async ({ page }) => {
-    await page.goto('/');
-    
-    // Wait and open the widget
-    const widget = await ensureWidgetReady(page);
+  // Helper: open the launcher. (The "Start a conversation" gate was
+  // removed — the widget opens straight into greeting + mode pills.)
+  async function openAndStart(widget: any) {
     await widget.evaluate((el: any) => {
       const launcher = el.shadowRoot?.querySelector('.widget-launcher');
       if (launcher) (launcher as HTMLElement).click();
     });
-    
-    // Wait for greeting message with retry and better selector
+  }
+
+  test('should display home slide with two mode buttons on first open', async ({ page }) => {
+    await page.goto('/');
+
+    // Wait and open the widget
+    const widget = await ensureWidgetReady(page);
+    await openAndStart(widget);
+
+    // Home slide visible with Ask AI + Book Appointment buttons
     await page.waitForFunction(() => {
       const el = document.querySelector('dotstark-booking-widget');
-      const messages = el?.shadowRoot?.querySelectorAll('.message.agent');
-      // Greeting is usually the first message, wait for it to be non-empty
-      return messages && messages.length > 0 && messages[0].textContent?.trim().length;
+      const home = el?.shadowRoot?.querySelector('#home-view') as HTMLElement | null;
+      return home && home.style.display !== 'none';
     }, { timeout: 15000 });
-    
-    // Verify greeting is displayed
-    const greeting = await widget.evaluate((el: any) => {
-      const messages = el.shadowRoot?.querySelectorAll('.message.agent');
-      return messages?.[0]?.textContent || '';
+
+    const buttons = await widget.evaluate((el: any) => {
+      return [...el.shadowRoot?.querySelectorAll('#home-view .home-btn-title') || []].map(
+        (b: any) => b.textContent
+      );
     });
-    
-    // Use regex for case-insensitive and flexible matching
-    expect(greeting).toMatch(/hello|hi|welcome/i);
+
+    expect(buttons).toContain('Ask AI');
+    expect(buttons).toContain('Book Appointment');
   });
 
   test('should send message and receive response', async ({ page }) => {
@@ -152,10 +154,7 @@ test.describe('Booking Widget E2E Flow', () => {
     
     // Wait and open widget
     const widget = await ensureWidgetReady(page);
-    await widget.evaluate((el: any) => {
-      const launcher = el.shadowRoot?.querySelector('.widget-launcher');
-      if (launcher) (launcher as HTMLElement).click();
-    });
+    await openAndStart(widget);
     
     // Wait for widget to open
     await page.waitForFunction(() => {
@@ -199,10 +198,7 @@ test.describe('Booking Widget E2E Flow', () => {
     
     // Wait and open widget and send initial message
     const widget = await ensureWidgetReady(page);
-    await widget.evaluate((el: any) => {
-      const launcher = el.shadowRoot?.querySelector('.widget-launcher');
-      if (launcher) (launcher as HTMLElement).click();
-    });
+    await openAndStart(widget);
     
     await page.waitForFunction(() => {
       const el = document.querySelector('dotstark-booking-widget');
@@ -236,10 +232,7 @@ test.describe('Booking Widget E2E Flow', () => {
     await page.goto('/');
     
     const widget = await ensureWidgetReady(page);
-    await widget.evaluate((el: any) => {
-      const launcher = el.shadowRoot?.querySelector('.widget-launcher');
-      if (launcher) (launcher as HTMLElement).click();
-    });
+    await openAndStart(widget);
     
     await page.waitForFunction(() => {
       const el = document.querySelector('dotstark-booking-widget');
@@ -271,10 +264,7 @@ test.describe('Booking Widget E2E Flow', () => {
     await page.goto('/');
     
     const widget = await ensureWidgetReady(page);
-    await widget.evaluate((el: any) => {
-      const launcher = el.shadowRoot?.querySelector('.widget-launcher');
-      if (launcher) (launcher as HTMLElement).click();
-    });
+    await openAndStart(widget);
     
     await page.waitForFunction(() => {
       const el = document.querySelector('dotstark-booking-widget');
@@ -319,10 +309,7 @@ test.describe('Booking Widget E2E Flow', () => {
     
     // Open widget
     const widget = await ensureWidgetReady(page);
-    await widget.evaluate((el: any) => {
-      const launcher = el.shadowRoot?.querySelector('.widget-launcher');
-      if (launcher) (launcher as HTMLElement).click();
-    });
+    await openAndStart(widget);
     
     await page.waitForFunction(() => {
       const widget = document.querySelector('dotstark-booking-widget');
@@ -367,19 +354,14 @@ test.describe('Widget Error Handling', () => {
     
     await page.goto('/');
     
-    // Open widget
-    await page.locator('dotstark-booking-widget').evaluate((el: any) => {
-      const launcher = el.shadowRoot?.querySelector('.widget-launcher');
-      if (launcher) (launcher as HTMLElement).click();
-    });
+    // Open widget (passes the Start gate too)
+    const widget = page.locator('dotstark-booking-widget');
+    await openAndStart(widget);
     
     await page.waitForFunction(() => {
       const widget = document.querySelector('dotstark-booking-widget');
       return widget?.shadowRoot?.querySelector('.chat-container.visible');
     }, { timeout: 10000 });
-    
-    // Send message
-    const widget = page.locator('dotstark-booking-widget');
     await widget.evaluate((el: any) => {
       const input = el.shadowRoot?.querySelector('#user-input');
       if (input) {
@@ -490,10 +472,7 @@ test.describe('Meeting Policy Visibility', () => {
     await page.goto('/');
     const widget = page.locator('dotstark-booking-widget');
     await expect(widget).toBeVisible({ timeout: 10000 });
-    await widget.evaluate((el: any) => {
-      const launcher = el.shadowRoot?.querySelector('.widget-launcher');
-      if (launcher) (launcher as HTMLElement).click();
-    });
+    await openAndStart(widget);
     await page.waitForFunction(() => {
       const el = document.querySelector('dotstark-booking-widget');
       return el?.shadowRoot?.querySelector('.chat-container.visible');
@@ -696,10 +675,7 @@ test.describe('Timezone-aware availability flow', () => {
     await page.goto('/');
     const widget = page.locator('dotstark-booking-widget');
     await expect(widget).toBeVisible({ timeout: 10000 });
-    await widget.evaluate((el: any) => {
-      const launcher = el.shadowRoot?.querySelector('.widget-launcher');
-      if (launcher) (launcher as HTMLElement).click();
-    });
+    await openAndStart(widget);
     await page.waitForFunction(() => {
       const el = document.querySelector('dotstark-booking-widget');
       return !!el?.shadowRoot?.querySelector('.chat-container.visible');
@@ -898,10 +874,7 @@ test.describe('timezone fallback slot UX contract', () => {
     await page.goto('/');
     const widget = page.locator('dotstark-booking-widget');
     await expect(widget).toBeVisible({ timeout: 10000 });
-    await widget.evaluate((el: any) => {
-      const launcher = el.shadowRoot?.querySelector('.widget-launcher');
-      if (launcher) (launcher as HTMLElement).click();
-    });
+    await openAndStart(widget);
     await page.waitForFunction(() => {
       const el = document.querySelector('dotstark-booking-widget');
       return !!el?.shadowRoot?.querySelector('.chat-container.visible');
@@ -1536,10 +1509,7 @@ test.describe('Online Meeting Link Delivery', () => {
     await page.goto('/');
     const widget = page.locator('dotstark-booking-widget');
     await expect(widget).toBeVisible({ timeout: 10000 });
-    await widget.evaluate((el: any) => {
-      const launcher = el.shadowRoot?.querySelector('.widget-launcher');
-      if (launcher) (launcher as HTMLElement).click();
-    });
+    await openAndStart(widget);
     await page.waitForFunction(() => {
       const el = document.querySelector('dotstark-booking-widget');
       return !!el?.shadowRoot?.querySelector('.chat-container.visible');
@@ -1653,10 +1623,7 @@ test.describe('validation phone skip slot directive UI', () => {
     await page.goto('/');
     const widget = page.locator('dotstark-booking-widget');
     await expect(widget).toBeVisible({ timeout: 10000 });
-    await widget.evaluate((el: any) => {
-      const launcher = el.shadowRoot?.querySelector('.widget-launcher');
-      if (launcher) (launcher as HTMLElement).click();
-    });
+    await openAndStart(widget);
     await page.waitForFunction(() => {
       const el = document.querySelector('dotstark-booking-widget');
       return !!el?.shadowRoot?.querySelector('.chat-container.visible');
@@ -1844,7 +1811,7 @@ test.describe('OTP confirmation policy UI', () => {
 
     await page.goto('/');
     const widget = page.locator('dotstark-booking-widget');
-    await widget.evaluate((el: any) => el.shadowRoot?.querySelector('.widget-launcher')?.click());
+    await openAndStart(widget);
     await page.waitForFunction(() => !!document.querySelector('dotstark-booking-widget')?.shadowRoot?.querySelector('.chat-container.visible'));
 
     const otpBeforeConfirm = await widget.evaluate((el: any) => !!el.shadowRoot?.querySelector('.otp-card'));
@@ -1893,7 +1860,7 @@ test.describe('OTP confirmation policy UI', () => {
 
     await page.goto('/');
     const widget = page.locator('dotstark-booking-widget');
-    await widget.evaluate((el: any) => el.shadowRoot?.querySelector('.widget-launcher')?.click());
+    await openAndStart(widget);
     await page.waitForFunction(() => !!document.querySelector('dotstark-booking-widget')?.shadowRoot?.querySelector('.chat-container.visible'));
     await widget.evaluate((el: any) => {
       const input = el.shadowRoot?.querySelector('#user-input');

@@ -30,6 +30,10 @@ function getBreadcrumb(pathname: string) {
   if (pathname.includes("/conversations")) return { category: "App", page: "Inbox" };
   if (pathname.includes("/bookings/cancelled")) return { category: "App", page: "Cancelled Bookings" };
   if (pathname.includes("/bookings")) return { category: "App", page: "Bookings" };
+  if (pathname.includes("/departments")) return { category: "Organization", page: "Departments" };
+  if (pathname.includes("/doctors")) return { category: "Organization", page: "Doctors" };
+  if (pathname.includes("/schedules")) return { category: "Organization", page: "Time-tables" };
+  if (pathname.includes("/staff")) return { category: "Organization", page: "Staff" };
   if (pathname.includes("/calendar")) return { category: "App", page: "Calendar" };
   if (pathname.includes("/agent")) return { category: "Settings", page: "Agent Personalisation" };
   if (pathname.includes("/business-hours")) return { category: "Settings", page: "Business Hours" };

@@ -812,7 +812,8 @@ async def fetch_closed_weekdays(db, org_id) -> list:
         rows = (
             await db.execute(
                 sa_select(ScheduleDay.day_of_week, ScheduleDay.is_active).where(
-                    ScheduleDay.org_id == org_id
+                    ScheduleDay.org_id == org_id,
+                    ScheduleDay.provider_id.is_(None),
                 )
             )
         ).all()
@@ -1280,6 +1281,21 @@ async def process_message(
         transcript_user_text if transcript_user_text is not None else message_text
     )
 
+    # Org dept flow: resolve a post-date team-member choice (same as graph path).
+    try:
+        from app.services.catalog_service import resolve_pending_provider as _rpp_legacy
+
+        _picked_legacy = await _rpp_legacy(db, org.id, chat_session, message_text)
+        if _picked_legacy is not None:
+            try:
+                await crud_chat.update_chat_session(
+                    db, chat_session.session_id, chat_session
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     # Recover deterministic stuck state: OTP verified but still marked CONFIRMING.
     if (
         chat_session.session_status == "CONFIRMING"
@@ -1339,6 +1355,47 @@ async def process_message(
             + ("\n" if persona.get("custom_instructions") else "")
             + _hours_block.replace("## BUSINESS HOURS", "BUSINESS HOURS")
         ).strip()
+    # Org-mode: ground the agent in the picked department + doctor so it
+    # never hallucinates the wrong doctor and asks for dept first when missing.
+    try:
+        _unit_name = (chat_session.collected_data or {}).get("unit_name")
+        _prov_name = (chat_session.collected_data or {}).get("provider_name")
+        if not _unit_name and getattr(chat_session, "unit_id", None):
+            from app.models.service_unit import ServiceUnit as _SU
+
+            _u = (
+                await db.execute(select(_SU).where(_SU.id == chat_session.unit_id))
+            ).scalars().first()
+            if _u is not None:
+                _unit_name = _u.name
+        if not _prov_name and getattr(chat_session, "provider_id", None):
+            from app.models.service_unit import Provider as _PV
+
+            _p = (
+                await db.execute(select(_PV).where(_PV.id == chat_session.provider_id))
+            ).scalars().first()
+            if _p is not None:
+                _prov_name = _p.full_name
+        if _unit_name or _prov_name:
+            _org_ctx = "BOOKING CONTEXT (authoritative): "
+            if _unit_name:
+                _org_ctx += f"department={_unit_name}. "
+            if _prov_name:
+                _role = ""
+                try:
+                    _role = str(getattr(_p, "role_label", None) or "").strip()
+                except Exception:
+                    _role = ""
+                _org_ctx += f"team_member={_prov_name}" + (f" ({_role}). " if _role else ". ")
+            _org_ctx += "Use only this team member's hours and slots."
+            persona = dict(persona)
+            persona["custom_instructions"] = (
+                str(persona.get("custom_instructions") or "").rstrip()
+                + "\n"
+                + _org_ctx
+            ).strip()
+    except Exception:
+        pass
     org_timezone = str(org_config.timezone) if org_config.timezone else "UTC"
     # NULL flag = schema default (email ON, phone OFF).
     _req_e = getattr(org_config, "require_otp", True)
@@ -2279,6 +2336,17 @@ async def process_message(
             _visibly_asks_legacy = _response_asks_for_field(
                 llm_generated_msg, _need_field, (_fm or {}).get("label")
             ) and not looks_like_json_debris(llm_generated_msg)
+            # Ask-AI mode: the reply is the product — never patch it with
+            # deterministic collection copy.
+            _legacy_ask_mode = False
+            try:
+                _cd_lam = getattr(chat_session, "collected_data", None) or {}
+                _legacy_ask_mode = (
+                    isinstance(_cd_lam, dict)
+                    and str(_cd_lam.get("_mode") or "").strip().lower() == "ask"
+                )
+            except Exception:
+                _legacy_ask_mode = False
             if _waived_legacy:
                 _need_label_legacy = str(
                     ((_fm or {}).get("label") or _need_field or "detail")
@@ -2298,6 +2366,7 @@ async def process_message(
                 and isinstance(next_step, dict)
                 and not _decline_flow.is_declined(chat_session)
                 and not _visibly_asks_legacy
+                and not _legacy_ask_mode
             ):
                 _det_ask = _build_context_aware_response(
                     directive=next_step.get("directive", "TEXT_INPUT"),
@@ -2484,6 +2553,88 @@ async def process_message(
         except Exception:
             pass
 
+    # Org dept flow (legacy path mirror): team-member choice comes AFTER the
+    # date. Swap the slot grid for a member picker when the session carries a
+    # department but no member yet.
+    if directive == "REQUIRE_TIME_SLOT_GRID":
+        try:
+            from app.services.catalog_service import providers_for_date as _pfd_legacy
+            from dateutil.parser import parse as _parse_legacy
+
+            _lu = getattr(chat_session, "unit_id", None) or (chat_session.collected_data or {}).get("unit_id")
+            _lp = getattr(chat_session, "provider_id", None) or (chat_session.collected_data or {}).get("provider_id")
+            _ld_raw = (chat_session.collected_data or {}).get("date")
+            if _lu and not _lp and _ld_raw:
+                _ld = _parse_legacy(str(_ld_raw)).date()
+                _lprovs = await _pfd_legacy(db, org.id, _lu, _ld)
+                if not _lprovs:
+                    directive = "REQUIRE_DATE_PICKER"
+                    try:
+                        chat_session.collected_data.pop("date", None)
+                        chat_session.collected_data.pop("time", None)
+                        chat_session.collected_data.pop("selected_slot_id", None)
+                        chat_session.missing_fields = ["date"] + [
+                            f for f in (chat_session.missing_fields or []) if f != "date"
+                        ]
+                        await crud_chat.update_chat_session(
+                            db, chat_session.session_id, chat_session
+                        )
+                    except Exception:
+                        pass
+                    if not field_meta:
+                        field_meta = {"name": "date", "type": "date", "label": "Preferred Date"}
+                    field_meta.update(
+                        {
+                            "name": "date",
+                            "type": "date",
+                            "label": "Preferred Date",
+                            "validation_error": "No team members from this department work on that date. Please pick another date.",
+                            "follow_up_fields": ["date"],
+                        }
+                    )
+                    msg = (
+                        "No team members from this department work on that date. "
+                        "Please choose another date."
+                    )
+                elif _lprovs:
+                    try:
+                        _cd_l = dict(chat_session.collected_data or {})
+                        _cd_l["_provider_options"] = [
+                            {"id": str(p.get("id")), "full_name": p.get("full_name")}
+                            for p in _lprovs
+                        ]
+                        _cd_l["_provider_unit"] = str(_lu)
+                        chat_session.collected_data = _cd_l
+                        await crud_chat.update_chat_session(
+                            db, chat_session.session_id, chat_session
+                        )
+                    except Exception:
+                        pass
+                    directive = "REQUIRE_PROVIDER_PICKER"
+                    _llines = []
+                    for _i, _p in enumerate(_lprovs, start=1):
+                        _ll = str(_p.get("full_name") or "").strip()
+                        if _p.get("fee_display"):
+                            _ll += f" · {_p['fee_display']}"
+                        _llines.append(f"{_i}. {_ll}")
+                    _d_nice = _ld.strftime("%A, %B %d")
+                    msg = f"Who would you like to see on {_d_nice}?\n" + "\n".join(_llines)
+                    if str(getattr(chat_session, "channel", "") or "").lower() not in ("whatsapp", "whatsapp_cloud"):
+                        msg = f"Who would you like to see on {_d_nice}?"
+                    if not field_meta:
+                        field_meta = {}
+                    field_meta.update(
+                        {
+                            "name": "provider",
+                            "type": "provider",
+                            "label": "Choose team member",
+                            "unit_id": str(_lu),
+                            "providers": _lprovs,
+                        }
+                    )
+        except Exception as _legacy_swap_err:
+            logger.warning(f"provider_swap_lookup_failed (legacy): {_legacy_swap_err}")
+
     # Fetch available time slots when directive is REQUIRE_TIME_SLOT_GRID
     # For WhatsApp, ensure we always have a list even if field_meta was empty (the widget's calendar ignores it, but WA needs it)
     if directive == "REQUIRE_TIME_SLOT_GRID":
@@ -2501,8 +2652,13 @@ async def process_message(
 
             try:
                 parsed_date = date_parse(target_date).date()
+                try:
+                    _leg_prov = getattr(chat_session, "provider_id", None) or (chat_session.collected_data or {}).get("provider_id")
+                except Exception:
+                    _leg_prov = None
                 inventory, availability_status = await compute_slot_inventory(
-                    db, org.id, parsed_date, org_config=org_config
+                    db, org.id, parsed_date, org_config=org_config,
+                    provider_id=_leg_prov,
                 )
                 timezone_resolution = resolve_effective_timezone_policy(
                     requested_tz=chat_session.collected_data.get("user_timezone"),
@@ -2910,6 +3066,30 @@ async def _handle_booking_flow(
     if not require_phone_otp:
         require_phone_otp = bool(getattr(org_config, "require_phone_otp", False))
 
+    # Review gate FIRST (before slot lock): no DB touched on the reroute
+    # path, so tests and lock-free callers stay safe, and no slot is held
+    # while the customer is still only previewing.
+    _review_seen_hbf = False
+    try:
+        _review_seen_hbf = bool(
+            (chat_session.collected_data or {}).get("_review_presented")
+        )
+    except Exception:
+        _review_seen_hbf = False
+    if not (chat_session.missing_fields or []) and not _review_seen_hbf:
+        _already_verified_hbf = bool(
+            (require_otp and getattr(chat_session, "otp_verified", False))
+            or (
+                require_phone_otp
+                and getattr(chat_session, "phone_otp_verified", False)
+            )
+        )
+        if not _already_verified_hbf:
+            _summary_msg_hbf, _summary_directive_hbf = _build_confirmation_summary(
+                chat_session, fd_map
+            )
+            return _summary_msg_hbf, _summary_directive_hbf, None
+
     # Lock the slot BEFORE showing OTP modal or confirmation request
     # This prevents ghost slots during the waiting period
     await _lock_slot_for_booking(db, org, chat_session)
@@ -2923,21 +3103,18 @@ async def _handle_booking_flow(
     # customer got a code first and the summary afterwards; confirming then
     # re-displayed the summary instead of moving on to verification.
     #
-    # The summary is only skipped when the caller cannot tell us whether the
-    # customer confirmed (user_confirmed is None), preserving legacy callers.
-    if user_confirmed is False and not (chat_session.missing_fields or []):
-        _already_verified = bool(
-            (require_otp and getattr(chat_session, "otp_verified", False))
-            or (
-                require_phone_otp
-                and getattr(chat_session, "phone_otp_verified", False)
-            )
+    # The mandatory preview now lives at the top of this function (before
+    # slot lock): no prior card means reroute to the card first, even on an
+    # explicit "Yes" (production: time saved → model said "I'll confirm" →
+    # "Yes" → OTP, customer never saw the details). user_confirmed is
+    # intentionally NOT consulted there; a yes-without-preview is the hole.
+    _already_verified = bool(
+        (require_otp and getattr(chat_session, "otp_verified", False))
+        or (
+            require_phone_otp
+            and getattr(chat_session, "phone_otp_verified", False)
         )
-        if not _already_verified:
-            _summary_msg, _summary_directive = _build_confirmation_summary(
-                chat_session, fd_map
-            )
-            return _summary_msg, _summary_directive, None
+    )
 
     # ── Email OTP gate ──
     recipient_email = _resolve_session_email(chat_session, fd_map)
@@ -2976,15 +3153,32 @@ async def _handle_booking_flow(
                 f"Email: {_dup_booking.customer_email}\n"
                 f"{'Phone: ' + str(_dup_booking.customer_phone) + chr(10) if _dup_booking.customer_phone else ''}"
                 f"We allow only one active booking at a time. "
-                f"To book a new slot, please cancel the existing one first. "
-                f"Just say 'cancel my booking'."
+                f"Choose what to do below."
             )
+            # Pin the existing booking id so the reschedule path can cancel
+            # it by id (it lives in another session). Validated again there.
+            try:
+                _cd_dup = dict(chat_session.collected_data or {})
+                _cd_dup["_dup_booking_id"] = str(_dup_booking.id)
+                chat_session.collected_data = _cd_dup
+                await crud_chat.update_chat_session(
+                    db, chat_session.session_id, chat_session
+                )
+            except Exception:
+                pass
             # NOTE: no transcript write here — every _handle_booking_flow
             # caller persists (user_msg, agent_msg) after return.
             return (
                 _dup_msg,
-                "TEXT_INPUT",
-                {"duplicate_booking": True, "booking_id": str(_dup_booking.id)},
+                "REQUIRE_SELECT",
+                {
+                    "duplicate_booking": True,
+                    "booking_id": str(_dup_booking.id),
+                    "name": "duplicate_action",
+                    "type": "select",
+                    "label": "Manage your booking",
+                    "options": ["Reschedule booking", "Cancel booking"],
+                },
             )
     except Exception as _dup_err:
         logger.warning("duplicate booking guard failed open: %s", _dup_err)
@@ -3776,6 +3970,182 @@ Output ONLY valid JSON:"""
     return action
 
 
+_DUP_RESCHEDULE_RE = re.compile(r"\breschedul\w*\b", re.IGNORECASE)
+
+
+async def maybe_reschedule_dup_booking(
+    db: AsyncSession,
+    org: Organization,
+    chat_session: ChatSessionState,
+    message_text: str,
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> Optional[ActionPayload]:
+    """Reschedule the duplicate booking pinned by the dup guard.
+
+    The guard fires in a NEW session while the existing booking lives in an
+    old one, so session-scoped reschedule cannot find it. This path cancels
+    the pinned booking BY ID (org-scoped, upcoming, contact-owned) and
+    re-enters collection with contacts kept — date/time re-picked, OTP at
+    the final confirm as usual.
+    """
+    try:
+        cd = chat_session.collected_data if isinstance(chat_session.collected_data, dict) else {}
+    except Exception:
+        return None
+    # Ask-AI sessions never reschedule: booking actions live in the
+    # booking section only (the widget enforces this too; belt-and-braces).
+    try:
+        if str((cd.get("_mode") or "")).strip().lower() == "ask":
+            return None
+    except Exception:
+        pass
+    dup_id = str(cd.get("_dup_booking_id") or "").strip()
+    if not dup_id:
+        return None
+    # Own-session CONFIRMED bookings keep their dedicated reschedule path.
+    if str(getattr(chat_session, "session_status", "") or "").upper() == "CONFIRMED":
+        return None
+    if not _DUP_RESCHEDULE_RE.search(str(message_text or "")):
+        return None
+
+    async def _drop_pin() -> None:
+        try:
+            _cd = dict(chat_session.collected_data or {})
+            _cd.pop("_dup_booking_id", None)
+            chat_session.collected_data = _cd
+            await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+        except Exception:
+            pass
+
+    try:
+        import uuid as _uuid
+
+        from sqlalchemy.future import select as _sel
+
+        from app.models.booking import Booking as _Booking
+        from app.models.booking import TimeSlot as _Slot
+
+        _bid = _uuid.UUID(dup_id)
+        _res = await db.execute(
+            select(_Booking).where(_Booking.id == _bid, _Booking.org_id == org.id)
+        )
+        _booking = _res.scalars().first()
+    except Exception:
+        _booking = None
+    if _booking is None:
+        await _drop_pin()
+        return None
+    # Must still be upcoming.
+    try:
+        from datetime import datetime
+        from datetime import timezone as _tz
+
+        _slot = None
+        if getattr(_booking, "slot_id", None):
+            _sr = await db.execute(select(_Slot).where(_Slot.id == _booking.slot_id))
+            _slot = _sr.scalars().first()
+        _start = _slot.start_time if _slot is not None and _slot.start_time else None
+        _now = datetime.now(_tz.utc)
+        if _start is not None and getattr(_start, "tzinfo", None) is None:
+            _start = _start.replace(tzinfo=_tz.utc)
+        if not _start or _start <= _now:
+            await _drop_pin()
+            return None
+    except Exception:
+        await _drop_pin()
+        return None
+    # Ownership: session contact must match the booking contact.
+    def _digits_match(a: str, b: str) -> bool:
+        if not a or not b:
+            return False
+        if a == b:
+            return True
+        return len(a) >= 10 and len(b) >= 10 and a[-10:] == b[-10:]
+
+    try:
+        _em = str(cd.get("email") or "").strip().lower()
+        _ph = re.sub(r"\D", "", str(cd.get("phone") or ""))
+        _bem = str(getattr(_booking, "customer_email", "") or "").strip().lower()
+        _bph = re.sub(r"\D", "", str(getattr(_booking, "customer_phone", "") or ""))
+        _owned = bool(_em and _em == _bem) or _digits_match(_ph, _bph)
+    except Exception:
+        _owned = False
+    if not _owned:
+        await _drop_pin()
+        return None
+
+    from app.crud.booking import cancel_booking as _cancel_by_id
+
+    try:
+        _cancelled = await _cancel_by_id(db, booking_id=str(_booking.id), org_id=org.id)
+    except Exception as _cancel_err:
+        logger.warning("dup reschedule cancel failed: %s", _cancel_err)
+        _cancelled = False
+    if not _cancelled:
+        await _drop_pin()
+        _fail = (
+            "I couldn't cancel your previous booking. Please try again "
+            "or contact the business directly."
+        )
+        try:
+            await _save_transcript(
+                db, chat_session.session_id, str(message_text or ""), _fail, "TEXT_INPUT"
+            )
+        except Exception:
+            pass
+        return ActionPayload(message=_fail, widget_directive="TEXT_INPUT", is_terminal=False)
+
+    customer_name = cd.get("name", "there")
+    customer_email = _resolve_session_email(chat_session)
+    # Keep contacts, clear only date/time + stale refs (mirrors _reschedule_booking).
+    try:
+        _cd2 = dict(chat_session.collected_data or {})
+        for _k in ("date", "time", "selected_slot_id", "selected_slot_start_utc",
+                   "locked_slot_id", "locked_slot_start_utc", "_dup_booking_id"):
+            _cd2.pop(_k, None)
+        chat_session.collected_data = _cd2
+    except Exception:
+        pass
+    chat_session.session_status = "ACTIVE"
+    chat_session.current_intent = "EDIT_DATA"
+    chat_session.otp_verified = False
+    chat_session.phone_otp_verified = False
+    chat_session.missing_fields = ["date", "time"]
+    from app.engine.cancel_flow import _persist_session, SESSION_RESET_REMOVE_KEYS
+
+    await _persist_session(db, chat_session, remove_keys=SESSION_RESET_REMOVE_KEYS)
+    if background_tasks:
+        log_audit_event(
+            background_tasks,
+            org_id=org.id,
+            actor_id=None,
+            actor_email=customer_email,
+            action=AuditAction.BOOKING_UPDATE,
+            resource_type="booking",
+            resource_id=str(_booking.id),
+            old_values={"booking_id": str(_booking.id)},
+            new_values={"session_status": "ACTIVE", "date": None, "time": None, "intent": "EDIT_DATA"},
+            ip_address=None,
+            user_agent=None,
+        )
+    msg = (
+        f"No problem, {customer_name}! Your previous booking is cancelled. "
+        f"Let's pick a new date — when would you like to reschedule to?"
+    )
+    action = ActionPayload(
+        message=msg, widget_directive="REQUIRE_DATE_PICKER", is_terminal=False
+    )
+    await _save_transcript(
+        db,
+        chat_session.session_id,
+        str(message_text or ""),
+        msg,
+        "REQUIRE_DATE_PICKER",
+        intent="EDIT_DATA",
+    )
+    return action
+
+
 async def _reschedule_booking(
     db: AsyncSession,
     org: Organization,
@@ -4254,6 +4624,11 @@ async def _execute_booking(
         requested_meeting_type = _normalize_meeting_type(
             chat_session.collected_data.get("meeting_type")
         )
+        # ONLINE_ONLY orgs are online by definition: a collected choice lost
+        # upstream (re-extraction, checkpoint merge) must not silently flip
+        # the booking to offline or skip link handling.
+        if requested_meeting_type is None and mode == MeetingMode.ONLINE_ONLY:
+            requested_meeting_type = "ONLINE"
 
         if requested_meeting_type and requested_meeting_type not in allowed_types:
             chat_session.session_status = "ACTIVE"
@@ -4275,23 +4650,59 @@ async def _execute_booking(
             if live_policy and getattr(live_policy, "meeting_provider_default", None)
             else MeetingProviderDefault.NONE
         )
+        # The link factory generates via the ACTIVE provider (Meet/Teams/Zoom
+        # connection), so a connected active provider IS an online path even
+        # when no calendar is linked and no default provider is set.
+        from app.models.config import ActiveMeetingProvider as _AMP
+
+        _active_provider = (
+            live_policy.active_meeting_provider
+            if live_policy and getattr(live_policy, "active_meeting_provider", None)
+            else None
+        )
         has_online_path = (
             bool(live_policy and live_policy.google_calendar_connected)
             or bool(live_policy and live_policy.outlook_calendar_connected)
             or active_provider != MeetingProviderDefault.NONE
+            or (_active_provider is not None and _active_provider != _AMP.NONE)
         )
-        if is_online_request and not has_online_path:
-            chat_session.session_status = "ACTIVE"
-            chat_session.current_intent = "CONFIRM_BOOKING"
-            await crud_chat.update_chat_session(
-                db, chat_session.session_id, chat_session
+        # Degraded confirmation (product contract): an ONLINE pick without
+        # any connected online path must NOT deadlock the booking into a
+        # confirm → summary → confirm loop. The booking goes through WITHOUT
+        # the link (UNAVAILABLE + ops alert); the customer is told the link
+        # follows by email (D-03 message below).
+        _no_online_path = is_online_request and not has_online_path
+        if _no_online_path:
+            logger.warning(
+                "booking.online_path_missing.degraded",
+                extra={
+                    "session_id": chat_session.session_id,
+                    "meeting_type": requested_meeting_type,
+                },
             )
-            return (
-                "I can't finalize an online meeting right now because no online meeting provider is available. "
-                "Please retry shortly or choose an offline meeting option.",
-                "TEXT_INPUT",
-                None,
-            )
+            try:
+                request_id = (
+                    correlation_id.get()
+                    or (chat_session.collected_data or {}).get("request_id")
+                )
+                trace_id = (chat_session.collected_data or {}).get("trace_id")
+                await create_system_alert(
+                    db,
+                    SystemAlertCreate(
+                        org_id=org.id,
+                        component=AlertComponent.BOOKING,
+                        severity=AlertSeverity.WARNING,
+                        code="ONLINE_MEETING_PATH_MISSING",
+                        message="Online booking confirmed without a meeting link: no online path connected",
+                        request_id=request_id,
+                        trace_id=trace_id,
+                        context={"meeting_type": requested_meeting_type},
+                    ),
+                )
+            except Exception as alert_err:
+                logger.warning(
+                    "booking.online_path_missing.alert.failed: %s", alert_err
+                )
 
         org_timezone = (
             str(live_policy.timezone) if live_policy and live_policy.timezone else "UTC"
@@ -4409,6 +4820,14 @@ async def _execute_booking(
         meeting_link_error_code = None
         meeting_link_degraded = False
 
+        # No connected online path: mark degraded up front so the link
+        # generation branches below are skipped (calling the provider
+        # factory with nothing configured raises → summary loop).
+        if _no_online_path:
+            meeting_link_status = MeetingLinkStatus.UNAVAILABLE
+            meeting_link_error_code = "NO_ONLINE_PATH"
+            meeting_link_degraded = True
+
         # Determine if this is an ONLINE booking that requires link generation
         is_online_only_mode = mode == MeetingMode.ONLINE_ONLY
         user_chose_online = requested_meeting_type == "ONLINE"
@@ -4418,7 +4837,10 @@ async def _execute_booking(
             else None
         )
 
-        if is_online_only_mode:
+        if _no_online_path and (is_online_only_mode or user_chose_online):
+            # Customer chose online: snapshot stays ONLINE, link pending.
+            meeting_type_snapshot = "ONLINE"
+        if is_online_only_mode and not _no_online_path:
             # ONLINE_ONLY mode: always generate link, snapshot as ONLINE
             meeting_type_snapshot = "ONLINE"
             link_result = await generate_meeting_link(
@@ -4481,7 +4903,7 @@ async def _execute_booking(
                     logger.warning(
                         "booking.meeting_link.degraded.alert.failed: %s", alert_err
                     )
-        elif user_chose_online and mode == MeetingMode.HYBRID:
+        elif user_chose_online and mode == MeetingMode.HYBRID and not _no_online_path:
             # HYBRID ONLINE: generate link via active provider (same as ONLINE_ONLY)
             meeting_type_snapshot = "ONLINE"
             link_result = await generate_meeting_link(
@@ -4542,10 +4964,11 @@ async def _execute_booking(
                     logger.warning(
                         "booking.meeting_link.degraded.alert.failed HYBRID: %s", alert_err
                     )
-        else:
+        elif not _no_online_path:
             # OFFLINE or HYBRID with OFFLINE selection
             meeting_type_snapshot = "OFFLINE"
             meeting_link_status = MeetingLinkStatus.NOT_REQUIRED
+        # else (_no_online_path): degraded UNAVAILABLE set above is kept.
 
         # Payment snapshot from latest paid attempt (if any)
         #
@@ -4819,6 +5242,14 @@ async def _execute_booking(
         booking_details["user_slot_end_at"] = user_slot_end_at.isoformat()
         booking_details["org_slot_start_at"] = org_slot_start_at.isoformat()
         booking_details["org_slot_end_at"] = org_slot_end_at.isoformat()
+
+        # Department/member/fee lines for the confirmation email.
+        try:
+            from app.services.catalog_service import booking_email_context
+
+            booking_details.update(await booking_email_context(db, booking))
+        except Exception:
+            pass
 
         from app.models.user import User
         from sqlalchemy.future import select as sa_select
@@ -5103,6 +5534,17 @@ def _build_confirmation_summary(
             "REQUEST_CONFIRMATION",
         )
 
+    # Review-presented marker: the OTP/booking gate requires a review card
+    # to have gone out before PROCESS_BOOKING. Set here — the single choke
+    # point every review passes through — so a turn that jumps collection
+    # straight to confirm/OTP is rerouted to the card instead. Internal key
+    # (never rendered: the iterator above only yields fd_map fields).
+    # Callers persist collected_data through their normal session saves.
+    try:
+        if isinstance(chat_session.collected_data, dict):
+            chat_session.collected_data["_review_presented"] = True
+    except Exception:
+        pass
     date_value = str((chat_session.collected_data or {}).get("date") or "").strip()
     time_value = str((chat_session.collected_data or {}).get("time") or "").strip()
     when_bits = [b for b in (date_value, time_value) if b]

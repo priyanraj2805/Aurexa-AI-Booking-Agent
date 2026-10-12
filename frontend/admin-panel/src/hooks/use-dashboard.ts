@@ -124,6 +124,10 @@ export interface BookingPageItem extends BookingItem {
   attended_at?: string | null;
   attendance_notes?: string | null;
   cancellation_reason?: string | null;
+  unit_id?: string | null;
+  unit_name?: string | null;
+  provider_id?: string | null;
+  provider_name?: string | null;
 }
 
 export interface CancelledBookingItem {
@@ -135,6 +139,10 @@ export interface CancelledBookingItem {
   booking_time: string | null;
   cancelled_at: string | null;
   booking_id?: string | null;
+  unit_id?: string | null;
+  unit_name?: string | null;
+  provider_id?: string | null;
+  provider_name?: string | null;
 }
 
 export interface ConversationItem {
@@ -149,6 +157,10 @@ export interface ConversationItem {
   customer_name?: string | null;
   customer_email?: string | null;
   customer_phone?: string | null;
+  unit_id?: string | null;
+  unit_name?: string | null;
+  provider_id?: string | null;
+  provider_name?: string | null;
 }
 
 export interface MessageItem {
@@ -423,10 +435,64 @@ export function useRecentBookings(limit = 20) {
   return useApi<BookingItem[]>(`/dashboard/recent-bookings?limit=${limit}`);
 }
 
+export interface TopBreakdownItem {
+  id: string | null;
+  name: string;
+  bookings: number;
+}
+
+export interface TopBreakdown {
+  units: TopBreakdownItem[];
+  providers: TopBreakdownItem[];
+}
+
+export function useTopBreakdown(days = 30, enabled = true, limit = 5, unitId?: string) {
+  const qs = new URLSearchParams({ days: String(days), limit: String(limit) });
+  if (unitId) qs.append("unit_id", unitId);
+  return useApi<TopBreakdown>(
+    enabled ? `/dashboard/top-breakdown?${qs.toString()}` : "",
+    [days, enabled, limit, unitId]
+  );
+}
+
+
+// �"?�? Revenue per department + team member �"?�"?�"?�"?
+
+export interface RevenueBreakdownItem {
+  id: string | null;
+  name: string;
+  role_label?: string | null;
+  bookings: number;
+  gross_revenue_paise: number;
+  collected_revenue_paise: number;
+}
+
+export interface RevenueResponse {
+  days: number;
+  totals: {
+    bookings: number;
+    gross_revenue_paise: number;
+    collected_revenue_paise: number;
+  };
+  by_department: RevenueBreakdownItem[];
+  by_member: RevenueBreakdownItem[];
+}
+
+export function useRevenue(days = 30, enabled = true, unitId?: string) {
+  const qs = new URLSearchParams({ days: String(days) });
+  if (unitId) qs.append("unit_id", unitId);
+  return useApi<RevenueResponse>(
+    enabled ? `/dashboard/revenue?${qs.toString()}` : "",
+    [days, enabled, unitId]
+  );
+}
+
+
+
 export function useBookings(
   page: number,
   pageSize = 10,
-  filters?: { search?: string; status?: string; attendance_status?: string; meeting_mode?: string; fromDate?: string; toDate?: string }
+  filters?: { search?: string; status?: string; attendance_status?: string; meeting_mode?: string; fromDate?: string; toDate?: string; unit_id?: string; provider_id?: string }
 ) {
   const rangeOk = isDateRangeValid(filters?.fromDate || "", filters?.toDate || "");
   const qs = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
@@ -434,27 +500,31 @@ export function useBookings(
   if (rangeOk && filters?.status) qs.append("status", filters.status);
   if (filters?.attendance_status) qs.append("attendance_status", filters.attendance_status);
   if (filters?.meeting_mode) qs.append("meeting_mode", filters.meeting_mode);
+  if (filters?.unit_id) qs.append("unit_id", filters.unit_id);
+  if (filters?.provider_id) qs.append("provider_id", filters.provider_id);
   if (rangeOk && filters?.fromDate) qs.append("from_date", toApiDate(filters.fromDate) || filters.fromDate);
   if (rangeOk && filters?.toDate) qs.append("to_date", toApiDateTo(filters.toDate) || filters.toDate);
   return useApi<Paginated<BookingPageItem>>(
     rangeOk ? `/dashboard/bookings?${qs.toString()}` : "",
-    [page, pageSize, filters?.search, filters?.status, filters?.attendance_status, filters?.meeting_mode, filters?.fromDate, filters?.toDate, rangeOk]
+    [page, pageSize, filters?.search, filters?.status, filters?.attendance_status, filters?.meeting_mode, filters?.fromDate, filters?.toDate, filters?.unit_id, filters?.provider_id, rangeOk]
   );
 }
 
 export function useCancelledBookings(
   page: number,
   pageSize = 10,
-  filters?: { search?: string; fromDate?: string; toDate?: string }
+  filters?: { search?: string; fromDate?: string; toDate?: string; unit_id?: string; provider_id?: string }
 ) {
   const rangeOk = isDateRangeValid(filters?.fromDate || "", filters?.toDate || "");
   const qs = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
   if (rangeOk && filters?.search) qs.append("search", filters.search);
   if (rangeOk && filters?.fromDate) qs.append("from_date", toApiDate(filters.fromDate) || filters.fromDate);
   if (rangeOk && filters?.toDate) qs.append("to_date", toApiDateTo(filters.toDate) || filters.toDate);
+  if (filters?.unit_id) qs.append("unit_id", filters.unit_id);
+  if (filters?.provider_id) qs.append("provider_id", filters.provider_id);
   return useApi<Paginated<CancelledBookingItem>>(
     rangeOk ? `/dashboard/bookings/cancelled?${qs.toString()}` : "",
-    [page, pageSize, filters?.search, filters?.fromDate, filters?.toDate, rangeOk]
+    [page, pageSize, filters?.search, filters?.fromDate, filters?.toDate, filters?.unit_id, filters?.provider_id, rangeOk]
   );
 }
 export interface Paginated<T> {
@@ -475,6 +545,8 @@ export function useConversations(
     toDate?: string;
     sortBy?: string;
     sortOrder?: "asc" | "desc";
+    unit_id?: string;
+    provider_id?: string;
   },
   pollMs = 5000
 ) {
@@ -490,6 +562,8 @@ export function useConversations(
   if (rangeOk && filters?.toDate) qs.append("to_date", toApiDateTo(filters.toDate) || filters.toDate);
   if (filters?.sortBy) qs.append("sort_by", filters.sortBy);
   if (filters?.sortOrder) qs.append("sort_order", filters.sortOrder);
+  if (filters?.unit_id) qs.append("unit_id", filters.unit_id);
+  if (filters?.provider_id) qs.append("provider_id", filters.provider_id);
   const url = qs.toString();
   return useApi<Paginated<ConversationItem>>(
     `/dashboard/conversations${url ? `?${url}` : ""}`,
@@ -503,6 +577,8 @@ export function useConversations(
       filters?.toDate,
       filters?.sortBy,
       filters?.sortOrder,
+      filters?.unit_id,
+      filters?.provider_id,
       rangeOk,
     ],
     pollMs

@@ -257,7 +257,8 @@ async def login(
         if not user:
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
-        if not verify_password(data.password, user.hashed_password):
+        # Strip: mobile keyboards/autofill often append a trailing space.
+        if not verify_password(data.password.strip(), user.hashed_password):
             log_audit_event(
                 background_tasks,
                 org_id=user.org_id,
@@ -370,13 +371,13 @@ async def reset_password(
             detail="Invalid or expired reset code. Request a new code and try again.",
         )
 
-    if verify_password(data.new_password, user.hashed_password):
+    if verify_password(data.new_password.strip(), user.hashed_password):
         raise HTTPException(
             status_code=400,
             detail="New password must be different from your current password.",
         )
 
-    await update_user_password(db, user, data.new_password)
+    await update_user_password(db, user, data.new_password.strip())
     log_audit_event(
         background_tasks,
         org_id=user.org_id,
@@ -472,7 +473,7 @@ async def login_code(
 
     email = data.email.lower().strip()
     user = await get_user_by_email(db, email)
-    if not user or not verify_password(data.password, user.hashed_password):
+    if not user or not verify_password(data.password.strip(), user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Your account is disabled.")

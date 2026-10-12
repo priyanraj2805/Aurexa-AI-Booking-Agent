@@ -126,6 +126,18 @@ class LinkedAccountIn(BaseModel):
     contact_name: Optional[str] = None
     category: str = "healthcare"
     subcategory: str = "clinic"
+    # Registered business address — required by the create-linked-account docs
+    # (profile → addresses → registered).
+    street1: str = Field(..., min_length=1, max_length=100)
+    street2: Optional[str] = Field(default=None, max_length=100)
+    city: str = Field(..., min_length=1, max_length=100)
+    state: str = Field(..., min_length=2, max_length=32)
+    postal_code: str = Field(..., min_length=6, max_length=6)
+    country: str = "IN"
+    # KYC (docs legal_info): business PAN mandatory for company-type entities,
+    # optional for proprietorship. Passed to Razorpay only — never stored.
+    legal_pan: Optional[str] = Field(default=None, max_length=10)
+    legal_gst: Optional[str] = Field(default=None, max_length=15)
 
 
 class StakeholderIn(BaseModel):
@@ -218,6 +230,16 @@ async def create_linked_account(
             contact_name=payload.contact_name or user.full_name,
             category=payload.category,
             subcategory=payload.subcategory,
+            registered_address={
+                "street1": payload.street1,
+                "street2": payload.street2,
+                "city": payload.city,
+                "state": payload.state,
+                "postal_code": payload.postal_code,
+                "country": payload.country,
+            },
+            legal_pan=payload.legal_pan,
+            legal_gst=payload.legal_gst,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))

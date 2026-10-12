@@ -344,7 +344,10 @@ async def load_weekly_hours_block(db: Any, org_id: str) -> str:
         return ""
 
     day_result = await db.execute(
-        select(ScheduleDay).where(ScheduleDay.org_id == org_uuid)
+        select(ScheduleDay).where(
+            ScheduleDay.org_id == org_uuid,
+            ScheduleDay.provider_id.is_(None),
+        )
     )
     schedule_days = day_result.scalars().all()
     if not schedule_days:
@@ -642,7 +645,10 @@ async def lookup_schedule_business_hours_answer(
                 "effective_timezone": _normalize_timezone(effective_timezone),
             }
         day_result = await db.execute(
-            select(ScheduleDay).where(ScheduleDay.org_id == org_uuid)
+            select(ScheduleDay).where(
+                ScheduleDay.org_id == org_uuid,
+                ScheduleDay.provider_id.is_(None),
+            )
         )
         schedule_days = day_result.scalars().all()
         summary = format_weekly_hours_summary(
@@ -685,13 +691,17 @@ async def lookup_schedule_business_hours_answer(
         }
 
     day_result = await db.execute(
-        select(ScheduleDay).where(ScheduleDay.org_id == org_uuid)
+        select(ScheduleDay).where(
+            ScheduleDay.org_id == org_uuid,
+            ScheduleDay.provider_id.is_(None),
+        )
     )
     schedule_days = day_result.scalars().all()
     exc_result = await db.execute(
         select(ScheduleException).where(
             ScheduleException.org_id == org_uuid,
             ScheduleException.exception_date == target_date,
+            ScheduleException.provider_id.is_(None),
         )
     )
     schedule_exception = exc_result.scalars().first()

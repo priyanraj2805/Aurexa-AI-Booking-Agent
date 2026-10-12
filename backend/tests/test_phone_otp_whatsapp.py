@@ -253,6 +253,13 @@ class TestBookingGating:
     async def test_failed_verification_booking_never_created(self, client: AsyncClient, db_session: AsyncSession, monkeypatch):
         org = await _make_org_with_phone_otp(db_session, require_phone_otp=True, require_otp=False)
         sess = await _make_session(db_session, org, phone="+916350063338")
+        # New contract: OTP/booking only after the review card went out.
+        from sqlalchemy.orm.attributes import flag_modified
+
+        sess.state_data["_review_presented"] = True
+        flag_modified(sess, "state_data")
+        db_session.add(sess)
+        await db_session.commit()
 
         resp = await client.post(
             "/api/v1/auth/security/otp/verify",

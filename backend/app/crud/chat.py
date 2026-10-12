@@ -29,7 +29,7 @@ FIELD_DEFINITIONS_SNAPSHOT_KEY = "field_definitions_snapshot"
 
 
 async def create_chat_session(
-    db: AsyncSession, org_id: str, channel: str = "web", channel_user_id: str = None
+    db: AsyncSession, org_id: str, channel: str = "web", channel_user_id: str = None, mode: Optional[str] = None
 ) -> ChatSession:
     # Get org config and derive field names from definitions
     result = await db.execute(select(OrgConfig).where(OrgConfig.org_id == org_id))
@@ -47,13 +47,18 @@ async def create_chat_session(
     snapshot = [field_def.model_dump(mode="python") for field_def in field_defs]
 
     now = datetime.now(timezone.utc)
+    # Ask-AI sessions start with zero collection state: no missing fields,
+    # no booking intent. The guided-booking flow recomputes its missing
+    # list from field definitions on its first collection turn, so this
+    # seed only changes how ask sessions begin.
+    _ask_seed = str(mode or "").strip().lower() == "ask"
     db_session = ChatSession(
         org_id=uuid.UUID(org_id),
         channel=channel,
         channel_user_id=channel_user_id,
         state_data={FIELD_DEFINITIONS_SNAPSHOT_KEY: snapshot},
-        missing_fields=required_names,
-        current_intent="START_BOOKING",
+        missing_fields=[] if _ask_seed else required_names,
+        current_intent="ASK_QUESTION" if _ask_seed else "START_BOOKING",
         last_activity_at=now,
     )
     db.add(db_session)

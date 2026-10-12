@@ -35,6 +35,10 @@ interface CalendarEvent {
   meeting_link_status?: string | null;
   meeting_link_url?: string | null;
   meeting_link_provider?: string | null;
+  unit_id?: string | null;
+  unit_name?: string | null;
+  provider_id?: string | null;
+  provider_name?: string | null;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -113,6 +117,12 @@ function DayEventsDialog({
                   <div>
                     <div className="text-sm font-semibold group-hover:text-primary transition-colors">{ev.customer_name}</div>
                     <div className="text-[10px] text-muted-foreground font-medium uppercase tracking-tighter">{ev.slot_start ? fmtTime(ev.slot_start) : "—"}</div>
+                    {(ev.unit_name || ev.provider_name) && (
+                      <div className="flex gap-1 mt-1">
+                        {ev.unit_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-secondary">{ev.unit_name}</span>}
+                        {ev.provider_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">{ev.provider_name}</span>}
+                      </div>
+                    )}
                   </div>
                 </div>
                 <ChevronRight className="size-4 text-muted-foreground/30 group-hover:text-primary transition-colors" />
@@ -163,18 +173,50 @@ export default function CalendarPage() {
   const month = currentDate.getMonth();
   const monthName = currentDate.toLocaleString("en-US", { month: "long", year: "numeric" });
 
+  // Org-mode filters: department + team member. Empty = all.
+  const [unitFilter, setUnitFilter] = useState("");
+  const [providerFilter, setProviderFilter] = useState("");
+  const [filterUnits, setFilterUnits] = useState<{ id: string; name: string }[]>([]);
+  const [filterProviders, setFilterProviders] = useState<{ id: string; full_name: string; units: string[] }[]>([]);
+
+  useEffect(() => {
+    // Best-effort: individual orgs get empty lists and hide the filters.
+    import("@/lib/org-api").then(({ orgApi }) =>
+      Promise.all([orgApi.units().catch(() => []), orgApi.providers().catch(() => [])]).then(
+        ([u, p]) => {
+          setFilterUnits((u as { id: string; name: string }[]).map((x) => ({ id: x.id, name: x.name })));
+          setFilterProviders(
+            (p as { id: string; full_name: string; units: string[] }[]).map((x) => ({ id: x.id, full_name: x.full_name, units: x.units || [] }))
+          );
+        }
+      )
+    ).catch(() => {});
+  }, []);
+
+  // Member list follows the selected department.
+  const visibleProviders = unitFilter ? filterProviders.filter((p) => p.units.includes(unitFilter)) : filterProviders;
+  useEffect(() => {
+    if (unitFilter && providerFilter && !visibleProviders.some((p) => p.id === providerFilter)) {
+      setProviderFilter("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unitFilter]);
+
   const fetchCalendarEvents = useCallback(() => {
     const startDate = `${year}-${pad(month + 1)}-01`;
     const lastDay = new Date(year, month + 1, 0).getDate();
     const endDate = `${year}-${pad(month + 1)}-${pad(lastDay)}`;
+    const extra =
+      (unitFilter ? `&unit_id=${encodeURIComponent(unitFilter)}` : "") +
+      (providerFilter ? `&provider_id=${encodeURIComponent(providerFilter)}` : "");
 
     setEventsLoading(true);
     setEventsError(null);
-    api.get<CalendarEvent[]>(`/dashboard/calendar-events?start_date=${startDate}&end_date=${endDate}`)
+    api.get<CalendarEvent[]>(`/dashboard/calendar-events?start_date=${startDate}&end_date=${endDate}${extra}`)
       .then((data) => setEvents(data || []))
       .catch((e) => setEventsError(e instanceof Error ? e.message : "Failed to load events"))
       .finally(() => setEventsLoading(false));
-  }, [year, month]);
+  }, [year, month, unitFilter, providerFilter]);
 
   const fetchAgenda = useCallback(async (newOffset: number, refresh = false) => {
     if (agendaLoading && !refresh) return;
@@ -243,6 +285,28 @@ export default function CalendarPage() {
           </p>
         </div>
       </div>
+
+      {/* Org-mode filters: shown only when departments exist */}
+      {(filterUnits.length > 0 || filterProviders.length > 0) && (
+        <div className="flex flex-wrap gap-2 px-1">
+          {!!filterUnits.length && (
+            <select value={unitFilter} onChange={(e) => setUnitFilter(e.target.value)} className="px-3 py-2 bg-background border border-border rounded-lg text-sm">
+              <option value="">All departments</option>
+              {filterUnits.map((u) => (
+                <option key={u.id} value={u.id}>{u.name}</option>
+              ))}
+            </select>
+          )}
+          {!!filterProviders.length && (
+            <select value={providerFilter} onChange={(e) => setProviderFilter(e.target.value)} className="px-3 py-2 bg-background border border-border rounded-lg text-sm">
+              <option value="">All members</option>
+              {visibleProviders.map((p) => (
+                <option key={p.id} value={p.id}>{p.full_name}</option>
+              ))}
+            </select>
+          )}
+        </div>
+      )}
 
       {/* Custom Tab bar (Consistent with Business Hours) */}
       <div className="relative flex items-center gap-1 bg-secondary/50 p-1 rounded-xl w-fit max-w-full overflow-x-auto border border-border">

@@ -84,6 +84,8 @@ async def _verified_session(db_session, org, slot):
     sess = await crud_chat.get_chat_session(db_session, sid)
     collected = dict(FULL)
     collected["locked_slot_id"] = str(slot.id)
+    # New contract: OTP/booking only after the review card went out.
+    collected["_review_presented"] = True
     # Verification context key, required by the booking flow's guard.
     collected["_internal"] = {
         "phone_otp_send_key": f"otp_phone:{sid}:{FULL['phone']}:{FULL['date']}:{FULL['time']}",

@@ -17,6 +17,7 @@ from app.core.email_templates import (
     render_booking_confirmation_customer,
     render_booking_confirmation_admin,
     render_booking_cancellation,
+    render_staff_invite_email,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,19 @@ async def send_auth_otp_email(to_email: str, code: str, purpose: str):
     """
     subject, body_html = render_auth_otp_email(code, purpose)
     
+    await anyio.to_thread.run_sync(
+        _send_email_sync, to_email, subject, body_html, abandon_on_cancel=True
+    )
+
+
+async def send_staff_invite_email(to_email: str, org_name: str, role_label: str, link: str):
+    """Emails a staff invite link (normal-website style: click → set password → login).
+
+    Like auth OTPs, the invitee has no account yet, so this bypasses the
+    delivery-log pipeline and sends directly via SMTP in a worker thread.
+    """
+    subject, body_html = render_staff_invite_email(org_name, role_label, link)
+
     await anyio.to_thread.run_sync(
         _send_email_sync, to_email, subject, body_html, abandon_on_cancel=True
     )

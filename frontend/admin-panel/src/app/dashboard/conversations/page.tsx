@@ -547,6 +547,31 @@ export default function ConversationsPage() {
   const [toDate, setToDate] = useState("");
   const [sortBy, setSortBy] = useState("updated_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  const [unitFilter, setUnitFilter] = useState<string>("");
+  const [providerFilter, setProviderFilter] = useState<string>("");
+  const [filterUnits, setFilterUnits] = useState<{ id: string; name: string }[]>([]);
+  const [filterProviders, setFilterProviders] = useState<{ id: string; full_name: string; units: string[] }[]>([]);
+
+  useEffect(() => {
+    import("@/lib/org-api").then(({ orgApi }) =>
+      Promise.all([orgApi.units().catch(() => []), orgApi.providers().catch(() => [])]).then(([u, p]) => {
+        setFilterUnits((u as { id: string; name: string }[]).map((x) => ({ id: x.id, name: x.name })));
+        setFilterProviders(
+          (p as { id: string; full_name: string; units: string[] }[]).map((x) => ({ id: x.id, full_name: x.full_name, units: x.units || [] }))
+        );
+      })
+    ).catch(() => {});
+  }, []);
+
+  // Doctor list follows the selected department (same pattern as Bookings).
+  const visibleProviders = unitFilter ? filterProviders.filter((p) => p.units.includes(unitFilter)) : filterProviders;
+  useEffect(() => {
+    if (unitFilter && providerFilter && !visibleProviders.some((p) => p.id === providerFilter)) {
+      setProviderFilter("");
+      setPage(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unitFilter]);
 
   const { data, loading, error } = useConversations(page, 10, {
     search,
@@ -556,6 +581,8 @@ export default function ConversationsPage() {
     toDate,
     sortBy,
     sortOrder,
+    unit_id: unitFilter || undefined,
+    provider_id: providerFilter || undefined,
   });
   const sessions = useMemo(() => data?.items ?? [], [data?.items]);
   const total = data?.total ?? 0;
@@ -667,6 +694,30 @@ export default function ConversationsPage() {
             onFromChange={setFromDate}
             onToChange={setToDate}
           />
+          {!!filterUnits.length && (
+            <select
+              value={unitFilter}
+              onChange={(e) => { setUnitFilter(e.target.value); setPage(1); }}
+              className="h-9 rounded-md border border-border bg-background px-3 text-xs"
+            >
+              <option value="">All departments</option>
+              {filterUnits.map((u) => (
+                <option key={u.id} value={u.id}>{u.name}</option>
+              ))}
+            </select>
+          )}
+          {!!filterProviders.length && (
+            <select
+              value={providerFilter}
+              onChange={(e) => { setProviderFilter(e.target.value); setPage(1); }}
+              className="h-9 rounded-md border border-border bg-background px-3 text-xs"
+            >
+              <option value="">All members</option>
+              {visibleProviders.map((p) => (
+                <option key={p.id} value={p.id}>{p.full_name}</option>
+              ))}
+            </select>
+          )}
           <span className="text-sm text-muted-foreground">{total} conversations</span>
         </div>
       </div>
@@ -728,6 +779,12 @@ export default function ConversationsPage() {
                       {s.missing_fields.length > 0 ? `${s.missing_fields.length} missing` : "Complete"}
                     </span>
                   </div>
+                  {(s.unit_name || s.provider_name) && (
+                    <div className="flex gap-1">
+                      {s.unit_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-secondary">{s.unit_name}</span>}
+                      {s.provider_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">{s.provider_name}</span>}
+                    </div>
+                  )}
                   <div className="text-[11px] text-muted-foreground">
                       Last active {timeAgo(s.updated_at)} · {formatTime(s.updated_at)}
                     </div>
@@ -816,6 +873,12 @@ export default function ConversationsPage() {
                     </td>
                     <td className="px-4 py-4 border-b border-border">
                       <ChannelBadge channel={s.channel} />
+                      {(s.unit_name || s.provider_name) && (
+                        <span className="block mt-1 space-x-1">
+                          {s.unit_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-secondary">{s.unit_name}</span>}
+                          {s.provider_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">{s.provider_name}</span>}
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-4 text-[13px] border-b border-border">
                       {s.current_intent || "—"}

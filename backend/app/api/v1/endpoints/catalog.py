@@ -25,7 +25,22 @@ from app.models.user import User
 # (DB-loaded per request); mutating routes additionally require
 # catalog.manage. Other dashboard routes keep legacy any-active-user access
 # until they are migrated one surface at a time.
-router = APIRouter(dependencies=[Depends(require_permission("catalog.view"))])
+async def _require_organization(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> None:
+    """Catalog is an organization-only surface (individuals: 403)."""
+    from app.core.org_mode import require_organization_for
+
+    await require_organization_for(db, user)
+
+
+router = APIRouter(
+    dependencies=[
+        Depends(require_permission("catalog.view")),
+        Depends(_require_organization),
+    ]
+)
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────
@@ -627,6 +642,358 @@ async def update_fee(
     await db.commit()
     await db.refresh(fee)
     return await _fee_out(db, fee)
+
+
+class ProviderDayIn(BaseModel):
+    day_of_week: int = Field(ge=0, le=6)
+    is_active: bool = True
+    open_time: Optional[str] = None
+    close_time: Optional[str] = None
+    break_start: Optional[str] = None
+    break_end: Optional[str] = None
+
+
+class ProviderDayOut(BaseModel):
+    day_of_week: int
+    is_active: bool
+    open_time: Optional[str] = None
+    close_time: Optional[str] = None
+    break_start: Optional[str] = None
+    break_end: Optional[str] = None
+    is_override: bool = False
+
+
+class ProviderExceptionIn(BaseModel):
+    exception_date: str = Field(min_length=10, max_length=10)
+    exception_type: str = Field(default="CLOSED", max_length=20)
+    custom_open: Optional[str] = None
+    custom_close: Optional[str] = None
+    reason: Optional[str] = Field(default=None, max_length=255)
+
+
+class ProviderExceptionOut(BaseModel):
+    id: str
+    exception_date: str
+    exception_type: str
+    custom_open: Optional[str] = None
+    custom_close: Optional[str] = None
+    reason: Optional[str] = None
+
+
+@router.get("/providers/{provider_id}/schedule", response_model=List[ProviderDayOut])
+async def get_provider_schedule(
+    provider_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Weekly hours for one doctor. is_override=False rows come from org template."""
+    from app.models.booking import ScheduleDay as _Day
+
+    provider = await _get_provider(db, user.org_id, provider_id)
+    out: List[ProviderDayOut] = []
+    for dow in range(7):
+        override = (
+            await db.execute(
+                select(_Day).where(
+                    _Day.org_id == user.org_id,
+                    _Day.day_of_week == dow,
+                    _Day.provider_id == provider.id,
+                )
+            )
+        ).scalars().first()
+        if override is not None:
+            out.append(
+                ProviderDayOut(
+                    day_of_week=dow,
+                    is_active=bool(override.is_active),
+                    open_time=str(override.open_time) if override.open_time else None,
+                    close_time=str(override.close_time) if override.close_time else None,
+                    break_start=str(override.break_start) if override.break_start else None,
+                    break_end=str(override.break_end) if override.break_end else None,
+                    is_override=True,
+                )
+            )
+            continue
+        base = (
+            await db.execute(
+                select(_Day).where(
+                    _Day.org_id == user.org_id,
+                    _Day.day_of_week == dow,
+                )
+            )
+        ).scalars().first()
+        # Prefer org template (provider NULL) when present
+        if base is not None and getattr(base, "provider_id", None) is not None:
+            try:
+                rows = (
+                    await db.execute(
+                        select(_Day).where(
+                            _Day.org_id == user.org_id,
+                            _Day.day_of_week == dow,
+                        )
+                    )
+                ).scalars().all()
+                base = next(
+                    (r for r in rows if getattr(r, "provider_id", None) is None),
+                    base,
+                )
+            except Exception:
+                pass
+        out.append(
+            ProviderDayOut(
+                day_of_week=dow,
+                is_active=bool(base.is_active) if base else False,
+                open_time=str(base.open_time) if base and base.open_time else None,
+                close_time=str(base.close_time) if base and base.close_time else None,
+                break_start=str(base.break_start) if base and base.break_start else None,
+                break_end=str(base.break_end) if base and base.break_end else None,
+                is_override=False,
+            )
+        )
+    return out
+
+
+@router.put("/providers/{provider_id}/schedule", response_model=List[ProviderDayOut])
+async def save_provider_schedule(
+    provider_id: str,
+    days: List[ProviderDayIn],
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    _perm: None = Depends(require_permission("catalog.manage")),
+):
+    """Replace this doctor's weekly override. Empty list clears overrides."""
+    import uuid as _uuid
+    from app.models.booking import ScheduleDay as _Day
+
+    provider = await _get_provider(db, user.org_id, provider_id)
+    seen = set()
+    for d in days:
+        if d.day_of_week in seen:
+            raise HTTPException(status_code=422, detail="Duplicate day_of_week")
+        seen.add(d.day_of_week)
+
+    for d in days:
+        row = (
+            await db.execute(
+                select(_Day).where(
+                    _Day.org_id == user.org_id,
+                    _Day.day_of_week == d.day_of_week,
+                    _Day.provider_id == provider.id,
+                )
+            )
+        ).scalars().first()
+        if row is None:
+            row = _Day(
+                id=_uuid.uuid4(),
+                org_id=user.org_id,
+                provider_id=provider.id,
+                day_of_week=d.day_of_week,
+            )
+            db.add(row)
+        row.is_active = bool(d.is_active)
+        from datetime import time as _time
+
+        def _parse(t):
+            if not t:
+                return None
+            t = str(t).strip()
+            try:
+                hh, mm = t.split(":")[:2]
+                return _time(int(hh), int(mm))
+            except Exception:
+                raise HTTPException(
+                    status_code=422, detail=f"Invalid time '{t}', use HH:MM"
+                )
+
+        row.open_time = _parse(d.open_time) if d.is_active else None
+        row.close_time = _parse(d.close_time) if d.is_active else None
+        row.break_start = _parse(d.break_start) if d.is_active else None
+        row.break_end = _parse(d.break_end) if d.is_active else None
+    await db.commit()
+    return await get_provider_schedule(provider_id, db, user)
+
+
+def _prov_time_str(v) -> Optional[str]:
+    return str(v) if v else None
+
+
+@router.get(
+    "/providers/{provider_id}/exceptions", response_model=List[ProviderExceptionOut]
+)
+async def list_provider_exceptions(
+    provider_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Off-days / custom hours for one doctor (doctor-specific only)."""
+    from app.models.booking import ScheduleException as _SE
+
+    provider = await _get_provider(db, user.org_id, provider_id)
+    rows = (
+        await db.execute(
+            select(_SE)
+            .where(
+                _SE.org_id == user.org_id,
+                _SE.provider_id == provider.id,
+            )
+            .order_by(_SE.exception_date)
+        )
+    ).scalars().all()
+    return [
+        ProviderExceptionOut(
+            id=str(r.id),
+            exception_date=r.exception_date.isoformat(),
+            exception_type=str(r.exception_type.value if hasattr(r.exception_type, "value") else r.exception_type),
+            custom_open=_prov_time_str(r.custom_open),
+            custom_close=_prov_time_str(r.custom_close),
+            reason=r.reason,
+        )
+        for r in rows
+    ]
+
+
+@router.post(
+    "/providers/{provider_id}/exceptions",
+    response_model=ProviderExceptionOut,
+    status_code=201,
+)
+async def create_provider_exception(
+    provider_id: str,
+    data: ProviderExceptionIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    _perm: None = Depends(require_permission("catalog.manage")),
+):
+    """Add an off-day / custom-hours override for one doctor."""
+    import uuid as _uuid
+    from datetime import date as _date
+    from datetime import time as _time
+    from app.models.booking import ExceptionType as _ET
+    from app.models.booking import ScheduleException as _SE
+
+    provider = await _get_provider(db, user.org_id, provider_id)
+    try:
+        exc_date = _date.fromisoformat(data.exception_date)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="exception_date must be YYYY-MM-DD")
+
+    etype = (data.exception_type or "CLOSED").strip().upper()
+    if etype not in ("CLOSED", "CUSTOM_HOURS"):
+        raise HTTPException(status_code=422, detail="exception_type must be CLOSED or CUSTOM_HOURS")
+
+    def _parse(t):
+        if not t:
+            return None
+        try:
+            hh, mm = str(t).strip().split(":")[:2]
+            return _time(int(hh), int(mm))
+        except Exception:
+            raise HTTPException(status_code=422, detail=f"Invalid time '{t}', use HH:MM")
+
+    if etype == "CUSTOM_HOURS" and (not data.custom_open or not data.custom_close):
+        raise HTTPException(status_code=422, detail="Custom hours need open + close")
+
+    old = (
+        await db.execute(
+            select(_SE).where(
+                _SE.org_id == user.org_id,
+                _SE.exception_date == exc_date,
+                _SE.provider_id == provider.id,
+            )
+        )
+    ).scalars().first()
+    if old is not None:
+        await db.delete(old)
+        await db.flush()
+
+    row = _SE(
+        id=_uuid.uuid4(),
+        org_id=user.org_id,
+        provider_id=provider.id,
+        exception_date=exc_date,
+        exception_type=_ET(etype),
+        custom_open=_parse(data.custom_open) if etype == "CUSTOM_HOURS" else None,
+        custom_close=_parse(data.custom_close) if etype == "CUSTOM_HOURS" else None,
+        reason=(data.reason or "").strip() or None,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    rows = await list_provider_exceptions(provider_id, db, user)
+    return next(r for r in rows if r.id == str(row.id))
+
+
+@router.delete("/providers/{provider_id}/exceptions/{exception_id}", status_code=204)
+async def delete_provider_exception(
+    provider_id: str,
+    exception_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    _: None = Depends(deny_impersonation),
+    _perm: None = Depends(require_permission("catalog.manage")),
+):
+    """Delete one doctor's off-day override."""
+    import uuid as _uuid
+    from app.models.booking import ScheduleException as _SE
+
+    provider = await _get_provider(db, user.org_id, provider_id)
+    row = (
+        await db.execute(
+            select(_SE).where(
+                _SE.id == _uuid.UUID(str(exception_id)),
+                _SE.org_id == user.org_id,
+                _SE.provider_id == provider.id,
+            )
+        )
+    ).scalars().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Exception not found")
+    await db.delete(row)
+    await db.commit()
+    return None
+
+
+@router.get("/providers/{provider_id}/schedule/preview")
+async def preview_provider_schedule(
+    provider_id: str,
+    date: str = Query(default=None, description="Start date YYYY-MM-DD"),
+    days: int = Query(default=7, ge=1, le=28),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Slot preview for one doctor — same engine as the business-hours preview."""
+    from datetime import date as _date
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    from app.engine.slot_engine import compute_slot_inventory
+
+    provider = await _get_provider(db, user.org_id, provider_id)
+    try:
+        start = _date.fromisoformat(date) if date else _dt.now().date()
+    except ValueError:
+        raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD")
+    out = []
+    for i in range(days):
+        day = start + _td(days=i)
+        inv, status = await compute_slot_inventory(
+            db, user.org_id, day, org_config=None, provider_id=provider.id
+        )
+        out.append(
+            {
+                "date": day.isoformat(),
+                "status": status,
+                "available_times": sorted(
+                    {
+                        item["start_utc"].strftime("%I:%M %p").lstrip("0")
+                        for item in (inv or [])
+                        if item.get("available")
+                    }
+                ),
+            }
+        )
+    return out
 
 
 @router.delete("/fees/{fee_id}", status_code=204)

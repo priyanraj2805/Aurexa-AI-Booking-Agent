@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -58,8 +58,10 @@ class InviteOut(BaseModel):
     role_code: str
     expires_at: datetime
     accepted_at: Optional[datetime] = None
-    # Returned once for dev/email-less setups so owner can share the link.
+    # Returned once so the owner can share/copy the full link.
     invite_token: Optional[str] = None
+    invite_link: Optional[str] = None
+    email_sent: bool = False
 
 
 class InviteAccept(BaseModel):
@@ -107,14 +109,36 @@ async def _member_out(
 # ── Invites ──
 
 
+def _public_frontend_base(request: Request) -> str:
+    """Public browser URL for building clickable invite links.
+
+    Prefers FRONTEND_URL when it is a real https domain, else the request's
+    own origin (works behind tunnels/gateway without extra config).
+    """
+    from app.core.config import settings
+
+    configured = (settings.FRONTEND_URL or "").strip().rstrip("/")
+    if configured.startswith("https://") and "localhost" not in configured:
+        return configured
+    origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    if origin.startswith(("https://", "http://")):
+        return origin
+    return configured or "http://localhost:3002"
+
+
 @router.post("/invites", response_model=InviteOut, status_code=201)
 async def create_invite(
     data: InviteCreate,
+    request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
     _: None = Depends(deny_impersonation),
     _perm: None = Depends(require_permission("users.manage")),
 ):
+    from app.core.org_mode import require_organization_for
+
+    await require_organization_for(db, user)
     email = data.email.lower().strip()
     if not email or "@" not in email:
         raise HTTPException(status_code=422, detail="Valid email is required")
@@ -166,12 +190,53 @@ async def create_invite(
     db.add(inv)
     await db.commit()
     await db.refresh(inv)
+
+    # Normal-website flow: email the clickable link right away (best-effort;
+    # the raw token is still returned so the owner can share it manually).
+    from app.models.organization import Organization as _Org
+
+    org = (
+        await db.execute(select(_Org).where(_Org.id == user.org_id))
+    ).scalars().first()
+    link = f"{_public_frontend_base(request)}/accept-invite?token={raw}"
+    email_sent = False
+    try:
+        from app.core.audit import log_audit_event
+        from app.core.mail import send_staff_invite_email
+        from app.schemas.audit import AuditAction
+
+        background_tasks.add_task(
+            send_staff_invite_email,
+            email,
+            getattr(org, "name", "your organization") if org else "your organization",
+            data.role_code,
+            link,
+        )
+        email_sent = True
+        log_audit_event(
+            background_tasks,
+            org_id=user.org_id,
+            actor_id=user.id,
+            actor_email=user.email,
+            action=AuditAction.STAFF_INVITE,
+            resource_type="staff_invite",
+            resource_id=str(inv.id),
+            old_values=None,
+            new_values={"email": email, "role": data.role_code},
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+    except Exception:
+        email_sent = False
+
     return InviteOut(
         id=str(inv.id),
         email=inv.email,
         role_code=inv.role_code,
         expires_at=inv.expires_at,
         invite_token=raw,
+        invite_link=link,
+        email_sent=email_sent,
     )
 
 
@@ -221,7 +286,7 @@ async def accept_invite(
     nu = User(
         id=uuid.uuid4(),
         email=inv.email,
-        hashed_password=hash_password(data.password),
+        hashed_password=hash_password(data.password.strip()),
         full_name=data.full_name.strip(),
         org_id=inv.org_id,
         is_active=True,
@@ -296,7 +361,7 @@ async def my_scope(
     user: User = Depends(get_current_user),
     principal=Depends(get_current_principal),
 ):
-    """What can I see? provider_id (my doctor row) + unit_ids (my floors)."""
+    """What can I see? provider + departments (names included for UI badges)."""
     scopes = (
         await db.execute(
             select(StaffUnitScope).where(StaffUnitScope.user_id == user.id)
@@ -309,9 +374,47 @@ async def my_scope(
             )
         )
     ).scalars().first()
+    unit_ids = [str(s.unit_id) for s in scopes]
+    unit_names: list[str] = []
+    provider_unit_names: list[str] = []
+    try:
+        from app.models.service_unit import ServiceUnit, UnitProvider
+
+        if unit_ids:
+            unit_names = [
+                r.name
+                for r in (
+                    await db.execute(
+                        select(ServiceUnit).where(ServiceUnit.id.in_([s.unit_id for s in scopes]))
+                    )
+                ).scalars().all()
+            ]
+        if prov is not None:
+            _links = (
+                await db.execute(
+                    select(UnitProvider).where(UnitProvider.provider_id == prov.id)
+                )
+            ).scalars().all()
+            if _links:
+                provider_unit_names = [
+                    r.name
+                    for r in (
+                        await db.execute(
+                            select(ServiceUnit).where(
+                                ServiceUnit.id.in_([a.unit_id for a in _links])
+                            )
+                        )
+                    ).scalars().all()
+                ]
+    except Exception:
+        unit_names = []
+        provider_unit_names = []
     return {
         "org_type": getattr(principal.org, "type", "individual"),
         "roles": principal.role_codes,
         "provider_id": str(prov.id) if prov else None,
-        "unit_ids": [str(s.unit_id) for s in scopes],
+        "provider_name": getattr(prov, "full_name", None),
+        "unit_ids": unit_ids,
+        "unit_names": unit_names,
+        "provider_unit_names": provider_unit_names,
     }

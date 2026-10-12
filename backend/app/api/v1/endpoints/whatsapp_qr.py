@@ -1546,10 +1546,20 @@ async def qr_inbound(    payload: QrInboundPayload,
                                 _weekly_q = None
                                 _excs_q = None
                                 try:
-                                    _sdq_res = await db.execute(_Selq(_SDq).where(_SDq.org_id == org.id))
+                                    _sdq_res = await db.execute(
+                                        _Selq(_SDq).where(
+                                            _SDq.org_id == org.id,
+                                            _SDq.provider_id.is_(None),
+                                        )
+                                    )
                                     _sdq = _sdq_res.scalars().all()
                                     _weekly_q = [{"day_of_week": r.day_of_week, "is_active": r.is_active, "open_time": r.open_time, "close_time": r.close_time} for r in _sdq]
-                                    _seq_res = await db.execute(_Selq(_SEq).where(_SEq.org_id == org.id))
+                                    _seq_res = await db.execute(
+                                        _Selq(_SEq).where(
+                                            _SEq.org_id == org.id,
+                                            _SEq.provider_id.is_(None),
+                                        )
+                                    )
                                     _seq = _seq_res.scalars().all()
                                     _excs_q = [{"exception_date": r.exception_date, "exception_type": str(r.exception_type), "custom_open": r.custom_open, "custom_close": r.custom_close} for r in _seq]
                                 except Exception:

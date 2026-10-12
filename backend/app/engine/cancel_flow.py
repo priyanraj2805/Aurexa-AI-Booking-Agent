@@ -556,6 +556,7 @@ async def maybe_abort_unbooked_draft(
             "selected_slot_start_utc",
             "locked_slot_id",
             "locked_slot_start_utc",
+            "_review_presented",
         ):
             _collected.pop(_stale, None)
         clear_cancel_flow(chat_session)
@@ -575,6 +576,7 @@ async def maybe_abort_unbooked_draft(
                 "selected_slot_start_utc",
                 "locked_slot_id",
                 "locked_slot_start_utc",
+                "_review_presented",
             ),
         )
         return ActionPayload(

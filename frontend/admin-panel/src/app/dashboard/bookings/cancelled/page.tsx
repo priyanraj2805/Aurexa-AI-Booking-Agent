@@ -34,6 +34,30 @@ export default function CancelledBookingsPage() {
   const [search, setSearch] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  const [unitFilter, setUnitFilter] = useState("");
+  const [providerFilter, setProviderFilter] = useState("");
+  const [filterUnits, setFilterUnits] = useState<{ id: string; name: string }[]>([]);
+  const [filterProviders, setFilterProviders] = useState<{ id: string; full_name: string; units: string[] }[]>([]);
+
+  useEffect(() => {
+    import("@/lib/org-api").then(({ orgApi }) =>
+      Promise.all([orgApi.units().catch(() => []), orgApi.providers().catch(() => [])]).then(([u, p]) => {
+        setFilterUnits((u as { id: string; name: string }[]).map((x) => ({ id: x.id, name: x.name })));
+        setFilterProviders(
+          (p as { id: string; full_name: string; units: string[] }[]).map((x) => ({ id: x.id, full_name: x.full_name, units: x.units || [] }))
+        );
+      })
+    ).catch(() => {});
+  }, []);
+
+  const visibleProviders = unitFilter ? filterProviders.filter((p) => p.units.includes(unitFilter)) : filterProviders;
+  useEffect(() => {
+    if (unitFilter && providerFilter && !visibleProviders.some((p) => p.id === providerFilter)) {
+      setProviderFilter("");
+      setPage(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unitFilter]);
 
   const searchParams = useSearchParams();
   const highlightId = searchParams.get("highlight");
@@ -48,7 +72,7 @@ export default function CancelledBookingsPage() {
     }
   }, [searchParams]);
 
-  const { data, loading, error } = useCancelledBookings(page, 10, { search, fromDate, toDate });
+  const { data, loading, error } = useCancelledBookings(page, 10, { search, fromDate, toDate, unit_id: unitFilter || undefined, provider_id: providerFilter || undefined });
 
   const isHighlighted = (b: { id: string; booking_id?: string | null }) =>
     highlightedId === b.id || (b.booking_id != null && highlightedId === b.booking_id);
@@ -94,6 +118,30 @@ export default function CancelledBookingsPage() {
             onFromChange={(v) => { setFromDate(v); setPage(1); }}
             onToChange={(v) => { setToDate(v); setPage(1); }}
           />
+          {!!filterUnits.length && (
+            <select
+              value={unitFilter}
+              onChange={(e) => { setUnitFilter(e.target.value); setPage(1); }}
+              className="h-9 rounded-md border border-border bg-background px-3 text-xs"
+            >
+              <option value="">All departments</option>
+              {filterUnits.map((u) => (
+                <option key={u.id} value={u.id}>{u.name}</option>
+              ))}
+            </select>
+          )}
+          {!!filterProviders.length && (
+            <select
+              value={providerFilter}
+              onChange={(e) => { setProviderFilter(e.target.value); setPage(1); }}
+              className="h-9 rounded-md border border-border bg-background px-3 text-xs"
+            >
+              <option value="">All members</option>
+              {visibleProviders.map((p) => (
+                <option key={p.id} value={p.id}>{p.full_name}</option>
+              ))}
+            </select>
+          )}
         </div>
 
         {loading ? (
@@ -133,6 +181,12 @@ export default function CancelledBookingsPage() {
                     </div>
                     <div className="flex-1 min-w-0 space-y-1">
                       <div className="font-medium text-[13px]">{b.customer_name}</div>
+                      {(b.unit_name || b.provider_name) && (
+                        <div className="flex gap-1">
+                          {b.unit_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-secondary">{b.unit_name}</span>}
+                          {b.provider_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">{b.provider_name}</span>}
+                        </div>
+                      )}
                       <div className="text-[11px] text-muted-foreground truncate">{b.customer_email}</div>
                       {b.customer_phone && (
                         <div className="text-[11px] text-muted-foreground">{b.customer_phone}</div>
@@ -176,6 +230,12 @@ export default function CancelledBookingsPage() {
                           </div>
                           <div>
                             <div className="font-medium">{b.customer_name}</div>
+                            {(b.unit_name || b.provider_name) && (
+                              <div className="flex gap-1 mt-1">
+                                {b.unit_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-secondary">{b.unit_name}</span>}
+                                {b.provider_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">{b.provider_name}</span>}
+                              </div>
+                            )}
                           </div>
                         </div>
                       </td>

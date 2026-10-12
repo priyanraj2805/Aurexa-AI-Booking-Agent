@@ -276,7 +276,12 @@ async def generate_for_next_step(db, org_id, session_id, customer_id, missing_fi
                     _sched = _sched_res.scalars().first()
                     if _sched:
                         _slot_mins = getattr(_sched, "slot_duration_minutes", None)
-                        _sd_res = await db.execute(_sel2(_SD).where(_SD.org_id == org_id))
+                        _sd_res = await db.execute(
+                            _sel2(_SD).where(
+                                _SD.org_id == org_id,
+                                _SD.provider_id.is_(None),
+                            )
+                        )
                         _sched_days = _sd_res.scalars().all()
                         _weekly = [
                             {"day_of_week": r.day_of_week, "is_active": r.is_active, "open_time": r.open_time, "close_time": r.close_time}
@@ -423,13 +428,23 @@ async def generate_for_next_step(db, org_id, session_id, customer_id, missing_fi
                             try:
                                 from app.models.booking import BusinessSchedule as _BS3a, ScheduleDay as _SD3a, ScheduleException as _SE3a
                                 from sqlalchemy.future import select as _sel3a
-                                _sd3_res = await db.execute(_sel3a(_SD3a).where(_SD3a.org_id == org_id))
+                                _sd3_res = await db.execute(
+                                    _sel3a(_SD3a).where(
+                                        _SD3a.org_id == org_id,
+                                        _SD3a.provider_id.is_(None),
+                                    )
+                                )
                                 _sd3 = _sd3_res.scalars().all()
                                 _weekly2 = [
                                     {"day_of_week": r.day_of_week, "is_active": r.is_active, "open_time": r.open_time, "close_time": r.close_time}
                                     for r in _sd3
                                 ]
-                                _se3_res = await db.execute(_sel3a(_SE3a).where(_SE3a.org_id == org_id))
+                                _se3_res = await db.execute(
+                                    _sel3a(_SE3a).where(
+                                        _SE3a.org_id == org_id,
+                                        _SE3a.provider_id.is_(None),
+                                    )
+                                )
                                 _se3 = _se3_res.scalars().all()
                                 _excs2 = [
                                     {"exception_date": r.exception_date, "exception_type": str(r.exception_type), "custom_open": r.custom_open, "custom_close": r.custom_close}

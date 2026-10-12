@@ -20,6 +20,8 @@ import {
   Upload,
   Trash2,
   Link as LinkIcon,
+  Building2,
+  Users,
 } from "lucide-react";
 
 import {
@@ -72,8 +74,29 @@ const navSettings = [
   { title: "Integration", url: "/dashboard/integrations", icon: Plug },
 ];
 
+const navOrg = [
+  { title: "Departments", url: "/dashboard/departments", icon: Building2 },
+  { title: "Staff", url: "/dashboard/staff", icon: Users },
+];
+
+/** Display name that never repeats the email (some accounts saved email as name). */
+function displayName(user: { full_name?: string | null; email?: string | null } | null): string {
+  const raw = (user?.full_name || "").trim();
+  if (raw && !raw.includes("@")) return raw;
+  const prefix = (user?.email || "").split("@")[0].replace(/[._-]+/g, " ").trim();
+  if (prefix) return prefix.charAt(0).toUpperCase() + prefix.slice(1);
+  return "User";
+}
+
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
-  const { user, logout, refresh } = useAuth();
+  const { user, logout, refresh, isDoctor, scope } = useAuth();
+  // Linked member's departments for the badge (e.g. Cardiology +2).
+  const scopeDeptNames = scope?.provider_unit_names?.length
+    ? scope.provider_unit_names
+    : scope?.unit_names || [];
+  const deptBadge = scopeDeptNames.length > 1
+    ? `${scopeDeptNames[0]} +${scopeDeptNames.length - 1}`
+    : scopeDeptNames[0] || "";
   const { theme, setTheme } = useTheme();
   const pathname = usePathname();
   const router = useRouter();
@@ -167,14 +190,20 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     }
   }, [pathname, isMobile, openMobile]);
 
-  const initials = user?.full_name
-    ? user.full_name
+  // Linked logins show the member name the org admin entered in Departments,
+  // not the login account's own name.
+  const shownName =
+    isDoctor && scope?.provider_name ? scope.provider_name : displayName(user);
+  const initials = (() => {
+    return (
+      shownName
         .split(" ")
         .map((n) => n[0])
         .join("")
         .toUpperCase()
-        .slice(0, 2)
-    : "DS";
+        .slice(0, 2) || "DS"
+    );
+  })();
 
   // On mobile: stop the default Link navigation, close the drawer, then navigate.
   // Base UI's useRender overwrites onClick passed inside render={<Link/>}, so we
@@ -258,7 +287,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         {/* ── Separator (Only visible in icon mode) ── */}
         <div className="w-full h-0 bg-border opacity-0 transition-all duration-250 ease-in-out group-data-[collapsible=icon]:h-px group-data-[collapsible=icon]:my-2 group-data-[collapsible=icon]:opacity-100" />
 
-        {/* ── Settings Section ── */}
+        {/* ── Settings Section — hidden for linked doctors (org manages it) ── */}
+        {!isDoctor && (
         <div className="mt-1">
           <p
             className={[
@@ -300,6 +330,52 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             ))}
           </SidebarMenu>
         </div>
+        )}
+
+        {/* ── Organization Section — hospital malls only, never for linked doctors ── */}
+        {(user as unknown as { org_type?: string })?.org_type === "organization" && !isDoctor && (
+          <div className="mt-1">
+            <p
+              className={[
+                "text-[11px] font-semibold uppercase tracking-wider text-muted-foreground px-2",
+                "transition-[opacity,max-height,padding] duration-250 ease-in-out overflow-hidden",
+                "max-h-8 opacity-100 py-1.5",
+                "group-data-[collapsible=icon]:max-h-0 group-data-[collapsible=icon]:opacity-0 group-data-[collapsible=icon]:py-0",
+              ].join(" ")}
+            >
+              Organization
+            </p>
+            <SidebarMenu className="gap-1 px-1 transition-[padding] duration-250 ease-in-out group-data-[collapsible=icon]:px-0">
+              {navOrg.map((item) => (
+                <SidebarMenuItem key={item.title}>
+                  <SidebarMenuButton
+                    isActive={isActive(item.url)}
+                    tooltip={item.title}
+                    onClick={handleNavClick(item.url)}
+                    className={[
+                      "h-10 cursor-pointer rounded-lg text-[13px] transition-all duration-200",
+                      "text-muted-foreground hover:text-foreground hover:bg-accent",
+                      "data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:font-medium data-[active=true]:shadow-sm data-[active=true]:!ring-0",
+                      "group-data-[collapsible=icon]:w-10 group-data-[collapsible=icon]:h-10 group-data-[collapsible=icon]:!p-0 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:mx-auto group-data-[collapsible=icon]:!gap-0",
+                    ].join(" ")}
+                    render={<Link href={item.url} prefetch={false} />}
+                  >
+                    <item.icon className="size-5 shrink-0" />
+                    <span
+                      className={[
+                        "transition-[opacity,max-width,margin] duration-200 ease-in-out overflow-hidden whitespace-nowrap",
+                        "group-data-[collapsible=icon]:opacity-0 group-data-[collapsible=icon]:max-w-0 group-data-[collapsible=icon]:!ml-0",
+                        "max-w-[160px] opacity-100 ml-2",
+                      ].join(" ")}
+                    >
+                      {item.title}
+                    </span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
+            </SidebarMenu>
+          </div>
+        )}
       </SidebarContent>
 
       {/* ── Footer — user dropdown (settings + sign out) ── */}
@@ -339,27 +415,48 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               ].join(" ")}
             >
               <span className="font-semibold text-[13px] truncate">
-                {user?.full_name || "User"}
+                {shownName}
               </span>
               <span className="text-xs text-muted-foreground truncate">
                 {user?.org_name || "Organization"}
+              </span>
+              <span
+                className={[
+                  "mt-1 w-fit text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded",
+                  (user as unknown as { org_type?: string })?.org_type === "organization"
+                    ? "bg-primary/15 text-primary"
+                    : "bg-secondary text-muted-foreground",
+                ].join(" ")}
+              >
+                {isDoctor
+                  ? (deptBadge || "Team member")
+                  : (user as unknown as { org_type?: string })?.org_type === "organization"
+                    ? "🏥 Organization"
+                    : "🧍 Individual"}
               </span>
             </div>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" side="top" className="w-52">
             <DropdownMenuGroup>
-              <DropdownMenuLabel className="truncate text-xs text-muted-foreground font-normal">
-                {user?.email}
+              <DropdownMenuLabel className="font-normal">
+                <span className="block truncate text-sm font-semibold text-foreground">
+                  {shownName}
+                </span>
+                <span className="block truncate text-xs text-muted-foreground">
+                  {user?.email}
+                </span>
               </DropdownMenuLabel>
             </DropdownMenuGroup>
             <DropdownMenuSeparator />
-            <DropdownMenuItem
-              render={<Link href="/dashboard/settings" />}
-              className="cursor-pointer"
-            >
-              <Settings className="size-4" />
-              Settings
-            </DropdownMenuItem>
+            {(user?.permissions || []).some((p) => p === "settings.view" || p === "settings.manage") && (
+              <DropdownMenuItem
+                render={<Link href="/dashboard/settings" />}
+                className="cursor-pointer"
+              >
+                <Settings className="size-4" />
+                Settings
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSub>
               <DropdownMenuSubTrigger className="cursor-pointer">
                 <ImageIcon className="size-4" />
@@ -390,13 +487,15 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 )}
               </DropdownMenuSubContent>
             </DropdownMenuSub>
-            <DropdownMenuItem
-              render={<Link href="/dashboard/billing" />}
-              className="cursor-pointer"
-            >
-              <CreditCard className="size-4" />
-              Billing
-            </DropdownMenuItem>
+            {(user?.permissions || []).includes("billing.view") && (
+              <DropdownMenuItem
+                render={<Link href="/dashboard/billing" />}
+                className="cursor-pointer"
+              >
+                <CreditCard className="size-4" />
+                Billing
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem
               render={<Link href="/dashboard/support" />}
               className="cursor-pointer"

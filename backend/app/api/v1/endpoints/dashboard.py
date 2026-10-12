@@ -95,6 +95,28 @@ async def _member_provider_id(db, user: User):
         return row
     except Exception:
         return None
+
+
+async def _member_scope(db, user: User) -> tuple:
+    """(provider_id, unit_ids) for staff scoping.
+
+    Returns (None, []) for owners/managers/individual users — meaning NO
+    restriction, so individual orgs and old flows behave exactly as before.
+    """
+    provider_id = await _member_provider_id(db, user)
+    unit_ids: list = []
+    try:
+        from app.models.staff import StaffUnitScope
+
+        rows = (
+            await db.execute(
+                select(StaffUnitScope.unit_id).where(StaffUnitScope.user_id == user.id)
+            )
+        ).all()
+        unit_ids = [r[0] for r in rows]
+    except Exception:
+        unit_ids = []
+    return provider_id, unit_ids
 MAX_SELECT_OPTIONS = 50
 CORE_FIELD_NAMES = {"name", "email", "phone", "date", "time"}
 
@@ -451,6 +473,10 @@ class BookingItem(BaseModel):
     slot_start: Optional[datetime]
     slot_end: Optional[datetime]
     created_at: datetime
+    unit_id: Optional[str] = None
+    unit_name: Optional[str] = None
+    provider_id: Optional[str] = None
+    provider_name: Optional[str] = None
 
 
 class GlobalSearchBooking(BaseModel):
@@ -495,6 +521,10 @@ class BookingPageItem(BaseModel):
     attended_at: Optional[datetime] = None
     attendance_notes: Optional[str] = None
     cancellation_reason: Optional[str] = None
+    unit_id: Optional[str] = None
+    unit_name: Optional[str] = None
+    provider_id: Optional[str] = None
+    provider_name: Optional[str] = None
 
 
 class BookingPageResponse(BaseModel):
@@ -513,6 +543,10 @@ class CancelledBookingItem(BaseModel):
     booking_time: Optional[str] = None
     cancelled_at: Optional[datetime] = None
     booking_id: Optional[str] = None
+    unit_id: Optional[str] = None
+    unit_name: Optional[str] = None
+    provider_id: Optional[str] = None
+    provider_name: Optional[str] = None
 
 
 class CancelledBookingPageResponse(BaseModel):
@@ -534,6 +568,10 @@ class ConversationItem(BaseModel):
     customer_name: Optional[str] = None
     customer_email: Optional[str] = None
     customer_phone: Optional[str] = None
+    unit_id: Optional[str] = None
+    unit_name: Optional[str] = None
+    provider_id: Optional[str] = None
+    provider_name: Optional[str] = None
 
 
 class AgentConfigResponse(BaseModel):
@@ -630,33 +668,47 @@ async def get_stats(
     db: AsyncSession = Depends(get_db),
     days: int = Query(default=14, ge=7, le=90),
 ):
-    """Overview statistics for the current org."""
+    """Overview statistics for the current org.
+
+    Staff scoping: a doctor login sees only own bookings/sessions, a dept
+    manager only his units. Owners and individual users have no scope, so
+    their numbers are byte-identical to before this change.
+    """
     org_id = user.org_id
+    _scope_provider, _scope_units = await _member_scope(db, user)
+
+    def _scoped(model, *extra):
+        preds = [model.org_id == org_id, *extra]
+        if _scope_provider is not None and hasattr(model, "provider_id"):
+            preds.append(model.provider_id == _scope_provider)
+        elif _scope_units and hasattr(model, "unit_id"):
+            preds.append(model.unit_id.in_(_scope_units))
+        return preds
 
     # Total bookings
     total_bookings_sq = (
         select(sa_func.count())
         .select_from(Booking)
-        .where(Booking.org_id == org_id)
+        .where(*_scoped(Booking))
         .scalar_subquery()
     )
 
     active_sessions_sq = (
         select(sa_func.count())
         .select_from(ChatSession)
-        .where(ChatSession.org_id == org_id, ChatSession.session_status == "ACTIVE")
+        .where(*_scoped(ChatSession, ChatSession.session_status == "ACTIVE"))
         .scalar_subquery()
     )
     confirmed_sessions_sq = (
         select(sa_func.count())
         .select_from(ChatSession)
-        .where(ChatSession.org_id == org_id, ChatSession.session_status == "CONFIRMED")
+        .where(*_scoped(ChatSession, ChatSession.session_status == "CONFIRMED"))
         .scalar_subquery()
     )
     cancelled_sessions_sq = (
         select(sa_func.count())
         .select_from(ChatSession)
-        .where(ChatSession.org_id == org_id, ChatSession.session_status == "CANCELLED")
+        .where(*_scoped(ChatSession, ChatSession.session_status == "CANCELLED"))
         .scalar_subquery()
     )
 
@@ -677,7 +729,7 @@ async def get_stats(
     bookings_week_sq = (
         select(sa_func.count())
         .select_from(Booking)
-        .where(Booking.org_id == org_id, Booking.created_at >= week_ago)
+        .where(*_scoped(Booking, Booking.created_at >= week_ago))
         .scalar_subquery()
     )
     unresolved_alerts_total_sq = (
@@ -721,24 +773,28 @@ async def get_stats(
 
     booking_rows = await db.execute(
         select(sa_cast(Booking.created_at, sa_date).label("day"), sa_func.count().label("c"))
-        .where(Booking.org_id == org_id, Booking.created_at >= days_ago)
+        .where(*_scoped(Booking, Booking.created_at >= days_ago))
         .group_by("day")
     )
     cancelled_rows = await db.execute(
         select(sa_cast(ChatSession.created_at, sa_date).label("day"), sa_func.count().label("c"))
         .where(
-            ChatSession.org_id == org_id,
-            ChatSession.session_status == "CANCELLED",
-            ChatSession.created_at >= days_ago,
+            *_scoped(
+                ChatSession,
+                ChatSession.session_status == "CANCELLED",
+                ChatSession.created_at >= days_ago,
+            )
         )
         .group_by("day")
     )
     channel_rows = await db.execute(
         select(ChatSession.channel, sa_func.count())
         .where(
-            ChatSession.org_id == org_id,
-            ChatSession.session_status == "CONFIRMED",
-            ChatSession.channel.isnot(None),
+            *_scoped(
+                ChatSession,
+                ChatSession.session_status == "CONFIRMED",
+                ChatSession.channel.isnot(None),
+            )
         )
         .group_by(ChatSession.channel)
     )
@@ -747,20 +803,24 @@ async def get_stats(
     web_booking_rows = await db.execute(
         select(sa_cast(ChatSession.created_at, sa_date).label("day"), sa_func.count().label("c"))
         .where(
-            ChatSession.org_id == org_id,
-            ChatSession.session_status == "CONFIRMED",
-            ChatSession.channel == "web",
-            ChatSession.created_at >= days_ago,
+            *_scoped(
+                ChatSession,
+                ChatSession.session_status == "CONFIRMED",
+                ChatSession.channel == "web",
+                ChatSession.created_at >= days_ago,
+            )
         )
         .group_by("day")
     )
     whatsapp_booking_rows = await db.execute(
         select(sa_cast(ChatSession.created_at, sa_date).label("day"), sa_func.count().label("c"))
         .where(
-            ChatSession.org_id == org_id,
-            ChatSession.session_status == "CONFIRMED",
-            ChatSession.channel == "whatsapp",
-            ChatSession.created_at >= days_ago,
+            *_scoped(
+                ChatSession,
+                ChatSession.session_status == "CONFIRMED",
+                ChatSession.channel == "whatsapp",
+                ChatSession.created_at >= days_ago,
+            )
         )
         .group_by("day")
     )
@@ -807,6 +867,266 @@ async def get_dependency_health(
     )
 
 
+class TopBreakdownItem(BaseModel):
+    id: Optional[str] = None
+    name: str
+    bookings: int
+
+
+class TopBreakdownResponse(BaseModel):
+    units: List[TopBreakdownItem] = []
+    providers: List[TopBreakdownItem] = []
+
+
+class RevenueBreakdownItem(BaseModel):
+    id: Optional[str] = None
+    name: str
+    role_label: Optional[str] = None
+    bookings: int
+    gross_revenue_paise: int
+    collected_revenue_paise: int
+
+
+class RevenueTotals(BaseModel):
+    bookings: int
+    gross_revenue_paise: int
+    collected_revenue_paise: int
+
+
+class RevenueResponse(BaseModel):
+    days: int
+    totals: RevenueTotals
+    by_department: List[RevenueBreakdownItem] = []
+    by_member: List[RevenueBreakdownItem] = []
+
+
+@router.get("/revenue", response_model=RevenueResponse)
+async def get_revenue(
+    days: int = Query(default=30, ge=1, le=365),
+    unit_id: Optional[str] = Query(
+        default=None,
+        description="When set, team-member revenue is scoped to this department's bookings only",
+    ),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Revenue per department and team member for the last N days.
+
+    Two metrics, both org-scoped and staff-scoped like the rest of the
+    dashboard (doctors see only their own numbers, department managers
+    only their units):
+      * gross revenue — the booked amount (provider fee or appointment
+        price) of every booking that still counts. CANCELLED and
+        RESCHEDULED rows are excluded: the first is void, the second is
+        superseded by the new booking row and would double-charge.
+      * collected revenue — the slice with payment_status "paid".
+
+    ``unit_id`` narrows the team-member breakdown to that department's
+    bookings (the department list and totals stay org-wide), matching
+    the tap-a-department interaction of the Departments/Team cards.
+
+    Bookings without a department or team member still carry revenue, so
+    they are reported under "Unassigned" and the breakdown sums match the
+    totals.
+    """
+    from datetime import timedelta
+    from sqlalchemy import case as sa_case
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    _sp, _su = await _member_scope(db, user)
+    base = [
+        Booking.org_id == user.org_id,
+        Booking.created_at >= since,
+        # CANCELLED is void, RESCHEDULED rows are superseded by the new
+        # booking row. NULL status (legacy rows) still counts as revenue.
+        or_(
+            Booking.attendance_status.is_(None),
+            Booking.attendance_status.notin_(["CANCELLED", "RESCHEDULED"]),
+        ),
+    ]
+    if _sp is not None:
+        base.append(Booking.provider_id == _sp)
+    elif _su:
+        base.append(Booking.unit_id.in_(_su))
+
+    gross_expr = sa_func.coalesce(Booking.amount_paise, 0)
+    collected_expr = sa_case(
+        (Booking.payment_status == "paid", sa_func.coalesce(Booking.amount_paise, 0)),
+        else_=0,
+    )
+
+    async def _revenue_group(group_col, conds):
+        return (
+            await db.execute(
+                select(
+                    group_col,
+                    sa_func.count().label("bookings"),
+                    sa_func.coalesce(sa_func.sum(gross_expr), 0).label("gross"),
+                    sa_func.coalesce(sa_func.sum(collected_expr), 0).label("paid"),
+                )
+                .where(*conds)
+                .group_by(group_col)
+                .order_by(sa_func.sum(gross_expr).desc())
+            )
+        ).all()
+
+    total_row = (
+        await db.execute(
+            select(
+                sa_func.count().label("bookings"),
+                sa_func.coalesce(sa_func.sum(gross_expr), 0).label("gross"),
+                sa_func.coalesce(sa_func.sum(collected_expr), 0).label("paid"),
+            ).where(*base)
+        )
+    ).one()
+
+    unit_rows = await _revenue_group(Booking.unit_id, base)
+
+    member_base = list(base)
+    if unit_id:
+        try:
+            import uuid as _uuid
+
+            member_base.append(Booking.unit_id == _uuid.UUID(str(unit_id)))
+        except Exception:
+            pass
+    prov_rows = await _revenue_group(Booking.provider_id, member_base)
+
+    from app.models.service_unit import Provider as _PV, ServiceUnit as _SU
+
+    async def _name_map(model, ids, name_attr, extra_attr=None):
+        out: Dict[Any, Dict[str, Any]] = {}
+        real_ids = [i for i in ids if i is not None]
+        if not real_ids:
+            return out
+        rows = (
+            await db.execute(select(model).where(model.id.in_(real_ids)))
+        ).scalars().all()
+        for row in rows:
+            out[row.id] = {
+                "name": getattr(row, name_attr, "") or "",
+                "extra": getattr(row, extra_attr, None) if extra_attr else None,
+            }
+        return out
+
+    unit_ids = [r[0] for r in unit_rows]
+    prov_ids = [r[0] for r in prov_rows]
+    unit_names = await _name_map(_SU, unit_ids, "name")
+    prov_names = await _name_map(_PV, prov_ids, "full_name", "role_label")
+
+    def _items(rows, names, unassigned_label):
+        items: List[RevenueBreakdownItem] = []
+        for gid, count, gross, paid in rows:
+            info = names.get(gid)
+            items.append(
+                RevenueBreakdownItem(
+                    id=str(gid) if gid is not None else None,
+                    name=(info["name"] if info and info.get("name") else unassigned_label),
+                    role_label=(info.get("extra") if info else None),
+                    bookings=int(count or 0),
+                    gross_revenue_paise=int(gross or 0),
+                    collected_revenue_paise=int(paid or 0),
+                )
+            )
+        return items
+
+    return RevenueResponse(
+        days=days,
+        totals=RevenueTotals(
+            bookings=int(total_row.bookings or 0),
+            gross_revenue_paise=int(total_row.gross or 0),
+            collected_revenue_paise=int(total_row.paid or 0),
+        ),
+        by_department=_items(unit_rows, unit_names, "Unassigned"),
+        by_member=_items(prov_rows, prov_names, "Unassigned"),
+    )
+
+
+@router.get("/top-breakdown", response_model=TopBreakdownResponse)
+async def get_top_breakdown(
+    days: int = Query(default=30, ge=1, le=365),
+    limit: int = Query(default=5, ge=1, le=20),
+    unit_id: Optional[str] = Query(default=None, description="When set, doctors are ranked within this department only"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Top departments + doctors by bookings in the last N days.
+
+    Owner view for organization dashboards. Individual orgs have no
+    units/providers, so both lists come back empty and the UI hides the
+    strip — individual behavior unchanged.
+    """
+    from datetime import timedelta
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    _sp, _su = await _member_scope(db, user)
+    base = [Booking.org_id == user.org_id, Booking.created_at >= since]
+    # Staff-scoped like the rest of the dashboard (doctor sees own only).
+    if _sp is not None:
+        base.append(Booking.provider_id == _sp)
+    elif _su:
+        base.append(Booking.unit_id.in_(_su))
+
+    unit_rows = (
+        await db.execute(
+            select(Booking.unit_id, sa_func.count().label("c"))
+            .where(*base, Booking.unit_id.isnot(None))
+            .group_by(Booking.unit_id)
+            .order_by(sa_func.count().desc())
+            .limit(limit)
+        )
+    ).all()
+    prov_base = list(base)
+    if unit_id:
+        try:
+            import uuid as _uuid
+
+            prov_base.append(Booking.unit_id == _uuid.UUID(str(unit_id)))
+        except Exception:
+            pass
+    prov_rows = (
+        await db.execute(
+            select(Booking.provider_id, sa_func.count().label("c"))
+            .where(*prov_base, Booking.provider_id.isnot(None))
+            .group_by(Booking.provider_id)
+            .order_by(sa_func.count().desc())
+            .limit(limit)
+        )
+    ).all()
+
+    from app.models.service_unit import Provider as _PV, ServiceUnit as _SU
+
+    units_out: List[TopBreakdownItem] = []
+    if unit_rows:
+        _umap = {
+            r.id: r.name
+            for r in (
+                await db.execute(
+                    select(_SU).where(_SU.id.in_([r[0] for r in unit_rows]))
+                )
+            ).scalars().all()
+        }
+        units_out = [
+            TopBreakdownItem(id=str(r[0]), name=_umap.get(r[0], "Department"), bookings=r[1])
+            for r in unit_rows
+        ]
+    providers_out: List[TopBreakdownItem] = []
+    if prov_rows:
+        _pmap = {
+            r.id: r.full_name
+            for r in (
+                await db.execute(
+                    select(_PV).where(_PV.id.in_([r[0] for r in prov_rows]))
+                )
+            ).scalars().all()
+        }
+        providers_out = [
+            TopBreakdownItem(id=str(r[0]), name=_pmap.get(r[0], "Doctor"), bookings=r[1])
+            for r in prov_rows
+        ]
+    return TopBreakdownResponse(units=units_out, providers=providers_out)
+
+
 # Calendar view - primary schema for calendar events
 class CalendarEventItem(BaseModel):
     id: str
@@ -821,6 +1141,11 @@ class CalendarEventItem(BaseModel):
     meeting_link_status: Optional[str] = None
     meeting_link_url: Optional[str] = None
     meeting_link_provider: Optional[str] = None
+    # Org-mode: which department + doctor this booking belongs to
+    unit_id: Optional[str] = None
+    unit_name: Optional[str] = None
+    provider_id: Optional[str] = None
+    provider_name: Optional[str] = None
 
 
 @router.get("/recent-bookings", response_model=List[BookingItem])
@@ -829,18 +1154,49 @@ async def get_recent_bookings(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List recent bookings for the current org (JOIN eliminates N+1)."""
+    """List recent bookings for the current org (JOIN eliminates N+1).
+
+    Staff-scoped: doctor logins see only their own recent bookings.
+    """
     from sqlalchemy.orm import selectinload
+
+    _sp, _su = await _member_scope(db, user)
+    _preds = [Booking.org_id == user.org_id]
+    if _sp is not None:
+        _preds.append(Booking.provider_id == _sp)
+    elif _su:
+        _preds.append(Booking.unit_id.in_(_su))
 
     # Single query with JOIN instead of N+1 loop
     result = await db.execute(
         select(Booking, TimeSlot)
         .outerjoin(TimeSlot, Booking.slot_id == TimeSlot.id)
-        .where(Booking.org_id == user.org_id)
+        .where(*_preds)
         .order_by(Booking.created_at.desc())
         .limit(limit)
     )
     rows = result.all()
+
+    try:
+        from app.models.service_unit import Provider as _PV, ServiceUnit as _SU
+
+        _pids = {b.provider_id for b, _ in rows if b.provider_id}
+        _uids = {b.unit_id for b, _ in rows if b.unit_id}
+        _pmap: dict = {}
+        _umap: dict = {}
+        if _pids:
+            for _p in (
+                await db.execute(select(_PV).where(_PV.id.in_(_pids)))
+            ).scalars().all():
+                _pmap[_p.id] = _p.full_name
+        if _uids:
+            for _u in (
+                await db.execute(select(_SU).where(_SU.id.in_(_uids)))
+            ).scalars().all():
+                _umap[_u.id] = _u.name
+    except Exception:
+        _pmap = {}
+        _umap = {}
 
     items = []
     for b, slot in rows:
@@ -853,6 +1209,10 @@ async def get_recent_bookings(
                 slot_start=slot.start_time if slot else None,
                 slot_end=slot.end_time if slot else None,
                 created_at=b.created_at,
+                unit_id=str(b.unit_id) if b.unit_id else None,
+                unit_name=_umap.get(b.unit_id) if b.unit_id else None,
+                provider_id=str(b.provider_id) if b.provider_id else None,
+                provider_name=_pmap.get(b.provider_id) if b.provider_id else None,
             )
         )
     return items
@@ -941,13 +1301,39 @@ async def get_conversations(
     to_date: Optional[str] = Query(None),
     sort_by: str = Query("updated_at", pattern="^(created_at|updated_at|session_status|current_intent|channel)$"),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
+    unit_id: Optional[str] = Query(default=None, description="Filter by department"),
+    provider_id: Optional[str] = Query(default=None, description="Filter by team member"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List chat sessions for the current org (paginated)."""
+    """List chat sessions for the current org (paginated).
+
+    Staff-scoped: doctor logins see only their own chats, dept managers
+    only their units. Unscoped users (owners, individuals) see everything.
+    Explicit unit_id/provider_id narrow further (same pattern as /bookings).
+    """
     from datetime import timedelta
 
     predicates = [ChatSession.org_id == user.org_id]
+    _sp, _su = await _member_scope(db, user)
+    if _sp is not None:
+        predicates.append(ChatSession.provider_id == _sp)
+    elif _su:
+        predicates.append(ChatSession.unit_id.in_(_su))
+    if unit_id:
+        try:
+            import uuid as _uuid
+
+            predicates.append(ChatSession.unit_id == _uuid.UUID(str(unit_id)))
+        except Exception:
+            pass
+    if provider_id:
+        try:
+            import uuid as _uuid2
+
+            predicates.append(ChatSession.provider_id == _uuid2.UUID(str(provider_id)))
+        except Exception:
+            pass
     if not include_archived:
         predicates.append(ChatSession.session_status != "ARCHIVED")
         predicates.append(ChatSession.archived_at.is_(None))
@@ -999,6 +1385,27 @@ async def get_conversations(
     )
     sessions = result.scalars().all()
 
+    try:
+        from app.models.service_unit import Provider as _PV, ServiceUnit as _SU
+
+        _pids = {s.provider_id for s in sessions if getattr(s, "provider_id", None)}
+        _uids = {s.unit_id for s in sessions if getattr(s, "unit_id", None)}
+        _pmap: dict = {}
+        _umap: dict = {}
+        if _pids:
+            for _p in (
+                await db.execute(select(_PV).where(_PV.id.in_(_pids)))
+            ).scalars().all():
+                _pmap[_p.id] = _p.full_name
+        if _uids:
+            for _u in (
+                await db.execute(select(_SU).where(_SU.id.in_(_uids)))
+            ).scalars().all():
+                _umap[_u.id] = _u.name
+    except Exception:
+        _pmap = {}
+        _umap = {}
+
     return {
         "items": [
             ConversationItem(
@@ -1013,6 +1420,10 @@ async def get_conversations(
                 customer_name=_clean_customer_value((s.state_data or {}).get("name")),
                 customer_email=_clean_customer_value((s.state_data or {}).get("email")),
                 customer_phone=_clean_customer_value((s.state_data or {}).get("phone")),
+                unit_id=str(s.unit_id) if getattr(s, "unit_id", None) else None,
+                unit_name=_umap.get(s.unit_id) if getattr(s, "unit_id", None) else (s.state_data or {}).get("unit_name"),
+                provider_id=str(s.provider_id) if getattr(s, "provider_id", None) else None,
+                provider_name=_pmap.get(s.provider_id) if getattr(s, "provider_id", None) else (s.state_data or {}).get("provider_name"),
             )
             for s in sessions
         ],
@@ -1032,10 +1443,12 @@ async def list_bookings(
     meeting_mode: Optional[str] = Query(None, pattern="^(ONLINE|OFFLINE)$"),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
+    unit_id: Optional[str] = Query(default=None, description="Filter by department"),
+    provider_id: Optional[str] = Query(default=None, description="Filter by doctor"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Paginated bookings list for the current org (search + date range + status + attendance + mode). Members see only own provider bookings."""
+    """Paginated bookings list for the current org (search + date range + status + attendance + mode + dept/doctor). Members see only own provider bookings."""
     from datetime import timedelta
 
     predicates = [Booking.org_id == user.org_id]
@@ -1043,13 +1456,48 @@ async def list_bookings(
     _mpid = await _member_provider_id(db, user)
     if _mpid is not None:
         predicates.append(Booking.provider_id == _mpid)
+    if unit_id:
+        try:
+            import uuid as _uuid
+
+            predicates.append(Booking.unit_id == _uuid.UUID(str(unit_id)))
+        except Exception:
+            pass
+    if provider_id:
+        try:
+            import uuid as _uuid2
+
+            predicates.append(Booking.provider_id == _uuid2.UUID(str(provider_id)))
+        except Exception:
+            pass
     if search:
         like = f"%{search}%"
+        # Customer fields + doctor/team-member name + department name, all
+        # org-scoped. Names resolve via EXISTS so individual orgs (no catalog
+        # rows) behave exactly as before.
+        from app.models.service_unit import Provider as _SP, ServiceUnit as _SU
+
         predicates.append(
             or_(
                 Booking.customer_name.ilike(like),
                 Booking.customer_email.ilike(like),
                 Booking.customer_phone.ilike(like),
+                select(1)
+                .select_from(_SP)
+                .where(
+                    _SP.id == Booking.provider_id,
+                    _SP.org_id == user.org_id,
+                    _SP.full_name.ilike(like),
+                )
+                .exists(),
+                select(1)
+                .select_from(_SU)
+                .where(
+                    _SU.id == Booking.unit_id,
+                    _SU.org_id == user.org_id,
+                    _SU.name.ilike(like),
+                )
+                .exists(),
             )
         )
     if status:
@@ -1084,9 +1532,31 @@ async def list_bookings(
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
+    _rows = result.all()
+
+    try:
+        from app.models.service_unit import Provider as _PV, ServiceUnit as _SU
+
+        _pids = {b.provider_id for b, _, _ in _rows if b.provider_id}
+        _uids = {b.unit_id for b, _, _ in _rows if b.unit_id}
+        _pmap: dict = {}
+        _umap: dict = {}
+        if _pids:
+            for _p in (
+                await db.execute(select(_PV).where(_PV.id.in_(_pids)))
+            ).scalars().all():
+                _pmap[_p.id] = _p.full_name
+        if _uids:
+            for _u in (
+                await db.execute(select(_SU).where(_SU.id.in_(_uids)))
+            ).scalars().all():
+                _umap[_u.id] = _u.name
+    except Exception:
+        _pmap = {}
+        _umap = {}
 
     items = []
-    for b, slot, s in result.all():
+    for b, slot, s in _rows:
         _mls = b.meeting_link_status
         _mls_val = _mls.value if _mls is not None and hasattr(_mls, "value") else (str(_mls) if _mls is not None else None)
         _mlp = b.meeting_link_provider
@@ -1110,6 +1580,10 @@ async def list_bookings(
                 attended_at=b.attended_at,
                 attendance_notes=b.attendance_notes,
                 cancellation_reason=b.cancellation_reason,
+                unit_id=str(b.unit_id) if b.unit_id else None,
+                unit_name=_umap.get(b.unit_id) if b.unit_id else None,
+                provider_id=str(b.provider_id) if b.provider_id else None,
+                provider_name=_pmap.get(b.provider_id) if b.provider_id else None,
             )
         )
     return BookingPageResponse(items=items, total=total, page=page, page_size=page_size)
@@ -1180,6 +1654,26 @@ async def update_booking_attendance(
         booking.attended_at = None
         booking.attendance_marked_by = None
 
+    # Free the slot for the next patient when the booking is cancelled or
+    # moved: the TimeSlot row is released (not deleted, so booking history
+    # stays) and the lock engine reuses it for the next booking attempt.
+    if payload.attendance_status in ("CANCELLED", "RESCHEDULED"):
+        try:
+            from app.models.booking import TimeSlot as _TS
+
+            _slot = (
+                await db.execute(
+                    select(_TS).where(
+                        _TS.id == booking.slot_id, _TS.org_id == booking.org_id
+                    )
+                )
+            ).scalars().first()
+            if _slot is not None:
+                _slot.is_booked = False
+                _slot.locked_until = None
+        except Exception:
+            pass
+
     await db.commit()
     await db.refresh(booking)
     return AttendanceResponse(
@@ -1216,6 +1710,22 @@ async def reschedule_booking_attendance(
     booking.attendance_status = "RESCHEDULED"
     booking.attendance_marked_by = user.id
     booking.attendance_notes = payload.get("notes") if isinstance(payload, dict) else None
+    # Free the old slot for the next patient (same rule as attendance cancel).
+    try:
+        from app.models.booking import TimeSlot as _TS2
+
+        _slot2 = (
+            await db.execute(
+                select(_TS2).where(
+                    _TS2.id == booking.slot_id, _TS2.org_id == booking.org_id
+                )
+            )
+        ).scalars().first()
+        if _slot2 is not None:
+            _slot2.is_booked = False
+            _slot2.locked_until = None
+    except Exception:
+        pass
     await db.commit()
     await db.refresh(booking)
     return AttendanceResponse(
@@ -1235,6 +1745,8 @@ async def list_cancelled_bookings(
     search: Optional[str] = Query(None, max_length=100),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
+    unit_id: Optional[str] = Query(default=None, description="Filter by department"),
+    provider_id: Optional[str] = Query(default=None, description="Filter by team member"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1245,6 +1757,32 @@ async def list_cancelled_bookings(
         ChatSession.org_id == user.org_id,
         ChatSession.session_status == "CANCELLED",
     ]
+    # Staff scope (linked logins see only own) + explicit dept/member filters.
+    _sp, _su = await _member_scope(db, user)
+    _eff_provider = provider_id or (_sp and str(_sp))
+    if _eff_provider:
+        try:
+            import uuid as _uuid
+
+            predicates.append(ChatSession.provider_id == _uuid.UUID(str(_eff_provider)))
+        except Exception:
+            pass
+    if unit_id:
+        try:
+            import uuid as _uuid2
+
+            predicates.append(ChatSession.unit_id == _uuid2.UUID(str(unit_id)))
+        except Exception:
+            pass
+    elif _su:
+        try:
+            import uuid as _uuid3
+
+            predicates.append(
+                ChatSession.unit_id.in_([_uuid3.UUID(str(x)) for x in _su])
+            )
+        except Exception:
+            pass
     if search:
         like = f"%{search}%"
         predicates.append(
@@ -1297,6 +1835,27 @@ async def list_cancelled_bookings(
             return f"phone:{phone_digits}"
         return f"session:{session_id}"
 
+    try:
+        from app.models.service_unit import Provider as _PV, ServiceUnit as _SU
+
+        _cpids = {s.provider_id for s in sessions if getattr(s, "provider_id", None)}
+        _cuids = {s.unit_id for s in sessions if getattr(s, "unit_id", None)}
+        _cpmap: dict = {}
+        _cumap: dict = {}
+        if _cpids:
+            for _p in (
+                await db.execute(select(_PV).where(_PV.id.in_(_cpids)))
+            ).scalars().all():
+                _cpmap[_p.id] = _p.full_name
+        if _cuids:
+            for _u in (
+                await db.execute(select(_SU).where(_SU.id.in_(_cuids)))
+            ).scalars().all():
+                _cumap[_u.id] = _u.name
+    except Exception:
+        _cpmap = {}
+        _cumap = {}
+
     seen: set = set()
     items = []
     for s in sessions:
@@ -1326,6 +1885,10 @@ async def list_cancelled_bookings(
                 booking_time=data.get("time") or None,
                 cancelled_at=s.updated_at,
                 booking_id=_bid or None,
+                unit_id=str(s.unit_id) if getattr(s, "unit_id", None) else None,
+                unit_name=_cumap.get(s.unit_id) if getattr(s, "unit_id", None) else None,
+                provider_id=str(s.provider_id) if getattr(s, "provider_id", None) else None,
+                provider_name=_cpmap.get(s.provider_id) if getattr(s, "provider_id", None) else None,
             )
         )
     total = len(items)
@@ -3195,9 +3758,14 @@ async def get_schedule(
     )
     sched = sched_result.scalars().first()
 
+    # Org template only: per-doctor overrides (provider_id set) live in
+    # Departments → Hours and must never leak into the hospital default view.
     days_result = await db.execute(
         select(ScheduleDay)
-        .where(ScheduleDay.org_id == user.org_id)
+        .where(
+            ScheduleDay.org_id == user.org_id,
+            ScheduleDay.provider_id.is_(None),
+        )
         .order_by(ScheduleDay.day_of_week)
     )
     days = days_result.scalars().all()
@@ -3285,13 +3853,14 @@ async def update_schedule(
             if payload.booking_window_days is not None:
                 org_config.max_booking_days_ahead = payload.booking_window_days
 
-    # Upsert ScheduleDay rows
+    # Upsert org-template ScheduleDay rows only (never touch doctor overrides)
     if payload.days is not None:
         for day_data in payload.days:
             day_result = await db.execute(
                 select(ScheduleDay).where(
                     ScheduleDay.org_id == user.org_id,
                     ScheduleDay.day_of_week == day_data.day_of_week,
+                    ScheduleDay.provider_id.is_(None),
                 )
             )
             day = day_result.scalars().first()
@@ -3331,7 +3900,10 @@ async def update_schedule(
 
     days_result = await db.execute(
         select(ScheduleDay)
-        .where(ScheduleDay.org_id == user.org_id)
+        .where(
+            ScheduleDay.org_id == user.org_id,
+            ScheduleDay.provider_id.is_(None),
+        )
         .order_by(ScheduleDay.day_of_week)
     )
     days = days_result.scalars().all()
@@ -3365,7 +3937,11 @@ async def list_exceptions(
     from app.models.booking import ScheduleException
     from sqlalchemy import extract
 
-    q = select(ScheduleException).where(ScheduleException.org_id == user.org_id)
+    # Org-wide exceptions only (doctor-specific live in Departments → Hours)
+    q = select(ScheduleException).where(
+        ScheduleException.org_id == user.org_id,
+        ScheduleException.provider_id.is_(None),
+    )
     if year:
         q = q.where(extract("year", ScheduleException.exception_date) == year)
     if month:
@@ -3440,11 +4016,13 @@ async def create_exception(
                     detail=f"Action Blocked: {len(invalid_slots)} existing bookings fall outside your new custom hours. Please reschedule them first.",
                 )
 
-    # Delete existing exception for same date (upsert)
+    # Delete existing org-wide exception for same date (upsert).
+    # Doctor-specific rows are untouched.
     existing_result = await db.execute(
         select(ScheduleException).where(
             ScheduleException.org_id == user.org_id,
             ScheduleException.exception_date == exc_date,
+            ScheduleException.provider_id.is_(None),
         )
     )
     existing = existing_result.scalars().first()
@@ -3544,12 +4122,15 @@ async def preview_slots(
 async def get_calendar_events(
     start_date: str = Query(..., description="YYYY-MM-DD"),
     end_date: str = Query(..., description="YYYY-MM-DD"),
+    unit_id: Optional[str] = Query(default=None, description="Filter by department"),
+    provider_id: Optional[str] = Query(default=None, description="Filter by doctor"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """
     Return all confirmed bookings in a date range (inclusive) for the calendar grid.
     Joins TimeSlot for slot times and ChatSession for collected form data.
+    Org-mode: optional unit_id/provider_id filters + RBAC scope (doctor sees own).
     """
     from datetime import date as dt_date
 
@@ -3561,21 +4142,77 @@ async def get_calendar_events(
             status_code=400, detail="Invalid date format. Use YYYY-MM-DD."
         )
 
+    # RBAC scope: doctor login sees only own bookings unless explicit filter
+    _scope_provider = await _member_provider_id(db, user)
+    _eff_provider = provider_id or _scope_provider
+    try:
+        from app.core.org_mode import get_managed_unit_ids as _managed_units
+
+        _scope_units = await _managed_units(db, user.id)
+    except Exception:
+        _scope_units = []
+
     # Join Booking → TimeSlot to filter by date range
+    _preds = [
+        Booking.org_id == user.org_id,
+        TimeSlot.start_time >= start_dt,
+        TimeSlot.start_time <= end_dt,
+    ]
+    if _eff_provider:
+        try:
+            import uuid as _uuid
+
+            _preds.append(Booking.provider_id == _uuid.UUID(str(_eff_provider)))
+        except Exception:
+            pass
+    if unit_id:
+        try:
+            import uuid as _uuid2
+
+            _preds.append(Booking.unit_id == _uuid2.UUID(str(unit_id)))
+        except Exception:
+            pass
+    elif _scope_units:
+        try:
+            import uuid as _uuid3
+
+            _preds.append(
+                Booking.unit_id.in_([_uuid3.UUID(str(x)) for x in _scope_units])
+            )
+        except Exception:
+            pass
     stmt = (
         select(Booking, TimeSlot, ChatSession)
         .join(TimeSlot, Booking.slot_id == TimeSlot.id)
         .outerjoin(ChatSession, Booking.session_id == ChatSession.id)
-        .where(
-            Booking.org_id == user.org_id,
-            TimeSlot.start_time >= start_dt,
-            TimeSlot.start_time <= end_dt,
-        )
+        .where(*_preds)
         .order_by(TimeSlot.start_time.asc())
     )
 
     result = await db.execute(stmt)
     rows = result.all()
+
+    # Batch names for dept/doctor badges (no N+1)
+    try:
+        from app.models.service_unit import Provider as _PV, ServiceUnit as _SU
+
+        _pids = {b.provider_id for b, _, _ in rows if b.provider_id}
+        _uids = {b.unit_id for b, _, _ in rows if b.unit_id}
+        _pmap = {}
+        _umap = {}
+        if _pids:
+            for _p in (
+                await db.execute(select(_PV).where(_PV.id.in_(_pids)))
+            ).scalars().all():
+                _pmap[_p.id] = _p.full_name
+        if _uids:
+            for _u in (
+                await db.execute(select(_SU).where(_SU.id.in_(_uids)))
+            ).scalars().all():
+                _umap[_u.id] = _u.name
+    except Exception:
+        _pmap = {}
+        _umap = {}
 
     items = []
     for booking, slot, session in rows:
@@ -3599,6 +4236,10 @@ async def get_calendar_events(
                 meeting_link_status=_mls_val,
                 meeting_link_url=booking.meeting_link_url,
                 meeting_link_provider=_mlp_val,
+                unit_id=str(booking.unit_id) if booking.unit_id else None,
+                unit_name=_umap.get(booking.unit_id) if booking.unit_id else None,
+                provider_id=str(booking.provider_id) if booking.provider_id else None,
+                provider_name=_pmap.get(booking.provider_id) if booking.provider_id else None,
             )
         )
     return items
@@ -3635,14 +4276,17 @@ async def get_upcoming_bookings(
             hour=0, minute=0, second=0, microsecond=0
         )
 
+    _sp, _su = await _member_scope(db, user)
+    _preds = [Booking.org_id == user.org_id, TimeSlot.start_time >= cutoff]
+    if _sp is not None:
+        _preds.append(Booking.provider_id == _sp)
+    elif _su:
+        _preds.append(Booking.unit_id.in_(_su))
     stmt = (
         select(Booking, TimeSlot, ChatSession)
         .join(TimeSlot, Booking.slot_id == TimeSlot.id)
         .outerjoin(ChatSession, Booking.session_id == ChatSession.id)
-        .where(
-            Booking.org_id == user.org_id,
-            TimeSlot.start_time >= cutoff,
-        )
+        .where(*_preds)
         .order_by(TimeSlot.start_time.asc())
         .limit(limit)
         .offset(offset)
@@ -3650,6 +4294,27 @@ async def get_upcoming_bookings(
 
     result = await db.execute(stmt)
     rows = result.all()
+
+    try:
+        from app.models.service_unit import Provider as _PV, ServiceUnit as _SU
+
+        _pids = {b.provider_id for b, _, _ in rows if b.provider_id}
+        _uids = {b.unit_id for b, _, _ in rows if b.unit_id}
+        _pmap: dict = {}
+        _umap: dict = {}
+        if _pids:
+            for _p in (
+                await db.execute(select(_PV).where(_PV.id.in_(_pids)))
+            ).scalars().all():
+                _pmap[_p.id] = _p.full_name
+        if _uids:
+            for _u in (
+                await db.execute(select(_SU).where(_SU.id.in_(_uids)))
+            ).scalars().all():
+                _umap[_u.id] = _u.name
+    except Exception:
+        _pmap = {}
+        _umap = {}
 
     items = []
     for booking, slot, session in rows:
@@ -3672,6 +4337,10 @@ async def get_upcoming_bookings(
                 meeting_link_status=_mls_val,
                 meeting_link_url=booking.meeting_link_url,
                 meeting_link_provider=_mlp_val,
+                unit_id=str(booking.unit_id) if booking.unit_id else None,
+                unit_name=_umap.get(booking.unit_id) if booking.unit_id else None,
+                provider_id=str(booking.provider_id) if booking.provider_id else None,
+                provider_name=_pmap.get(booking.provider_id) if booking.provider_id else None,
             )
         )
     return items
@@ -3805,10 +4474,13 @@ async def complete_onboarding(
     schedule.slot_duration_minutes = data.hours.slot_duration_minutes
     schedule.booking_window_days = data.hours.booking_window_days
 
-    # Upsert ScheduleDays
-    # Delete existing days and recreate
+    # Upsert org-template ScheduleDays (doctor overrides are preserved)
+    # Delete existing template days and recreate
     await db.execute(
-        ScheduleDay.__table__.delete().where(ScheduleDay.org_id == org.id)
+        ScheduleDay.__table__.delete().where(
+            ScheduleDay.org_id == org.id,
+            ScheduleDay.provider_id.is_(None),
+        )
     )
     for day_data in data.hours.weekly_schedule:
         parsed_open = _parse_time(day_data.open_time)

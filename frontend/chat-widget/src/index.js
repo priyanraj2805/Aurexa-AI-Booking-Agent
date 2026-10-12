@@ -98,6 +98,10 @@
       this.isLoading = false;
       this._messages = [];
       this._agentConfig = null;
+      // Org-mode: picked department + team member
+      this.selectedUnitId = null;
+      this.selectedProviderId = null;
+      this._catalogPickerShown = false;
       this.userTimezone = this._detectBrowserTimezone();
       this.timezoneSource = "detected";
       this.selectedSlotId = null;
@@ -112,6 +116,10 @@
       this._lastMessageTimestamp = null;
       this._pollInterval = null;
       this._humanActive = false;
+      // Conversation mode: null (choose) | "ask" (KB Q&A) | "booking" (guided).
+      this._chatMode = null;
+      this._lastDirective = null;
+      this._logoSrc = null;
       // Phase 4: WebSocket lifecycle state
       this._ws = null;
       this._wsReconnectTimer = null;
@@ -130,16 +138,57 @@
       return `dotstark_session_id:${tokenPart}:${basePart}`;
     }
 
+    _modeStorageKey() {
+      return `${this._sessionStorageKey()}:mode`;
+    }
+
+    _sessionKeyFor(mode) {
+      // Per-section session: Ask AI and Start Booking each keep their own
+      // backend session, so switching between sections never loses the
+      // booking details the visitor already shared.
+      return `${this._sessionStorageKey()}:${mode === "ask" ? "ask" : "booking"}`;
+    }
+
+    _loadChatMode() {
+      try {
+        const m = sessionStorage.getItem(this._modeStorageKey());
+        this._chatMode = m === "ask" || m === "booking" ? m : null;
+      } catch (_) {
+        this._chatMode = null;
+      }
+    }
+
+    _saveChatMode() {
+      try {
+        if (this._chatMode) sessionStorage.setItem(this._modeStorageKey(), this._chatMode);
+        else sessionStorage.removeItem(this._modeStorageKey());
+      } catch (_) {}
+    }
+
     async connectedCallback() {
       try {
         const sessionKey = this._sessionStorageKey();
         if (CONFIG.forceNewSession === true) {
           sessionStorage.removeItem(sessionKey);
           sessionStorage.removeItem("dotstark_session_id");
+          try { sessionStorage.removeItem(this._sessionKeyFor("ask")); } catch (_) {}
+          try { sessionStorage.removeItem(this._sessionKeyFor("booking")); } catch (_) {}
           this.sessionId = null;
         } else {
-          this.sessionId = sessionStorage.getItem(sessionKey) || null;
+          // Restore the session that belongs to the section the visitor
+          // was last in (per-section sessions). Fall back to the legacy
+          // shared key for visitors from before the split.
+          const _m0 = sessionStorage.getItem(this._modeStorageKey());
+          const _mode0 = _m0 === "ask" || _m0 === "booking" ? _m0 : null;
+          this.sessionId =
+            (_mode0 && sessionStorage.getItem(this._sessionKeyFor(_mode0))) ||
+            sessionStorage.getItem(sessionKey) ||
+            null;
         }
+        try {
+          const _m = sessionStorage.getItem(`${sessionKey}:mode`);
+          this._chatMode = _m === "ask" || _m === "booking" ? _m : null;
+        } catch (_) {}
         const storedTimezone = sessionStorage.getItem("dotstark_user_timezone");
         const storedSource = sessionStorage.getItem("dotstark_timezone_source");
         if (storedTimezone) {
@@ -429,6 +478,8 @@
           break;
         case "human_joined":
           this._updateHumanStatus(event.admin_name || "Support agent", true);
+          try { this._clearQuickPrompts(); } catch (_) {}
+          try { this._setComposerVisible(true); } catch (_) {}
           this._startFastPolling();
           // Idempotent: skip if a system message for this join already shown
           if (!this._humanJoinedShownFor) {
@@ -441,6 +492,8 @@
           this._humanJoinedShownFor = null;
           this._appendSystem("👨‍💼 Support agent left. AI assistant resumed.");
           this._stopPolling();
+          // Composer follows the mode again once the human leaves.
+          try { this._applyComposerRule(); } catch (_) {}
           // Reconnect polling at slow cadence
           this._startPolling();
           break;
@@ -474,6 +527,7 @@
           _logoSrc = _logoUrl;
         }
       }
+      this._logoSrc = _logoSrc || null;
       const _avatarInner = _logoSrc
         ? `<img src="${_logoSrc}" alt="logo" style="width:100%;height:100%;object-fit:cover;border-radius:12px;display:block;" onerror="this.style.display='none';this.nextElementSibling&& (this.nextElementSibling.style.display='block')">` + `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" style="display:none"><path d="M12 2a3 3 0 0 0-3 3v1a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10H5a2 2 0 0 0-2 2v1a7 7 0 0 0 14 0v-1a2 2 0 0 0-2-2z"/><line x1="12" y1="18" x2="12" y2="22"/></svg>`
         : `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v1a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10H5a2 2 0 0 0-2 2v1a7 7 0 0 0 14 0v-1a2 2 0 0 0-2-2z"/><line x1="12" y1="18" x2="12" y2="22"/></svg>`;
@@ -493,11 +547,28 @@
                             ${(() => { const c = this._agentConfig || {}; const b = [c.business_name, c.business_tagline].filter(Boolean).join(" - "); if (!b) return ""; const esc = b.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); const dur = Math.max(8, Math.min(30, Math.round(b.length * 0.35))); return `<p class="header-business marquee" id="header-business" style="--marquee-duration:${dur}s"><span class="marquee-track"><span>${esc}</span><span>${esc}</span></span></p>`; })()}
                             <p><span class="status-dot"></span> <span id="status-text">Online \u2014 Ready to help</span></p>
                         </div>
+                        <button class="header-back" id="back-btn" title="Back" style="display:none">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+                        </button>
                         <button class="header-close" id="close-btn" title="Close chat">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                         </button>
                     </div>
+                    <div class="home-view" id="home-view" style="display:none">
+                        <div class="home-avatar" id="home-avatar"></div>
+                        <h3 class="home-title" id="home-title">Booking Assistant</h3>
+                        <p class="home-tagline" id="home-tagline">How can we help you today?</p>
+                        <button class="home-btn" id="home-ask" type="button">
+                            <span class="home-btn-icon">🤖</span>
+                            <span class="home-btn-text"><span class="home-btn-title">Ask AI</span><span class="home-btn-desc">Chat & get instant answers</span></span>
+                        </button>
+                        <button class="home-btn" id="home-book" type="button">
+                            <span class="home-btn-icon">📅</span>
+                            <span class="home-btn-text"><span class="home-btn-title">Book Appointment</span><span class="home-btn-desc">Pick a slot & confirm</span></span>
+                        </button>
+                    </div>
                     <div class="messages" id="message-list" role="log" aria-label="Chat messages" aria-live="polite"></div>
+                    <div class="quick-prompts-bar" id="quick-prompts-bar" style="display:none" aria-label="Suggested questions"></div>
                     <div class="input-area">
                         <input type="text" placeholder="Type a message..." id="user-input" autocomplete="off" aria-label="Type your message">
                         <button class="send-btn" id="send-trigger" title="Send message" aria-label="Send message">
@@ -521,6 +592,11 @@
       this._input = this.shadowRoot.getElementById("user-input");
       this._sendBtn = this.shadowRoot.getElementById("send-trigger");
       this._msgList = this.shadowRoot.getElementById("message-list");
+      this._inputArea = this.shadowRoot.querySelector(".input-area");
+      this._qpBar = this.shadowRoot.getElementById("quick-prompts-bar");
+      this._homeView = this.shadowRoot.getElementById("home-view");
+      this._backBtn = this.shadowRoot.getElementById("back-btn");
+      this._canGoHome = false;
       this._inlineValidation = this.shadowRoot.getElementById(
         "widget-inline-validation",
       );
@@ -534,6 +610,15 @@
       };
       this.shadowRoot.getElementById("close-btn").onclick = () =>
         this._toggle();
+      if (this._backBtn) {
+        this._backBtn.onclick = () => this._showHomeView();
+      }
+      if (this.shadowRoot.getElementById("home-ask")) {
+        this.shadowRoot.getElementById("home-ask").onclick = () => this._switchSection("ask");
+      }
+      if (this.shadowRoot.getElementById("home-book")) {
+        this.shadowRoot.getElementById("home-book").onclick = () => this._switchSection("booking");
+      }
       this._sendBtn.onclick = () => this._handleSend();
       this._input.onkeydown = (e) => {
         if (e.key === "Enter" && !e.shiftKey) {
@@ -547,16 +632,25 @@
         if (e.key === "Escape" && this.isOpen) this._toggle();
       };
 
-      // Add initial greeting OR restore history from a previous session.
-      // When a session exists, also start polling so the widget picks up
-      // human takeover events and human-sent messages in real time.
+      // Blank open: home slide (two big buttons), composer hidden.
+      // Returning visitors with a stored session resume history directly
+      // (composer follows their saved mode).
+      try { this._fillHomeView(); } catch (_) {}
       if (this.sessionId) {
         this._loadHistory().then((restored) => {
           if (!restored) {
-            const greeting =
-              this._agentConfig?.greeting_message ||
-              "Hello! 👋 I'm your booking assistant. How can I help you schedule an appointment today?";
-            this._appendBubble("agent", greeting);
+            this._canGoHome = true;
+            try { this._showHomeView(); } catch (_) {}
+            try { this._setComposerVisible(false); } catch (_) {}
+          } else {
+            this._canGoHome = false;
+            try { this._updateBackBtn(); } catch (_) {}
+            try { this._applyComposerRule(); } catch (_) {}
+            // Guided booking is card-driven: after restoring the transcript
+            // also re-render the pending step as its directive card.
+            if (this._chatMode === "booking") {
+              try { this._resumePendingCard(); } catch (_) {}
+            }
           }
           // Phase 4: open WebSocket first (real-time channel); polling acts
           // as a safety net that auto-disables when WS is connected.
@@ -564,10 +658,9 @@
           this._startPolling();
         });
       } else {
-        const greeting =
-          this._agentConfig?.greeting_message ||
-          "Hello! 👋 I'm your booking assistant. How can I help you schedule an appointment today?";
-        this._appendBubble("agent", greeting);
+        this._canGoHome = true;
+        try { this._showHomeView(); } catch (_) {}
+        try { this._setComposerVisible(false); } catch (_) {}
       }
 
       // Apply brand color if configured
@@ -575,8 +668,61 @@
       if (brandColor) {
         this.style.setProperty("--brand-color", brandColor);
       }
+      // Feature 2: apply widget theme (position, radius, dark mode, branding)
+      try { this._applyWidgetTheme(); } catch (_) {}
       // Show meeting mode badge (Online/Offline/Hybrid) if configured
       this._updateMeetingModeBadge();
+    }
+
+    _applyWidgetTheme() {
+      const theme = (this._agentConfig && this._agentConfig.ui_theme) || {};
+      const position = theme.position || "bottom-right";
+      const radius = Math.max(0, Math.min(28, Number(theme.border_radius ?? 16) || 16));
+      const darkMode = theme.dark_mode !== false;
+      const showBranding = theme.show_branding !== false;
+      // Position: host is fixed bottom/right by default CSS.
+      if (position === "bottom-left") {
+        this.style.setProperty("right", "auto");
+        this.style.setProperty("left", "24px");
+      } else if (position === "center") {
+        this.style.setProperty("right", "auto");
+        this.style.setProperty("left", "50%");
+        this.style.setProperty("transform", "translateX(-50%)");
+      } else {
+        this.style.setProperty("left", "auto");
+        this.style.setProperty("right", "24px");
+        this.style.setProperty("transform", "");
+      }
+      try {
+        const box = this.shadowRoot && this.shadowRoot.getElementById("chat-box");
+        if (box) {
+          box.style.borderRadius = `${radius + 4}px`;
+          if (position === "bottom-left") {
+            box.style.right = "auto";
+            box.style.left = "0";
+            box.style.transformOrigin = "bottom left";
+          } else if (position === "center") {
+            box.style.right = "auto";
+            box.style.left = "50%";
+            box.style.transform = "translateX(-50%)";
+            box.style.transformOrigin = "bottom center";
+          }
+        }
+        const launcher = this.shadowRoot && this.shadowRoot.getElementById("launcher");
+        if (launcher) launcher.style.borderRadius = `${radius}px`;
+      } catch (_) {}
+      // Dark / light mode via CSS variables on host.
+      if (!darkMode) {
+        this.style.setProperty("--bg-primary", "#ffffff");
+        this.style.setProperty("--bg-secondary", "#f4f4f5");
+        this.style.setProperty("--border", "#e4e4e7");
+      }
+      if (!showBranding) {
+        try {
+          const el = this.shadowRoot && this.shadowRoot.querySelector(".powered-by");
+          if (el) el.style.display = "none";
+        } catch (_) {}
+      }
     }
 
     _detectBrowserTimezone() {
@@ -677,7 +823,166 @@
       if (this.timezoneSource) {
         params.set("timezone_source", this.timezoneSource);
       }
+      if (this.selectedUnitId) params.set("unit_id", this.selectedUnitId);
+      if (this.selectedProviderId) params.set("provider_id", this.selectedProviderId);
       return `${CONFIG.apiBase}/widget/availability?${params.toString()}`;
+    }
+
+    _getCatalogUnits() {
+      const snap = this._agentConfig?.catalog;
+      if (!snap || !Array.isArray(snap.units)) return [];
+      return snap.units.filter((u) => u && u.is_active !== false);
+    }
+
+    _getCatalogProviders(unitId) {
+      const units = this._getCatalogUnits();
+      if (!unitId) {
+        const all = [];
+        units.forEach((u) => (u.providers || []).forEach((p) => all.push(p)));
+        return all.filter((p) => p && p.is_active !== false);
+      }
+      const u = units.find((x) => String(x.id) === String(unitId));
+      return ((u && u.providers) || []).filter((p) => p && p.is_active !== false);
+    }
+
+    _maybeShowCatalogPicker() {
+      if (this._catalogPickerShown) return;
+      const units = this._getCatalogUnits();
+      if (!units.length) return;
+      if (this.selectedUnitId && this.selectedProviderId) return;
+      this._catalogPickerShown = true;
+      this._appendUnitPicker(units);
+    }
+
+    _appendUnitPicker(units) {
+      // Compact dropdown (not a button wall): orgs can have 20+ departments.
+      // Department only — the member is chosen later, AFTER the date
+      // (engine-driven REQUIRE_PROVIDER_PICKER with members working
+      // that date). Never pre-pin a member here.
+      this._clearDirectiveCards();
+      const div = document.createElement("div");
+      div.className = "message agent field-input-card directive-card";
+      const label = document.createElement("div");
+      label.className = "card-header";
+      label.textContent = "🏢 Choose department";
+      div.appendChild(label);
+      const select = document.createElement("select");
+      select.className = "widget-dept-select";
+      select.setAttribute("aria-label", "Choose department");
+      const hint = document.createElement("option");
+      hint.value = "";
+      hint.textContent = `Select department (${units.length} available)…`;
+      select.appendChild(hint);
+      units.forEach((u) => {
+        const opt = document.createElement("option");
+        opt.value = String(u.id);
+        opt.textContent = u.name;
+        select.appendChild(opt);
+      });
+      div.appendChild(select);
+      const desc = document.createElement("p");
+      desc.className = "field-description";
+      desc.textContent = "Pick the department for your visit.";
+      div.appendChild(desc);
+      select.onchange = () => {
+        const picked = units.find((u) => String(u.id) === select.value);
+        desc.textContent = (picked && picked.description) || "Pick the department for your visit.";
+      };
+      const submit = document.createElement("button");
+      submit.className = "widget-field-btn";
+      submit.textContent = "Continue";
+      submit.onclick = () => {
+        const picked = units.find((u) => String(u.id) === select.value);
+        if (!picked) {
+          desc.textContent = "Please select a department first.";
+          try { select.focus(); } catch (_) {}
+          return;
+        }
+        submit.disabled = true;
+        select.disabled = true;
+        this.selectedUnitId = String(picked.id);
+        this.selectedProviderId = null;
+        this._clearDirectiveCards();
+        this._handleSendManual(`I want to book in ${picked.name}`);
+      };
+      div.appendChild(submit);
+      this._msgList.appendChild(div);
+      this._scrollToBottom();
+    }
+
+    _selectedProviderFee() {
+      if (!this.selectedProviderId) return null;
+      for (const u of this._getCatalogUnits()) {
+        for (const p of u.providers || []) {
+          if (String(p.id) === String(this.selectedProviderId) && p.fee_display) {
+            return p.fee_display;
+          }
+        }
+      }
+      return null;
+    }
+
+    _appendProviderPicker(providers) {
+      // Legacy client-driven picker (dept tap). Kept for reference; the
+      // engine now drives member choice via REQUIRE_PROVIDER_PICKER.
+      this._renderProviderButtons(providers, (p) => {
+        this.selectedProviderId = String(p.id);
+        this._appendBubble("user", p.full_name);
+        this._clearDirectiveCards();
+        const fee = p.fee_display ? ` (Fee: ${p.fee_display})` : "";
+        this._appendBubble("agent", `Great — ${p.full_name}${fee}. What date works for you?`);
+      });
+    }
+
+    _appendEngineProviderPicker(fieldMeta = {}) {
+      // Engine-driven member choice (post-date step). Buttons carry member
+      // ids; the tap sends the id explicitly so the engine pins it.
+      const providers = Array.isArray(fieldMeta?.providers) ? fieldMeta.providers : [];
+      if (!providers.length) return;
+      this._renderProviderButtons(providers, (p) => {
+        // selectedProviderId flows into the dispatch payload (chat.py pins
+        // the session); the visible text keeps the transcript readable.
+        this.selectedProviderId = String(p.id);
+        this._handleSendManual(p.full_name);
+      });
+    }
+
+    _renderProviderButtons(providers, onPick) {
+      this._clearDirectiveCards();
+      const div = document.createElement("div");
+      div.className = "message agent field-input-card directive-card";
+      const label = document.createElement("div");
+      label.className = "card-header";
+      label.textContent = "👤 Choose team member";
+      div.appendChild(label);
+      const grid = document.createElement("div");
+      grid.className = "select-options-grid";
+      providers.forEach((p) => {
+        const btn = document.createElement("button");
+        btn.className = "select-option-btn";
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "select-option-name";
+        nameSpan.textContent = p.full_name;
+        btn.appendChild(nameSpan);
+        if (p.fee_display) {
+          const feeSpan = document.createElement("span");
+          feeSpan.className = "select-option-desc";
+          feeSpan.textContent = p.fee_display;
+          btn.appendChild(feeSpan);
+        }
+        if (p.role_label) btn.title = p.role_label;
+        btn.onclick = () => {
+          grid.querySelectorAll(".select-option-btn").forEach((b) => {
+            b.disabled = true;
+          });
+          btn.classList.add("selected");
+          onPick(p);
+        };
+        grid.appendChild(btn);
+      });
+      div.appendChild(grid);
+      this._msgList.appendChild(div);
+      this._scrollToBottom();
     }
 
     _formatTimezoneSource(source) {
@@ -922,7 +1227,10 @@
       if (this.isOpen) {
         this._chatBox.classList.add("visible");
         this._chatBox.classList.remove("hiding");
-        setTimeout(() => { this._input.focus(); this._applyHeaderMarquee(); }, 200);
+        setTimeout(() => {
+          try { this._input.focus(); } catch (_) {}
+          try { if (typeof this._applyHeaderMarquee === "function") this._applyHeaderMarquee(); } catch (_) {}
+        }, 200);
       } else {
         this._chatBox.classList.add("hiding");
         setTimeout(() => {
@@ -935,6 +1243,9 @@
     async _handleSend() {
       const text = this._input.value.trim();
       if (!text || this.isLoading) return;
+      // First typed message locks the mode in: no going back to home after.
+      this._canGoHome = false;
+      try { this._updateBackBtn(); } catch (_) {}
       this._clearSkipAction();
 
       // Send animation
@@ -957,7 +1268,13 @@
 
       try {
         const payload = { message: text };
+        if (this.selectedUnitId) payload.unit_id = this.selectedUnitId;
+        if (this.selectedProviderId) payload.provider_id = this.selectedProviderId;
         if (this.sessionId) payload.session_id = this.sessionId;
+        // Conversation mode (ask | booking) pinned server-side per session.
+        if (this._chatMode === "ask" || this._chatMode === "booking") {
+          payload.mode = this._chatMode;
+        }
         if (!this.sessionId) {
           this.selectedSlotId = null;
           this.timezoneFallbackUsed = false;
@@ -996,6 +1313,11 @@
           this.sessionId = data.session_id;
           try {
             sessionStorage.setItem(this._sessionStorageKey(), data.session_id);
+            if (this._chatMode === "ask" || this._chatMode === "booking") {
+              // Keep the session under its section's own key too, so the
+              // other section can switch away and back without losing it.
+              sessionStorage.setItem(this._sessionKeyFor(this._chatMode), data.session_id);
+            }
             // Cleanup legacy global key to prevent stale cross-widget reuse.
             sessionStorage.removeItem("dotstark_session_id");
           } catch (e) {}
@@ -1010,6 +1332,7 @@
           data.action?.message || data.agent_response,
         );
         const directive = data.action?.widget_directive;
+        this._lastDirective = directive || null;
         const rendersCardOnly =
           directive === "REQUEST_CONFIRMATION" ||
           directive === "BOOKING_SUMMARY_CARD" ||
@@ -1035,86 +1358,7 @@
         this._activeFieldMeta = fieldMeta || null;
         this._setInlineValidation(fieldMeta?.validation_error || "");
 
-        if (directive === "REQUIRE_DATE_PICKER") {
-          this._appendDatePicker(fieldMeta);
-        } else if (directive === "REQUIRE_TIME_SLOT_GRID") {
-          await this._appendTimeSlotGrid(fieldMeta);
-        } else if (directive === "REQUIRE_PHONE_INPUT") {
-          this._appendPhoneInput(fieldMeta);
-        } else if (directive === "REQUIRE_EMAIL_INPUT") {
-          this._clearDirectiveCards();
-          this._updateInputMode(
-            "email",
-            fieldMeta?.placeholder || "Enter email address...",
-          );
-          this._renderSkipAction(fieldMeta);
-        } else if (directive === "REQUIRE_NUMBER_INPUT") {
-          this._clearDirectiveCards();
-          this._updateInputMode(
-            "number",
-            fieldMeta?.placeholder || "Enter a number...",
-          );
-          this._renderSkipAction(fieldMeta);
-        } else if (directive === "REQUIRE_SELECT") {
-          this._appendSelectInput(fieldMeta);
-        } else if (directive === "REQUIRE_TEXTAREA") {
-          this._clearDirectiveCards();
-          this._appendSystem(
-            `${fieldMeta?.icon || "📄"} ${fieldMeta?.description || "Please provide details."}`,
-          );
-          this._renderSkipAction(fieldMeta);
-        } else if (directive === "TEXT_INPUT" && fieldMeta) {
-          this._clearDirectiveCards();
-          this._updateInputMode(
-            "text",
-            fieldMeta.placeholder || "Type a message...",
-          );
-          this._renderSkipAction(fieldMeta);
-        } else if (directive === "REQUIRE_PAYMENT") {
-          this._clearDirectiveCards();
-          this._appendPaymentCard(fieldMeta || {});
-          this._clearSkipAction();
-        } else if (directive === "REQUIRE_OTP_MODAL") {
-          this._clearDirectiveCards();
-          this._appendOTPInterface(fieldMeta || {});
-          this._clearSkipAction();
-        } else if (
-          directive === "REQUEST_CONFIRMATION" ||
-          directive === "BOOKING_SUMMARY_CARD"
-        ) {
-          this._clearDirectiveCards();
-          this._appendSummaryCard(
-            agentMessage || "Please review your booking details before confirming.",
-          );
-          this._clearSkipAction();
-        } else if (directive === "BOOKING_CONFIRMED_CARD") {
-          this._clearDirectiveCards();
-          this._appendConfirmedCard(
-            agentMessage || "Your booking has been confirmed.",
-            fieldMeta || {},
-          );
-          this._clearSkipAction();
-        } else if (directive === "HUMAN_ACTIVE") {
-          // Human agent has taken over — show the join notice only once per
-          // handoff (every customer message returns HUMAN_ACTIVE, so an
-          // unguarded notice would repeat after each message). Shares the
-          // _humanJoinedShownFor guard with the WebSocket path so the two
-          // cannot double-notice in either arrival order.
-          this._clearDirectiveCards();
-          if (!this._humanActive && !this._humanJoinedShownFor) {
-            this._appendSystem("👨‍💼 Support agent joined the chat");
-            this._humanJoinedShownFor = this.sessionId;
-          }
-          this._updateInputMode("text", "Type a message...");
-          this._clearSkipAction();
-          this._humanActive = true;
-          this._startPolling();
-        } else {
-          // Reset input to default mode for unknown directives
-          this._clearDirectiveCards();
-          this._updateInputMode("text", "Type a message...");
-          this._clearSkipAction();
-        }
+        await this._renderDirectiveUI(directive, fieldMeta, agentMessage);
       } catch (err) {
         console.error("Widget Error:", err);
         thinkingEl.remove();
@@ -1126,7 +1370,14 @@
         this.isLoading = false;
         this._input.disabled = false;
         this._sendBtn.disabled = false;
-        this._input.focus();
+        // Composer follows the mode: hidden in guided booking (cards carry
+        // their own inputs), visible otherwise. Human chat always types.
+        try { this._applyComposerRule(); } catch (_) {}
+        try {
+          if (this._inputArea && this._inputArea.style.display !== "none") {
+            this._input.focus();
+          }
+        } catch (_) {}
         // Refresh incrementally after every send so messages written by a
         // human agent (takeover) show up even if WS/poll hadn't started yet.
         // Dedupe by message id prevents re-rendering our own just-sent bubble.
@@ -1273,6 +1524,7 @@
       div.appendChild(span);
       this._msgList.appendChild(div);
       this._scrollToBottom();
+      return div;
     }
 
     _updateInputMode(type, placeholder) {
@@ -1553,6 +1805,471 @@
       this._scrollToBottom();
     }
 
+    _quickPromptsFor(location) {
+      // Quick prompts (suggested questions) from /widget/config.
+      // location: "start" (fresh greeting) or "followup" (after replies).
+      const all = this._agentConfig && Array.isArray(this._agentConfig.quick_prompts)
+        ? this._agentConfig.quick_prompts
+        : [];
+      return all.filter((p) => {
+        if (!p || typeof p.title !== "string" || !p.title.trim()) return false;
+        if (!p.content && !p.link) return false;
+        const at = (p.show_at || "both").toLowerCase();
+        return location === "start"
+          ? (at === "start" || at === "both")
+          : (at === "followup" || at === "both");
+      });
+    }
+
+    _fillHomeView() {
+      // Brand the home slide from live agent config (name + tagline + logo).
+      try {
+        const cfg = this._agentConfig || {};
+        const title = this.shadowRoot.getElementById("home-title");
+        const tag = this.shadowRoot.getElementById("home-tagline");
+        const av = this.shadowRoot.getElementById("home-avatar");
+        if (title) title.textContent = cfg.agent_name || "Booking Assistant";
+        if (tag) {
+          tag.textContent =
+            [cfg.business_name, cfg.business_tagline].filter(Boolean).join(" · ") ||
+            "How can we help you today?";
+        }
+        if (av) {
+          if (this._logoSrc) {
+            av.innerHTML = "";
+            const img = document.createElement("img");
+            img.src = this._logoSrc;
+            img.alt = "logo";
+            img.onerror = () => {
+              try {
+                av.textContent = String(cfg.agent_name || "B").trim()[0] || "B";
+              } catch (_) {}
+            };
+            av.appendChild(img);
+          } else {
+            const name = String(cfg.agent_name || "B");
+            av.textContent = (name.trim()[0] || "B").toUpperCase();
+          }
+        }
+      } catch (_) {}
+    }
+
+    _applyComposerRule() {
+      // Single source of truth for composer visibility.
+      if (this._humanActive) {
+        this._setComposerVisible(true);
+        return;
+      }
+      if (this._chatMode === "booking") {
+        this._setComposerVisible(false);
+        return;
+      }
+      this._setComposerVisible(true);
+    }
+
+    _setSessionContentVisible(visible) {
+      // Show/hide the conversation chrome under the home slide.
+      try {
+        if (visible) {
+          if (this._msgList) this._msgList.style.display = "";
+          if (this._inputArea) this._inputArea.style.display = "";
+          if (this._inlineValidation) this._inlineValidation.style.display = "";
+        } else {
+          if (this._msgList) this._msgList.style.display = "none";
+          if (this._qpBar) this._qpBar.style.display = "none";
+          if (this._inputArea) this._inputArea.style.display = "none";
+          if (this._inlineValidation) this._inlineValidation.style.display = "none";
+        }
+      } catch (_) {}
+    }
+
+    _updateBackBtn() {
+      // Back is only meaningful pre-first-message (mode can still change).
+      try {
+        if (!this._backBtn) return;
+        const homeShown =
+          !!this._homeView && this._homeView.style.display !== "none";
+        this._backBtn.style.display =
+          this._canGoHome && !homeShown ? "flex" : "none";
+      } catch (_) {}
+    }
+
+    _showHomeView() {
+      try {
+        if (!this._homeView) return;
+        this._fillHomeView();
+        this._setSessionContentVisible(false);
+        this._homeView.classList.remove("slide-out");
+        // Force reflow so the animation replays on repeat visits.
+        this._homeView.style.display = "flex";
+        void this._homeView.offsetWidth;
+        this._homeView.classList.add("slide-in");
+      } catch (_) {}
+      try { this._updateBackBtn(); } catch (_) {}
+    }
+
+    _showSessionView() {
+      // Slide home away, reveal the conversation + composer per mode.
+      try {
+        if (!this._homeView) return;
+        this._setSessionContentVisible(true);
+        try { this._applyComposerRule(); } catch (_) {}
+        if (this._homeView.style.display === "none") {
+          try { this._updateBackBtn(); } catch (_) {}
+          return;
+        }
+        this._homeView.classList.remove("slide-in");
+        this._homeView.classList.add("slide-out");
+        window.setTimeout(() => {
+          try { this._homeView.style.display = "none"; } catch (_) {}
+        }, 280);
+      } catch (_) {}
+      try { this._updateBackBtn(); } catch (_) {}
+    }
+
+    _renderModeExit() {
+      // Single switch pill for guided-booking mode (admin prompts hidden).
+      if (this._humanActive || !this._qpBar) return;
+      this._clearQuickPrompts();
+      const btn = document.createElement("button");
+      btn.className = "qp-pill qp-mode";
+      btn.textContent = "💬 Ask AI instead";
+      btn.setAttribute("aria-label", "Switch to Ask AI");
+      btn.onclick = () => this._switchSection("ask");
+      this._qpBar.appendChild(btn);
+      this._qpBar.style.display = "flex";
+    }
+
+    _switchSection(mode) {
+      // Going back to the active mode just reveals the session underneath.
+      if (this._chatMode === mode && this.sessionId) {
+        try { this._showSessionView(); } catch (_) {}
+        return;
+      }
+      // Section switch KEEPS each section's session: the current one is
+      // saved under its own mode key and the target section re-joins the
+      // session it already had. Booking details the visitor shared before
+      // switching to Ask AI therefore survive the round trip — the backend
+      // session still holds them and the flow resumes from the next
+      // pending field. A section that never had a session starts fresh,
+      // exactly as before.
+      let _storedSession = null;
+      try {
+        if ((this._chatMode === "ask" || this._chatMode === "booking") && this.sessionId) {
+          sessionStorage.setItem(this._sessionKeyFor(this._chatMode), this.sessionId);
+        }
+        _storedSession = sessionStorage.getItem(this._sessionKeyFor(mode));
+        this.sessionId = _storedSession || null;
+        this._lastDirective = null;
+        this._msgList.querySelectorAll(".message").forEach((m) => m.remove());
+        try { this._renderedMessageIds = new Set(); } catch (_) {}
+        this._pendingRefreshSkips = [];
+        this._lastMessageTimestamp = null;
+        try { this._clearQuickPrompts(); } catch (_) {}
+        this.selectedSlotId = null;
+        this.selectedDate = null;
+        this.selectedUnitId = null;
+        this.selectedProviderId = null;
+        this._catalogPickerShown = false;
+        this._humanActive = false;
+        this._humanJoinedShownFor = null;
+        // Rebind live updates to the (possibly different) session. Without
+        // this the old socket kept listening on the abandoned session.
+        try {
+          if (this._ws) { this._ws.onclose = null; this._ws.close(); }
+        } catch (_) {}
+        this._ws = null;
+        this._wsConnected = false;
+      } catch (_) {}
+      // silent when re-joining: no greeting, no auto booking kick, no
+      // composer lock — the rejoin block below restores the transcript.
+      this._setMode(mode, { silent: !!_storedSession });
+      if (_storedSession) {
+        (async () => {
+          try { await this._loadHistory(); } catch (_) {}
+          try { this._connectWebSocket(); } catch (_) {}
+          try { this._startPolling(); } catch (_) {}
+          if (mode === "booking") {
+            // Guided booking stays fully card-driven: restore the
+            // transcript, then re-render the PENDING step as its directive
+            // card (name/email/phone/date/slot/review) — never free text.
+            try {
+              this._appendSystem("Welcome back! Your booking details so far are saved — continue below.");
+            } catch (_) {}
+            await this._resumePendingCard();
+          } else {
+            try {
+              this._appendBubble("agent", "Welcome back! What would you like to ask?");
+            } catch (_) {}
+          }
+        })();
+      }
+    }
+
+    _setMode(mode, opts = {}) {
+      // Re-picking the active mode (e.g. via home): just reveal the session,
+      // never re-trigger booking or re-announce.
+      if (this._chatMode === mode && this.sessionId) {
+        try { this._showSessionView(); } catch (_) {}
+        return;
+      }
+      this._chatMode = mode;
+      this._saveChatMode();
+      this._clearQuickPrompts();
+      try { this._showSessionView(); } catch (_) {}
+      if (mode === "ask") {
+        // Ask AI types: composer appears immediately for free queries.
+        try {
+          this._setComposerVisible(true);
+          this._input.disabled = false;
+          this._sendBtn.disabled = false;
+          this._input.placeholder = "Type a message...";
+          this._input.style.opacity = "1";
+        } catch (_) {}
+        if (!opts.silent) {
+          // Ask-AI greeting: Q&A-flavored (this section answers questions;
+          // booking/cancel/reschedule redirect to the button). Never the
+          // booking greeting from admin config.
+          const greeting =
+            this._agentConfig?.ask_greeting_message ||
+            "Hello! 👋 I'm here to answer your questions. What would you like to know?";
+          this._appendBubble("agent", greeting);
+        }
+        // Admin's start quick-prompts live here (entry shows only the two
+        // mode buttons). Follow-ups after replies use the followup set.
+        // The booking switch pill is appended inside _renderQuickPrompts
+        // for ask mode, so it survives every re-render.
+        try { this._renderQuickPrompts("start"); } catch (_) {}
+      } else if (mode === "booking") {
+        if (!opts.silent) {
+          // Lock free text immediately (card steps stay locked; the reply
+          // hook re-opens field-value steps). Exit pill shows right away.
+          try {
+            this._input.disabled = true;
+            this._sendBtn.disabled = true;
+            this._input.placeholder = "Please choose an option above ☝️";
+            this._input.style.opacity = "0.5";
+          } catch (_) {}
+          try { this._renderModeExit(); } catch (_) {}
+          // Department picker FIRST when the org has one (pure directive
+          // UI); otherwise kick the booking intent directly.
+          let _deptShown = false;
+          try {
+            if (this._getCatalogUnits().length > 0) {
+              this._maybeShowCatalogPicker();
+              _deptShown = this._catalogPickerShown === true;
+            }
+          } catch (_) {}
+          if (!_deptShown) {
+            this._handleSendManual("I want to book an appointment");
+          }
+        }
+        // Exit pill renders after the booking reply arrives (post-directive hook).
+      }
+    }
+
+    _clearQuickPrompts() {
+      try {
+        if (this._qpBar) {
+          this._qpBar.innerHTML = "";
+          this._qpBar.style.display = "none";
+        }
+        this._msgList.querySelectorAll(".quick-prompts").forEach((el) => el.remove());
+      } catch (_) {}
+    }
+
+    _appendBookingSwitchPill() {
+      // Persistent way back into guided booking from Ask AI. Rendered as
+      // part of every ask-mode bar paint so follow-up re-renders (which
+      // clear the bar) can never drop it.
+      try {
+        if (!this._qpBar || this._qpBar.querySelector('[data-switch="booking"]')) return;
+        const btn = document.createElement("button");
+        btn.className = "qp-pill qp-mode";
+        btn.textContent = "📅 Start Booking";
+        btn.setAttribute("aria-label", "Switch to guided booking");
+        btn.dataset.switch = "booking";
+        btn.onclick = () => this._switchSection("booking");
+        this._qpBar.appendChild(btn);
+        this._qpBar.style.display = "flex";
+      } catch (_) {}
+    }
+
+    _renderQuickPrompts(location) {
+      // Never suggest while a human owns the chat (Mando parity).
+      // Pills live in the fixed bar above the input (Mando style), not in
+      // the message flow.
+      if (this._humanActive || !this._qpBar) return;
+      const prompts = this._quickPromptsFor(location);
+      this._clearQuickPrompts();
+      prompts.forEach((p) => {
+        const btn = document.createElement("button");
+        btn.className = "qp-pill";
+        btn.textContent = p.title;
+        btn.setAttribute("aria-label", `Suggested: ${p.title}`);
+        btn.onclick = () => {
+          if (p.link) {
+            try { window.open(p.link, "_blank", "noopener"); } catch (_) {}
+            return;
+          }
+          this._clearQuickPrompts();
+          this._handleSendManual(p.content);
+        };
+        this._qpBar.appendChild(btn);
+      });
+      // Ask AI always keeps its booking switch pill, even with zero admin
+      // prompts configured (otherwise there is no way back to booking).
+      if (this._chatMode === "ask") {
+        this._appendBookingSwitchPill();
+      } else if (this._qpBar.children.length) {
+        this._qpBar.style.display = "flex";
+      }
+    }
+
+    async _renderDirectiveUI(directive, fieldMeta, agentMessage) {
+      // Single source of directive→card rendering: used by the dispatch
+      // response path AND by session resume (section switch back / page
+      // reload), so a re-joined booking renders the exact same card the
+      // flow would have shown — never free text.
+      if (directive === "REQUIRE_DATE_PICKER") {
+        this._appendDatePicker(fieldMeta);
+      } else if (directive === "REQUIRE_PROVIDER_PICKER") {
+        this._appendEngineProviderPicker(fieldMeta);
+      } else if (directive === "REQUIRE_TIME_SLOT_GRID") {
+        await this._appendTimeSlotGrid(fieldMeta);
+      } else if (directive === "REQUIRE_PHONE_INPUT") {
+        this._appendPhoneInput(fieldMeta);
+      } else if (directive === "REQUIRE_EMAIL_INPUT") {
+        if (this._chatMode === "booking") {
+          this._appendFieldInputCard(fieldMeta, "email");
+        } else {
+          this._clearDirectiveCards();
+          this._updateInputMode(
+            "email",
+            fieldMeta?.placeholder || "Enter email address...",
+          );
+          this._renderSkipAction(fieldMeta);
+        }
+      } else if (directive === "REQUIRE_NUMBER_INPUT") {
+        if (this._chatMode === "booking") {
+          this._appendFieldInputCard(fieldMeta, "number");
+        } else {
+          this._clearDirectiveCards();
+          this._updateInputMode(
+            "number",
+            fieldMeta?.placeholder || "Enter a number...",
+          );
+          this._renderSkipAction(fieldMeta);
+        }
+      } else if (directive === "REQUIRE_SELECT") {
+        this._appendSelectInput(fieldMeta);
+      } else if (directive === "REQUIRE_TEXTAREA") {
+        if (this._chatMode === "booking") {
+          this._appendFieldInputCard(fieldMeta, "textarea");
+        } else {
+          this._clearDirectiveCards();
+          this._appendSystem(
+            `${fieldMeta?.icon || "📄"} ${fieldMeta?.description || "Please provide details."}`,
+          );
+          this._renderSkipAction(fieldMeta);
+        }
+      } else if (directive === "TEXT_INPUT" && fieldMeta) {
+        if (this._chatMode === "booking") {
+          this._appendFieldInputCard(fieldMeta, "text");
+        } else {
+          this._clearDirectiveCards();
+          this._updateInputMode(
+            "text",
+            fieldMeta.placeholder || "Type a message...",
+          );
+          this._renderSkipAction(fieldMeta);
+        }
+      } else if (directive === "REQUIRE_PAYMENT") {
+        this._clearDirectiveCards();
+        this._appendPaymentCard(fieldMeta || {});
+        this._clearSkipAction();
+      } else if (directive === "REQUIRE_OTP_MODAL") {
+        this._clearDirectiveCards();
+        this._appendOTPInterface(fieldMeta || {});
+        this._clearSkipAction();
+      } else if (
+        directive === "REQUEST_CONFIRMATION" ||
+        directive === "BOOKING_SUMMARY_CARD"
+      ) {
+        this._clearDirectiveCards();
+        this._appendSummaryCard(
+          agentMessage || "Please review your booking details before confirming.",
+        );
+        this._clearSkipAction();
+      } else if (directive === "BOOKING_CONFIRMED_CARD") {
+        this._clearDirectiveCards();
+        this._appendConfirmedCard(
+          agentMessage || "Your booking has been confirmed.",
+          fieldMeta || {},
+        );
+        this._clearSkipAction();
+      } else if (directive === "HUMAN_ACTIVE") {
+        this._clearDirectiveCards();
+        if (!this._humanActive && !this._humanJoinedShownFor) {
+          this._appendSystem("👨‍💼 Support agent joined the chat");
+          this._humanJoinedShownFor = this.sessionId;
+        }
+        this._updateInputMode("text", "Type a message...");
+        this._clearSkipAction();
+        this._clearQuickPrompts();
+        this._humanActive = true;
+        try { this._setComposerVisible(true); } catch (_) {}
+        this._startPolling();
+      } else {
+        // Reset input to default mode for unknown directives. In guided
+        // booking mode the composer is hidden, so unknown turns get a
+        // generic answer card instead of a dead end.
+        if (this._chatMode === "booking") {
+          this._appendFieldInputCard(
+            { label: "Your answer", placeholder: "Type your answer...", required: true },
+            "text"
+          );
+        } else {
+          this._clearDirectiveCards();
+          this._updateInputMode("text", "Type a message...");
+          this._clearSkipAction();
+        }
+      }
+      // Post-render pills + composer visibility.
+      try {
+        const _noPills = ["REQUIRE_OTP_MODAL", "BOOKING_CONFIRMED_CARD", "HUMAN_ACTIVE", "REQUIRE_PAYMENT"].includes(directive);
+        if (this._humanActive || _noPills) {
+          this._clearQuickPrompts();
+        } else if (this._chatMode === "booking") {
+          this._renderModeExit();
+          try { this._applyComposerRule(); } catch (_) {}
+        } else {
+          try { this._applyComposerRule(); } catch (_) {}
+          this._renderQuickPrompts("followup");
+        }
+      } catch (_) {}
+    }
+
+    async _resumePendingCard() {
+      // Re-joining a guided-booking session: render the PENDING step as its
+      // directive card. The booking section is fully card-driven — the
+      // composer stays hidden and the backend's session-resume endpoint
+      // supplies the pending directive computed from live session state.
+      if (!this.sessionId || !CONFIG.widgetToken || this._chatMode !== "booking") return;
+      try {
+        const base = CONFIG.apiBase.replace(/\/api\/v1\/?$/, "") + "/api/v1";
+        const url = `${base}/widget/session-resume?session_id=${encodeURIComponent(this.sessionId)}&widget_token=${encodeURIComponent(CONFIG.widgetToken)}`;
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data || !data.directive) return;
+        this._lastDirective = data.directive;
+        this._activeFieldMeta = data.field_meta || null;
+        try { this._setInlineValidation(""); } catch (_) {}
+        await this._renderDirectiveUI(data.directive, data.field_meta || null, data.message || null);
+      } catch (_) {}
+    }
+
     async _appendTimeSlotGrid(fieldMeta) {
       this._clearDirectiveCards();
       this._clearSkipAction();
@@ -1561,13 +2278,19 @@
       }
       const selectedDate = this._extractLatestIsoDate();
       this.selectedDate = selectedDate || this.selectedDate;
+      // Fast-reply: show checking state immediately so the 30s+ engine
+      // roundtrip does not look frozen (Feature 1).
+      const loadingEl = this._appendSystem("⏳ Checking live availability…");
       let options = [];
       let availabilityStatus = null;
+      let totalAvailable = 0;
       if (selectedDate) {
         const availability = await this._fetchAvailabilityOptions(selectedDate);
         options = availability.options;
         availabilityStatus = availability.status;
+        totalAvailable = availability.total ?? options.filter((o) => o.available !== false).length;
       }
+      try { loadingEl?.remove?.(); } catch (_) {}
       if (!options.length && fieldMeta?.options?.length) {
         options = fieldMeta.options.map((label) => ({
           id: null,
@@ -1618,7 +2341,14 @@
       const optionsContainer = document.createElement("div");
       optionsContainer.className = "select-options-grid";
 
-      options.forEach((opt) => {
+      // Suggestions-first: show 3 pills + "Show more (N)" instead of the
+      // full grid. Single fetch, two-stage render — no second request.
+      const _suggestLimit = Math.max(1, Number(fieldMeta?.suggestion_limit || 3) || 3);
+      const _free = options.filter((o) => o.available !== false);
+      const _hasMany = _free.length > _suggestLimit;
+      const _initial = _hasMany ? _free.slice(0, _suggestLimit) : options;
+      const _remaining = _hasMany ? _free.slice(_suggestLimit) : [];
+      const _renderBtn = (opt) => {
         const btn = document.createElement("button");
         btn.className = "select-option-btn time-slot-btn";
         const localText = document.createElement("span");
@@ -1646,8 +2376,21 @@
           this.selectedSlotId = opt.id || null;
           this._handleSendManual(opt.label);
         };
-        optionsContainer.appendChild(btn);
-      });
+        return btn;
+      };
+      _initial.forEach((opt) => optionsContainer.appendChild(_renderBtn(opt)));
+      if (_hasMany) {
+        const moreBtn = document.createElement("button");
+        moreBtn.className = "select-option-btn time-slot-more-btn";
+        moreBtn.textContent = `Show more times (${_remaining.length} more)`;
+        moreBtn.setAttribute("aria-label", `Show ${_remaining.length} more time slots`);
+        moreBtn.onclick = () => {
+          moreBtn.remove();
+          _remaining.forEach((opt) => optionsContainer.appendChild(_renderBtn(opt)));
+          this._scrollToBottom();
+        };
+        optionsContainer.appendChild(moreBtn);
+      }
 
       div.appendChild(optionsContainer);
       this._msgList.appendChild(div);
@@ -1686,9 +2429,11 @@
         return {
           options: this._normalizeAvailabilitySlots(payload.slots),
           status: payload.availability_status || null,
+          total: typeof payload.total_available === "number" ? payload.total_available : null,
+          truncated: !!payload.truncated,
         };
       } catch (e) {
-        return { options: [], status: null };
+        return { options: [], status: null, total: null, truncated: false };
       }
     }
 
@@ -2022,6 +2767,14 @@
       content.className = "summary-content";
       this._renderMarkdown(content, message);
 
+      const feeDisplay = this._selectedProviderFee();
+      if (feeDisplay) {
+        const feeLine = document.createElement("div");
+        feeLine.className = "summary-fee-line";
+        feeLine.textContent = `Fee: ${feeDisplay}`;
+        content.appendChild(feeLine);
+      }
+
       const actions = document.createElement("div");
       actions.className = "card-actions";
 
@@ -2179,6 +2932,26 @@
           ? "📧 Booking confirmed. Confirmation email delivery is retrying in the background."
           : "📧 A confirmation email is on its way.";
 
+      // Feature 3: "Add to Calendar (.ics)" — only when the backend
+      // proved the booking (booking_id in fieldMeta). No id = no button,
+      // so a false-confirmation can never offer a calendar file.
+      try {
+        const bid = fieldMeta && fieldMeta.booking_id;
+        if (bid) {
+          const icsBtn = document.createElement("a");
+          const tok = (typeof CONFIG !== "undefined" && CONFIG.widgetToken) || "";
+          icsBtn.href = `${CONFIG.apiBase}/widget/invite/${encodeURIComponent(String(bid))}?widget_token=${encodeURIComponent(tok)}`;
+          icsBtn.textContent = "📅 Add to Calendar (.ics)";
+          icsBtn.setAttribute("download", `booking-${String(bid)}.ics`);
+          icsBtn.style.cssText = `
+                        margin-top:12px;padding:10px 20px;border:1px solid var(--border);border-radius:8px;
+                        background:transparent;color:var(--text);font-size:13px;font-weight:600;
+                        cursor:pointer;width:100%;text-align:center;text-decoration:none;display:block;box-sizing:border-box;
+                    `;
+          div.appendChild(icsBtn);
+        }
+      } catch (_) {}
+
       // "Start New Booking" button
       const newBtn = document.createElement("button");
       newBtn.textContent = "🔄 Start New Booking";
@@ -2224,10 +2997,108 @@
       this._sendBtn.style.opacity = "1";
     }
 
+    _setComposerVisible(visible) {
+      // Show/hide the whole typing bar. Booking mode hides it (every step
+      // is a card); Ask AI and legacy flows keep it visible.
+      try {
+        if (this._inputArea) {
+          this._inputArea.style.display = visible ? "flex" : "none";
+        }
+      } catch (_) {}
+    }
+
+    _appendFieldInputCard(fieldMeta = {}, inputType = "text") {
+      // Standalone input card for guided-booking mode (composer is hidden,
+      // so each field carries its own input + submit). Mirrors the legacy
+      // composer path: validation errors inline, Skip when optional.
+      this._clearDirectiveCards();
+      this._clearSkipAction();
+      const div = document.createElement("div");
+      div.className = "message agent field-input-card directive-card";
+      const label = document.createElement("div");
+      label.className = "card-header";
+      label.textContent = `${fieldMeta.icon || "✏️"} ${fieldMeta.label || "Your answer"}`;
+      div.appendChild(label);
+      if (fieldMeta.description) {
+        const desc = document.createElement("p");
+        desc.className = "field-description";
+        desc.textContent = fieldMeta.description;
+        div.appendChild(desc);
+      }
+      if (fieldMeta?.validation_error) {
+        const error = document.createElement("p");
+        error.className = "field-inline-error";
+        error.textContent = fieldMeta.validation_error;
+        div.appendChild(error);
+      }
+      let input;
+      if (inputType === "textarea") {
+        input = document.createElement("textarea");
+        input.rows = 3;
+      } else {
+        input = document.createElement("input");
+        input.type = inputType === "email" ? "email" : inputType === "number" ? "number" : "text";
+      }
+      input.className = "widget-field-textinput";
+      input.placeholder = fieldMeta.placeholder || `Enter ${fieldMeta.label || "your answer"}...`;
+      input.setAttribute("aria-label", fieldMeta.label || "Your answer");
+      div.appendChild(input);
+      const row = document.createElement("div");
+      row.className = "widget-field-actions";
+      const submit = document.createElement("button");
+      submit.className = "widget-field-btn";
+      submit.textContent = "Submit";
+      const doSubmit = () => {
+        const val = (input.value || "").trim();
+        if (!val && fieldMeta.required !== false) {
+          let err = div.querySelector(".field-inline-error");
+          if (!err) {
+            err = document.createElement("p");
+            err.className = "field-inline-error";
+            div.insertBefore(err, input.nextSibling);
+          }
+          err.textContent = `Please enter ${fieldMeta.label || "your answer"}.`;
+          try { input.focus(); } catch (_) {}
+          return;
+        }
+        submit.disabled = true;
+        input.disabled = true;
+        this._handleSendManual(val || this._skipToken);
+      };
+      submit.onclick = doSubmit;
+      input.onkeydown = (e) => {
+        if (e.key === "Enter" && !e.shiftKey && inputType !== "textarea") {
+          e.preventDefault();
+          doSubmit();
+        }
+      };
+      row.appendChild(submit);
+      if (fieldMeta.required === false) {
+        const skip = document.createElement("button");
+        skip.className = "widget-field-btn widget-secondary-btn";
+        skip.textContent = "Skip";
+        skip.onclick = () => {
+          skip.disabled = true;
+          submit.disabled = true;
+          this._handleSendManual(this._skipToken);
+        };
+        row.appendChild(skip);
+      }
+      div.appendChild(row);
+      this._msgList.appendChild(div);
+      this._scrollToBottom();
+      setTimeout(() => { try { input.focus(); } catch (_) {} }, 100);
+    }
+
     _startNewSession() {
       // Clear session, reset chat, start fresh
       this.sessionId = null;
+      this._chatMode = null;
+      this._lastDirective = null;
+      try { sessionStorage.removeItem(this._modeStorageKey()); } catch (_) {}
       sessionStorage.removeItem(this._sessionStorageKey());
+      try { sessionStorage.removeItem(this._sessionKeyFor("ask")); } catch (_) {}
+      try { sessionStorage.removeItem(this._sessionKeyFor("booking")); } catch (_) {}
       sessionStorage.removeItem("dotstark_session_id");
       sessionStorage.removeItem("dotstark_user_timezone");
       sessionStorage.removeItem("dotstark_timezone_source");
@@ -2243,11 +3114,11 @@
       this._setInlineValidation("");
       this._clearSkipAction();
       this._msgList.querySelectorAll(".message").forEach((m) => m.remove());
-      this._enableInput("Type a message...");
-      this._appendBubble(
-        "agent",
-        "Hello! 👋 I'm your booking assistant. How can I help you schedule an appointment today?",
-      );
+      try { this._clearQuickPrompts(); } catch (_) {}
+      // Back to home slide: two big buttons, composer hidden.
+      this._canGoHome = true;
+      try { this._showHomeView(); } catch (_) {}
+      try { this._setComposerVisible(false); } catch (_) {}
     }
 
     _appendNewBookingPrompt() {
@@ -2601,6 +3472,131 @@
                     transform: rotate(90deg) scale(0.9);
                 }
 
+                .header-back {
+                    width: 32px;
+                    height: 32px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    cursor: pointer;
+                    border: none;
+                    background: transparent;
+                    color: var(--text-muted);
+                    border-radius: 8px;
+                    transition: all 0.2s;
+                    line-height: 1;
+                    flex-shrink: 0;
+                }
+
+                .header-back:hover {
+                    background: rgba(255,255,255,0.06);
+                    color: var(--text-pri);
+                }
+
+                /* ════════ HOME SLIDE (mode select, below header) ════════ */
+                .home-view {
+                    display: none;
+                    flex: 1;
+                    flex-direction: column;
+                    align-items: stretch;
+                    justify-content: center;
+                    gap: 12px;
+                    padding: 28px 24px;
+                    background: var(--bg-primary);
+                    overflow-y: auto;
+                }
+                .home-view.slide-out {
+                    animation: homeOut 0.28s ease-in forwards;
+                }
+                .home-view.slide-in {
+                    animation: homeIn 0.28s ease-out forwards;
+                }
+                @keyframes homeOut {
+                    from { opacity: 1; transform: translateX(0); }
+                    to   { opacity: 0; transform: translateX(-40px); }
+                }
+                @keyframes homeIn {
+                    from { opacity: 0; transform: translateX(40px); }
+                    to   { opacity: 1; transform: translateX(0); }
+                }
+                .home-avatar {
+                    width: 56px;
+                    height: 56px;
+                    border-radius: 16px;
+                    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    font-size: 26px;
+                    font-weight: 800;
+                    color: #fff;
+                    margin: 0 auto 4px;
+                    overflow: hidden;
+                }
+                .home-avatar img {
+                    width: 100%;
+                    height: 100%;
+                    object-fit: cover;
+                    display: block;
+                }
+                .home-title {
+                    margin: 0;
+                    text-align: center;
+                    font-size: 19px;
+                    font-weight: 800;
+                    color: var(--text-pri);
+                }
+                .home-tagline {
+                    margin: 0 0 8px;
+                    text-align: center;
+                    font-size: 13px;
+                    color: var(--text-sec);
+                }
+                .home-btn {
+                    display: flex;
+                    align-items: center;
+                    gap: 14px;
+                    width: 100%;
+                    padding: 16px;
+                    border: none;
+                    border-radius: 16px;
+                    background: var(--accent);
+                    color: #fff;
+                    cursor: pointer;
+                    text-align: left;
+                    font-family: 'Inter', system-ui, sans-serif;
+                    box-shadow: 0 6px 24px var(--accent-glow);
+                    transition: transform 0.15s, box-shadow 0.2s, opacity 0.2s;
+                }
+                .home-btn:hover {
+                    transform: translateY(-2px);
+                    box-shadow: 0 10px 28px var(--accent-glow);
+                    opacity: 0.95;
+                }
+                .home-btn:active {
+                    transform: scale(0.98);
+                }
+                .home-btn-icon {
+                    font-size: 26px;
+                    line-height: 1;
+                    flex-shrink: 0;
+                }
+                .home-btn-text {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 2px;
+                    min-width: 0;
+                }
+                .home-btn-title {
+                    font-size: 16px;
+                    font-weight: 800;
+                }
+                .home-btn-desc {
+                    font-size: 12px;
+                    font-weight: 500;
+                    opacity: 0.85;
+                }
+
 
                 .header-business {
                     font-size: 11.5px !important;
@@ -2745,6 +3741,41 @@
                     gap: 8px;
                     background: var(--bg-card);
                     align-items: center;
+                }
+
+                /* ════════ QUICK PROMPTS BAR (Mando-style pills above input) ════════ */
+                .quick-prompts-bar {
+                    display: none;
+                    gap: 8px;
+                    padding: 10px 16px 4px;
+                    overflow-x: auto;
+                    background: var(--bg-card);
+                    scrollbar-width: none;
+                }
+                .quick-prompts-bar::-webkit-scrollbar {
+                    display: none;
+                }
+                .qp-pill {
+                    flex-shrink: 0;
+                    padding: 8px 16px;
+                    border-radius: 20px;
+                    border: 1px solid var(--border);
+                    background: #000;
+                    color: #fff;
+                    font-size: 13px;
+                    font-weight: 600;
+                    font-family: 'Inter', system-ui, sans-serif;
+                    cursor: pointer;
+                    transition: all 0.2s;
+                    white-space: nowrap;
+                }
+                .qp-pill:hover {
+                    border-color: var(--accent);
+                    box-shadow: 0 2px 12px var(--accent-glow);
+                    transform: translateY(-1px);
+                }
+                .qp-pill:active {
+                    transform: scale(0.96);
                 }
 
                 .input-area input {
@@ -2962,6 +3993,22 @@
                 .widget-date-input:focus {
                     border-color: var(--accent);
                 }
+                .widget-field-textinput {
+                    width: 100%;
+                    box-sizing: border-box;
+                    background: var(--bg-input);
+                    border: 1px solid var(--border);
+                    border-radius: 8px;
+                    padding: 10px 12px;
+                    color: var(--text-pri);
+                    font-size: 14px;
+                    outline: none;
+                    margin-bottom: 4px;
+                    font-family: 'Inter', system-ui, sans-serif;
+                }
+                .widget-field-textinput:focus {
+                    border-color: var(--accent);
+                }
 
                 .widget-field-btn {
                     display: block;
@@ -3001,6 +4048,23 @@
                     padding: 10px;
                     color: var(--text-pri);
                     font-size: 13px;
+                }
+
+                .widget-dept-select {
+                    width: 100%;
+                    box-sizing: border-box;
+                    background: var(--bg-input);
+                    border: 1px solid var(--border);
+                    border-radius: 8px;
+                    padding: 10px 12px;
+                    color: var(--text-pri);
+                    font-size: 14px;
+                    outline: none;
+                    margin-bottom: 4px;
+                    font-family: 'Inter', system-ui, sans-serif;
+                }
+                .widget-dept-select:focus {
+                    border-color: var(--accent);
                 }
 
                 .widget-field-actions {
@@ -3078,6 +4142,17 @@
                 .select-option-btn:disabled {
                     opacity: 0.5;
                     cursor: default;
+                }
+                .select-option-btn .select-option-name {
+                    display: block;
+                    font-weight: 600;
+                }
+                .select-option-btn .select-option-desc {
+                    display: block;
+                    font-size: 11px;
+                    font-weight: 400;
+                    opacity: 0.7;
+                    margin-top: 2px;
                 }
 
                 /* Time slot pills - green accent for available slots */

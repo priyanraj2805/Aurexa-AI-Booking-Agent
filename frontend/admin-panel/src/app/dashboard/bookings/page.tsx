@@ -91,6 +91,31 @@ export default function BookingsPage() {
   const [status, setStatus] = useState<string>("");
   const [attendanceStatus, setAttendanceStatus] = useState<string>("");
   const [meetingModeFilter, setMeetingModeFilter] = useState<string>("");
+  const [unitFilter, setUnitFilter] = useState<string>("");
+  const [providerFilter, setProviderFilter] = useState<string>("");
+  const [filterUnits, setFilterUnits] = useState<{ id: string; name: string }[]>([]);
+  const [filterProviders, setFilterProviders] = useState<{ id: string; full_name: string; units: string[] }[]>([]);
+
+  useEffect(() => {
+    import("@/lib/org-api").then(({ orgApi }) =>
+      Promise.all([orgApi.units().catch(() => []), orgApi.providers().catch(() => [])]).then(([u, p]) => {
+        setFilterUnits((u as { id: string; name: string }[]).map((x) => ({ id: x.id, name: x.name })));
+        setFilterProviders(
+          (p as { id: string; full_name: string; units: string[] }[]).map((x) => ({ id: x.id, full_name: x.full_name, units: x.units || [] }))
+        );
+      })
+    ).catch(() => {});
+  }, []);
+
+  // Doctor list follows the selected department.
+  const visibleProviders = unitFilter ? filterProviders.filter((p) => p.units.includes(unitFilter)) : filterProviders;
+  useEffect(() => {
+    if (unitFilter && providerFilter && !visibleProviders.some((p) => p.id === providerFilter)) {
+      setProviderFilter("");
+      setPage(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unitFilter]);
 
   const searchParams = useSearchParams();
   const highlightId = searchParams.get("highlight");
@@ -106,7 +131,7 @@ export default function BookingsPage() {
     }
   }, [searchParams]);
 
-  const { data, loading, error, refetch } = useBookings(page, 10, { search, status, attendance_status: attendanceStatus, meeting_mode: meetingModeFilter, fromDate, toDate });
+  const { data, loading, error, refetch } = useBookings(page, 10, { search, status, attendance_status: attendanceStatus, meeting_mode: meetingModeFilter, fromDate, toDate, unit_id: unitFilter || undefined, provider_id: providerFilter || undefined });
 
   const handleAttendanceChange = async (bookingId: string, newStatus: string) => {
     try {
@@ -196,9 +221,33 @@ export default function BookingsPage() {
             <option value="ONLINE">Online</option>
             <option value="OFFLINE">Offline</option>
           </select>
-          {(status || attendanceStatus || meetingModeFilter) && (
+          {!!filterUnits.length && (
+            <select
+              value={unitFilter}
+              onChange={(e) => { setUnitFilter(e.target.value); setPage(1); }}
+              className="h-9 rounded-md border border-border bg-background px-3 text-xs"
+            >
+              <option value="">All departments</option>
+              {filterUnits.map((u) => (
+                <option key={u.id} value={u.id}>{u.name}</option>
+              ))}
+            </select>
+          )}
+          {!!filterProviders.length && (
+            <select
+              value={providerFilter}
+              onChange={(e) => { setProviderFilter(e.target.value); setPage(1); }}
+              className="h-9 rounded-md border border-border bg-background px-3 text-xs"
+            >
+              <option value="">All members</option>
+              {visibleProviders.map((p) => (
+                <option key={p.id} value={p.id}>{p.full_name}</option>
+              ))}
+            </select>
+          )}
+          {(status || attendanceStatus || meetingModeFilter || unitFilter || providerFilter) && (
             <button
-              onClick={() => { setStatus(""); setAttendanceStatus(""); setMeetingModeFilter(""); setPage(1); }}
+              onClick={() => { setStatus(""); setAttendanceStatus(""); setMeetingModeFilter(""); setUnitFilter(""); setProviderFilter(""); setPage(1); }}
               className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
             >
               Clear filters <X className="size-3.5" />
@@ -256,6 +305,12 @@ export default function BookingsPage() {
                       <div className="text-[11px] text-muted-foreground">
                         Meeting: {formatDateTime(b.slot_start)}
                       </div>
+                      {(b.unit_name || b.provider_name) && (
+                        <div className="flex gap-1">
+                          {b.unit_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-secondary">{b.unit_name}</span>}
+                          {b.provider_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">{b.provider_name}</span>}
+                        </div>
+                      )}
                       <MeetingModeBadge booking={b} />
                       <div className="flex items-center gap-1.5 mt-1">
                         <select
@@ -311,6 +366,12 @@ export default function BookingsPage() {
                             <div className="font-medium">{b.customer_name}</div>
                             {b.customer_phone && (
                               <div className="text-[11px] text-muted-foreground">{b.customer_phone}</div>
+                            )}
+                            {(b.unit_name || b.provider_name) && (
+                              <div className="flex gap-1 mt-1">
+                                {b.unit_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-secondary">{b.unit_name}</span>}
+                                {b.provider_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">{b.provider_name}</span>}
+                              </div>
                             )}
                           </div>
                         </div>

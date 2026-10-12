@@ -44,6 +44,10 @@ class AuditAction(str, Enum):
     USER_DISABLE = "user.disable"
     USER_ENABLE = "user.enable"
 
+    # Staff invite operations (org-mode)
+    STAFF_INVITE = "staff.invite"
+    STAFF_ACCEPT = "staff.accept"
+
     # Impersonation operations (Phase 8, via bridge)
     IMPERSONATION_START = "impersonation.start"
     IMPERSONATION_END = "impersonation.end"

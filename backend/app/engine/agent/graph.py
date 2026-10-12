@@ -390,6 +390,58 @@ def _looks_date_like(value: Any) -> bool:
     return bool(DATEISH_TOKEN_RE.search(text))
 
 
+def _mode_prompt_hint(mode: Any) -> str:
+    """Prompt block for the widget conversation mode (ask | booking).
+
+    The MODEL does the routing — it reads what the user wants and answers
+    accordingly. Deterministic code downstream stays as backstop only.
+    """
+    m = str(mode or "").strip().lower()
+    if m == "ask":
+        return (
+            "## CONVERSATION MODE: ASK AI (question-answering section)\n"
+            "The visitor is in the Ask AI section. Acknowledge each question "
+            "and answer it helpfully and ONLY from the business knowledge "
+            "provided — never invent facts, timings, prices, or policies.\n"
+            "CRITICAL: never collect booking details here — not name, email, "
+            "phone, date, nor time. If the visitor offers such details, "
+            "acknowledge briefly and ask for their question instead of "
+            "storing anything or asking for the next detail.\n"
+            "Example — visitor: 'heyyy i need your help' → you: 'Hello! I'm "
+            "here to help — what is your question?' (NEVER 'what is your "
+            "full name?').\n"
+            "If the visitor asks FOR HELP with booking, rescheduling, or "
+            "cancellation (how it works, timings, policy), help them with "
+            "correct information from the knowledge. Give no wrong guidance "
+            "and no invented details.\n"
+            "If the visitor wants to PERFORM a booking, cancellation, or "
+            "reschedule right now, do NOT collect details and do NOT start "
+            "any booking, cancel, or reschedule procedure. Instead direct "
+            "them to the booking section, e.g.: \"To book an appointment "
+            "please click on the Book Appointment button below.\"\n"
+            "Examples of booking INTENT (redirect, don't collect):\n"
+            "- 'i want to book an appointment' → 'To book an appointment, please click the Book Appointment button below.'\n"
+            "- 'book me a slot' → 'To book an appointment, please click the Book Appointment button below.'\n"
+            "- 'cancel my booking' → 'To cancel, please use the Book Appointment section.'\n"
+            "- 'reschedule to Friday' → 'To reschedule, please use the Book Appointment section.'\n"
+            "If a question is answered by neither the knowledge nor anything "
+            "booking-related, reply EXACTLY with: "
+            "We dont have information regarding this. "
+            "If you need any other help, please tell me.\n"
+            "Keep replies conversational plain text."
+        )
+    if m == "booking":
+        return (
+            "## CONVERSATION MODE: GUIDED BOOKING (booking section)\n"
+            "The visitor is in the Book Appointment section. Collect the "
+            "required booking details step by step using the booking UI "
+            "directives. If the visitor goes off-topic, briefly steer them "
+            "back to the current pending step. Do not answer general "
+            "knowledge questions at length here."
+        )
+    return ""
+
+
 async def call_model(
     state: BookingAgentState,
     config: RunnableConfig | None = None,
@@ -448,6 +500,17 @@ async def call_model(
     except Exception:
         _behaviour_hint = ""
         _behaviour = {}
+
+    # Widget conversation mode (ask | booking) — the MODEL routes here;
+    # deterministic guards downstream are only backstops, never the driver.
+    _mode_hint = ""
+    try:
+        _collected_for_mode = state.get("collected_fields", {})
+        _mode_hint = _mode_prompt_hint(
+            _collected_for_mode.get("_mode") if isinstance(_collected_for_mode, dict) else None
+        )
+    except Exception:
+        _mode_hint = ""
 
     if latest_user_message:
         schedule_answer = await lookup_schedule_business_hours_answer(
@@ -536,13 +599,27 @@ async def call_model(
     
     # 2. Extract missing fields based on current collected_fields
     collected = state.get("collected_fields", {})
-    skipped_optional = set(state.get("optional_skips", []))
-    missing = [
-        f["name"]
-        for f in field_definitions
-        if f["name"] not in collected
-        and (f.get("required", True) or f["name"] not in skipped_optional)
-    ]
+    _mode_val = None
+    try:
+        if isinstance(collected, dict):
+            _mode_val = collected.get("_mode")
+    except Exception:
+        pass
+    # Ask-AI mode: zero collection pressure. The model must never see a
+    # missing-fields list — it leaks into replies as field asks — and the
+    # deterministic fallbacks (regex extraction, time seatbelt) must not
+    # collect anything either.
+    if _mode_val == "ask":
+        skipped_optional = set()
+        missing = []
+    else:
+        skipped_optional = set(state.get("optional_skips", []))
+        missing = [
+            f["name"]
+            for f in field_definitions
+            if f["name"] not in collected
+            and (f.get("required", True) or f["name"] not in skipped_optional)
+        ]
     
     # 3. Build system prompt
     from app.engine.scheduling_policy import load_weekly_hours_block
@@ -567,12 +644,15 @@ async def call_model(
         field_definitions,
         hours_block=hours_block,
         is_first_turn=not _has_booking_data,
+        mode=_mode_val or "booking",
     )
     context_block = build_context_block(collected, missing, "ACTIVE")
     if active_summary:
         context_block = f"{context_block}\n\nConversation summary:\n{active_summary}"
     if _behaviour_hint:
         context_block = f"{context_block}\n\n{_behaviour_hint}"
+    if _mode_hint:
+        context_block = f"{context_block}\n\n{_mode_hint}"
 
     # 3b. Retrieve relevant knowledge from uploaded documents and crawled websites.
     # Tiered: booking field values/confirmations skip entirely ("skip");
@@ -1245,12 +1325,23 @@ async def call_model(
         except Exception:
             logger.warning("knowledge_name_gate_failed_open", exc_info=True)
 
-        required_fields = [
-            field["name"] for field in field_definitions if field.get("required", True)
-        ]
-        optional_fields = [
-            field["name"] for field in field_definitions if not field.get("required", True)
-        ]
+        _mode_val = None
+        try:
+            _cf = state.get("collected_fields", {})
+            if isinstance(_cf, dict):
+                _mode_val = _cf.get("_mode")
+        except Exception:
+            pass
+        if _mode_val == "ask":
+            required_fields = []
+            optional_fields = []
+        else:
+            required_fields = [
+                field["name"] for field in field_definitions if field.get("required", True)
+            ]
+            optional_fields = [
+                field["name"] for field in field_definitions if not field.get("required", True)
+            ]
 
         validation_errors: Dict[str, str] = {}
         validated_extracted = dict(extracted) if isinstance(extracted, dict) else {}

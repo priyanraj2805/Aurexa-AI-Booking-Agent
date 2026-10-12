@@ -6,11 +6,27 @@ from typing import Optional, Dict, Any
 class ChatMessageRequest(BaseModel):
     session_id: Optional[UUID4] = None
     message: str = Field(..., min_length=1, max_length=2000)
-    selected_slot_id: Optional[str] = Field(default=None, max_length=160)
+    selected_slot_id: Optional[str] = Field(default=None, max_length=200)
     user_timezone: Optional[str] = Field(default=None, max_length=64)
     timezone_source: Optional[str] = Field(default=None, max_length=20)
     timezone_fallback_used: Optional[bool] = None
     timezone_fallback_reason: Optional[str] = Field(default=None, max_length=64)
+    # Org-mode: picked department + doctor (validated, pinned to session)
+    unit_id: Optional[str] = Field(default=None, max_length=64)
+    provider_id: Optional[str] = Field(default=None, max_length=64)
+    # Widget conversation mode: ask (KB Q&A only) | booking (guided booking
+    # only). Pinned to collected_data["_mode"]; None = legacy mixed flow.
+    mode: Optional[str] = Field(default=None, max_length=16)
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        normalized = value.strip().lower()
+        if normalized not in ("ask", "booking"):
+            raise ValueError("mode must be one of ask, booking")
+        return normalized
 
     @field_validator("message")
     @classmethod
@@ -30,12 +46,19 @@ class ChatMessageRequest(BaseModel):
             return None
 
         if normalized.startswith("virtual|"):
-            parts = normalized.split("|", 2)
-            if len(parts) != 3:
-                raise ValueError("selected_slot_id virtual format must be virtual|<org_id>|<start_utc>")
+            parts = normalized.split("|")
+            # virtual|<org>|<start>  OR  virtual|<org>|<provider>|<start>
+            if len(parts) not in (3, 4):
+                raise ValueError(
+                    "selected_slot_id virtual format must be virtual|<org_id>|<start_utc> "
+                    "or virtual|<org_id>|<provider_id>|<start_utc>"
+                )
             try:
                 uuid.UUID(parts[1])
-                parsed_start = datetime.fromisoformat(parts[2])
+                start_part = parts[2] if len(parts) == 3 else parts[3]
+                if len(parts) == 4:
+                    uuid.UUID(parts[2])
+                parsed_start = datetime.fromisoformat(start_part)
                 if parsed_start.tzinfo is None:
                     raise ValueError("selected_slot_id virtual start_utc must be timezone-aware")
             except Exception as exc:

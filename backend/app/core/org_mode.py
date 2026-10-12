@@ -69,3 +69,26 @@ async def get_provider_id_for_user(db, org_id, user_id):
         )
     ).scalars().first()
     return str(prov.id) if prov else None
+
+
+async def require_organization_for(
+    db=None,  # AsyncSession (passed explicitly to avoid Depends cycles)
+    user=None,  # User (passed explicitly)
+):
+    """Enforce organization-only access. Raises 403 for individual orgs."""
+    from fastapi import HTTPException
+    from sqlalchemy.future import select
+
+    from app.models.organization import Organization
+
+    if db is None or user is None:
+        raise HTTPException(status_code=500, detail="Server misconfigured")
+    org = (
+        await db.execute(select(Organization).where(Organization.id == user.org_id))
+    ).scalars().first()
+    if org is None or not is_organization(org):
+        raise HTTPException(
+            status_code=403,
+            detail="Organization-only feature. Switch to an organization account to use departments and team management.",
+        )
+    return org

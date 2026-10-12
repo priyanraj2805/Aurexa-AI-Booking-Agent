@@ -76,13 +76,15 @@ async def compute_slot_inventory(
     org_id: uuid.UUID,
     target_date: date,
     org_config: Optional[OrgConfig] = None,
+    provider_id: Optional[uuid.UUID | str] = None,
 ) -> Tuple[List[dict], str]:
     """
-    Build full slot inventory for a date.
+    Build full slot inventory for a date, optionally for one doctor.
 
-    Returns:
-      - list of slot dicts: {start_time, start_utc, end_utc, available, reason}
-      - date-level reason code when inventory is empty (or "ok")
+    provider_id=None = org behavior (unchanged, individual shops).
+    provider_id set = use that doctor's override hours/timezone if present,
+    else fall back to org template. Booked/locked filtering is per-doctor
+    so two doctors can share the same clock time.
     """
     schedule_result = await db.execute(
         select(BusinessSchedule).where(BusinessSchedule.org_id == org_id)
@@ -92,15 +94,89 @@ async def compute_slot_inventory(
         return [], "no_schedule"
 
     duration = schedule.slot_duration_minutes
+    schedule_tz_default = (getattr(schedule, "timezone", None) or "UTC").strip()
+
+    # Per-doctor overrides (additive: NULL provider = org template untouched)
+    provider = None
+    if provider_id:
+        try:
+            from app.models.service_unit import Provider as _Provider
+
+            _pid = (
+                provider_id
+                if isinstance(provider_id, uuid.UUID)
+                else uuid.UUID(str(provider_id))
+            )
+            provider = (
+                await db.execute(
+                    select(_Provider).where(
+                        _Provider.id == _pid, _Provider.org_id == org_id
+                    )
+                )
+            ).scalars().first()
+        except Exception:
+            provider = None
+        if provider is None:
+            return [], "no_schedule"
+        if getattr(provider, "slot_duration_minutes", None):
+            duration = int(provider.slot_duration_minutes)
 
     weekday = target_date.weekday()
-    day_result = await db.execute(
-        select(ScheduleDay).where(
-            ScheduleDay.org_id == org_id,
-            ScheduleDay.day_of_week == weekday,
+    day = None
+    if provider is not None:
+        try:
+            day_result = await db.execute(
+                select(ScheduleDay).where(
+                    ScheduleDay.org_id == org_id,
+                    ScheduleDay.day_of_week == weekday,
+                    ScheduleDay.provider_id == provider.id,
+                )
+            )
+            day = day_result.scalars().first()
+        except Exception:
+            day = None
+    if day is None:
+        day_result = await db.execute(
+            select(ScheduleDay).where(
+                ScheduleDay.org_id == org_id,
+                ScheduleDay.day_of_week == weekday,
+            )
         )
-    )
-    day = day_result.scalars().first()
+        if provider is None:
+            # Individual path: org template only (mock-compatible .first()).
+            # The WHERE clause already excludes doctor overrides; the
+            # Python fallback below is only for mock objects in unit tests.
+            try:
+                _rows = day_result.scalars().all()
+            except Exception:
+                _rows = None
+            if isinstance(_rows, (list, tuple)):
+                day = next(
+                    (r for r in _rows if getattr(r, "provider_id", None) is None),
+                    _rows[0] if _rows else None,
+                )
+            else:
+                try:
+                    day = day_result.scalars().first()
+                except Exception:
+                    day = None
+        else:
+            # Prefer org template row (provider NULL) when both exist
+            try:
+                rows = day_result.scalars().all()
+            except Exception:
+                rows = []
+            # Mock-compat: MagicMock .all() may return non-list; fall back
+            if not isinstance(rows, (list, tuple)):
+                try:
+                    day = day_result.scalars().first()
+                except Exception:
+                    day = None
+            else:
+                day = next(
+                    (r for r in rows if getattr(r, "provider_id", None) is None),
+                    rows[0] if rows else None,
+                )
 
     if not day or not day.is_active:
         return [], "closed_day"
@@ -110,13 +186,59 @@ async def compute_slot_inventory(
     break_start = day.break_start
     break_end = day.break_end
 
-    exc_result = await db.execute(
-        select(ScheduleException).where(
-            ScheduleException.org_id == org_id,
-            ScheduleException.exception_date == target_date,
+    # Exceptions: doctor-specific first, then org-wide
+    exception = None
+    if provider is not None:
+        try:
+            exc_result = await db.execute(
+                select(ScheduleException).where(
+                    ScheduleException.org_id == org_id,
+                    ScheduleException.exception_date == target_date,
+                    ScheduleException.provider_id == provider.id,
+                )
+            )
+            exception = exc_result.scalars().first()
+        except Exception:
+            exception = None
+    if exception is None:
+        exc_result = await db.execute(
+            select(ScheduleException).where(
+                ScheduleException.org_id == org_id,
+                ScheduleException.exception_date == target_date,
+            )
         )
-    )
-    exception = exc_result.scalars().first()
+        if provider is None:
+            # Individual path: org-wide exception only (mock-compatible).
+            try:
+                _exc_rows = exc_result.scalars().all()
+            except Exception:
+                _exc_rows = None
+            if isinstance(_exc_rows, (list, tuple)):
+                exception = next(
+                    (r for r in _exc_rows if getattr(r, "provider_id", None) is None),
+                    None,
+                )
+            else:
+                try:
+                    exception = exc_result.scalars().first()
+                except Exception:
+                    exception = None
+        else:
+            try:
+                exc_rows = exc_result.scalars().all()
+            except Exception:
+                exc_rows = []
+            if not isinstance(exc_rows, (list, tuple)):
+                try:
+                    exception = exc_result.scalars().first()
+                except Exception:
+                    exception = None
+            else:
+                # Org-wide = provider NULL; doctor-specific already checked
+                exception = next(
+                    (r for r in exc_rows if getattr(r, "provider_id", None) is None),
+                    None,
+                )
 
     if exception:
         if exception.exception_type == ExceptionType.CLOSED:
@@ -128,7 +250,15 @@ async def compute_slot_inventory(
                 break_start = None
                 break_end = None
 
+    # Effective timezone: doctor override wins, else org schedule
     schedule_tz = (getattr(schedule, "timezone", None) or "UTC").strip()
+    if provider is not None and getattr(provider, "timezone", None):
+        try:
+            from app.core.org_mode import effective_timezone as _eff_tz
+
+            schedule_tz = _eff_tz(provider, schedule_tz)
+        except Exception:
+            pass
     try:
         business_zone = ZoneInfo(schedule_tz)
     except Exception:
@@ -151,15 +281,23 @@ async def compute_slot_inventory(
     end_dt = local_day_end.astimezone(timezone.utc)
     now = datetime.now(timezone.utc)
 
-    existing_result = await db.execute(
-        select(TimeSlot).where(
-            and_(
-                TimeSlot.org_id == org_id,
-                TimeSlot.start_time >= start_dt,
-                TimeSlot.start_time < end_dt,
-            )
-        )
+    _slot_filter = and_(
+        TimeSlot.org_id == org_id,
+        TimeSlot.start_time >= start_dt,
+        TimeSlot.start_time < end_dt,
     )
+    # Per-doctor isolation: Sharma 10 AM and Iyer 10 AM are different rows.
+    # provider=None (individual) sees only org-shared rows.
+    try:
+        if provider is not None:
+            _slot_filter = and_(_slot_filter, TimeSlot.provider_id == provider.id)
+        else:
+            _slot_filter = and_(
+                _slot_filter, TimeSlot.provider_id.is_(None)
+            )
+    except Exception:
+        pass
+    existing_result = await db.execute(select(TimeSlot).where(_slot_filter))
     existing_slots = existing_result.scalars().all()
 
     taken_utc: dict[datetime, str] = {}
@@ -286,23 +424,15 @@ async def compute_available_slots(
     org_id: uuid.UUID,
     target_date: date,
     org_config: Optional[OrgConfig] = None,
+    provider_id: Optional[uuid.UUID | str] = None,
 ) -> List[time]:
     """
     Returns list of available slot start times for `org_id` on `target_date`.
-
-    Algorithm:
-    1. Load BusinessSchedule (return [] if not configured)
-    2. Find ScheduleDay for the target weekday (return [] if inactive)
-    3. Check ScheduleException for the specific date:
-       - CLOSED  → return []
-       - CUSTOM_HOURS → override open/close
-    4. Generate candidate slot times from the open/close window
-    5. Load existing TimeSlot rows for that org+date (booked OR locked)
-    6. If org_config provided and active calendar provider, fetch external busy periods
-    7. Filter out candidates that conflict with internal OR external busy periods
-    8. Return remaining times
+    provider_id=None keeps org behavior; set filters to that doctor.
     """
-    inventory, _ = await compute_slot_inventory(db, org_id, target_date, org_config)
+    inventory, _ = await compute_slot_inventory(
+        db, org_id, target_date, org_config, provider_id=provider_id
+    )
     return [item["start_utc"].time() for item in inventory if item["available"]]
 
 
@@ -314,6 +444,8 @@ async def create_timeslot_lock(
     duration_minutes: int,
     lock_minutes: int = 5,
     allow_existing_lock_id: Optional[str] = None,
+    provider_id: Optional[uuid.UUID | str] = None,
+    unit_id: Optional[uuid.UUID | str] = None,
 ) -> Optional[TimeSlot]:
     """
     Creates (or re-uses expired lock on) a TimeSlot row for the given slot,
@@ -354,11 +486,35 @@ async def create_timeslot_lock(
     lock_until = now + timedelta(minutes=lock_minutes)
 
     try:
-        # Check if row already exists
+        # Resolve provider/unit UUIDs (None stays None for individual)
+        _prov_uuid = None
+        _unit_uuid = None
+        try:
+            if provider_id:
+                _prov_uuid = (
+                    provider_id
+                    if isinstance(provider_id, uuid.UUID)
+                    else uuid.UUID(str(provider_id))
+                )
+            if unit_id:
+                _unit_uuid = (
+                    unit_id
+                    if isinstance(unit_id, uuid.UUID)
+                    else uuid.UUID(str(unit_id))
+                )
+        except Exception:
+            pass
+        # Check if row already exists (per-doctor when provider set)
+        _where = [TimeSlot.org_id == org_id, TimeSlot.start_time == start_dt]
+        try:
+            if _prov_uuid is not None:
+                _where.append(TimeSlot.provider_id == _prov_uuid)
+            else:
+                _where.append(TimeSlot.provider_id.is_(None))
+        except Exception:
+            pass
         existing_result = await db.execute(
-            select(TimeSlot)
-            .where(TimeSlot.org_id == org_id, TimeSlot.start_time == start_dt)
-            .with_for_update(nowait=True)
+            select(TimeSlot).where(*_where).with_for_update(nowait=True)
         )
         existing = existing_result.scalars().first()
         if schedule is None and existing is None:
@@ -382,13 +538,15 @@ async def create_timeslot_lock(
             await db.commit()
             return existing
 
-        # Create new lock row
+        # Create new lock row (carries doctor/dept for org-mode)
         slot = TimeSlot(
             org_id=org_id,
             start_time=start_dt,
             end_time=end_dt,
             is_booked=False,
             locked_until=lock_until,
+            provider_id=_prov_uuid,
+            unit_id=_unit_uuid,
         )
         db.add(slot)
         await db.commit()

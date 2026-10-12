@@ -68,6 +68,13 @@ def _build_config_response(org: Organization, config: Optional[OrgConfig]) -> di
     greeting = custom.get("greeting_message") or (
         f"Hello! I'm {agent_name}. How can I help you schedule an appointment today?"
     )
+    # Ask-AI section greeting: Q&A-flavored, never booking-flavored (that
+    # section only answers questions — booking/cancel/reschedule redirect
+    # to the Book Appointment button). Admins can override it with the
+    # custom_prompts "ask_greeting_message" key.
+    ask_greeting = custom.get("ask_greeting_message") or (
+        f"Hello! I'm {agent_name}. Ask me anything and I'll do my best to help!"
+    )
     brand_color = (config.ui_brand_color if config else None) or "#3B82F6"
     logo_url = (getattr(config, "logo_url", None) if config else None) or None
     required_fields = (config.required_fields if config else None) or [
@@ -126,9 +133,60 @@ def _build_config_response(org: Organization, config: Optional[OrgConfig]) -> di
     else:
         available_meeting_types = ["OFFLINE"]
 
+    # Widget theme (Feature 2): stored in custom_prompts.ui_theme so no DB
+    # migration is needed. Defaults keep existing embeds unchanged.
+    _custom_dict = custom if isinstance(custom, dict) else {}
+    _raw_theme = _custom_dict.get("ui_theme")
+    raw_theme = _raw_theme if isinstance(_raw_theme, dict) else {}
+    ui_theme = {
+        "position": str(raw_theme.get("position") or "bottom-right"),
+        "border_radius": int(raw_theme.get("border_radius") or 16),
+        "font_family": str(raw_theme.get("font_family") or "Inter, system-ui, sans-serif"),
+        "dark_mode": bool(raw_theme.get("dark_mode", True)),
+        "show_branding": bool(raw_theme.get("show_branding", True)),
+        "launcher_shape": str(raw_theme.get("launcher_shape") or "round"),
+    }
+    if ui_theme["position"] not in ("bottom-right", "bottom-left", "center"):
+        ui_theme["position"] = "bottom-right"
+    ui_theme["border_radius"] = max(0, min(28, ui_theme["border_radius"]))
+
+    # Quick prompts (suggested questions): stored in
+    # custom_prompts.quick_prompts, no DB migration. Sanitized so a bad
+    # admin entry can never break the widget. Max 8, title required, each
+    # prompt needs message text and/or a link.
+    _raw_qp = _custom_dict.get("quick_prompts")
+    quick_prompts: list = []
+    if isinstance(_raw_qp, list):
+        for _item in _raw_qp[:8]:
+            if not isinstance(_item, dict):
+                continue
+            _title = str(_item.get("title") or "").strip()[:60]
+            if not _title:
+                continue
+            _content = str(_item.get("content") or "").strip()[:300]
+            _link = str(_item.get("link") or "").strip()[:500]
+            if _link and not (
+                _link.startswith("http://") or _link.startswith("https://")
+            ):
+                continue
+            if not _content and not _link:
+                continue
+            _show_at = str(_item.get("show_at") or "both").strip().lower()
+            if _show_at not in ("start", "followup", "both"):
+                _show_at = "both"
+            quick_prompts.append(
+                {
+                    "title": _title,
+                    "content": _content or None,
+                    "link": _link or None,
+                    "show_at": _show_at,
+                }
+            )
+
     return {
         "agent_name": agent_name,
         "greeting_message": greeting,
+        "ask_greeting_message": ask_greeting,
         "brand_color": brand_color,
         "logo_url": logo_url,
         "business_name": custom.get("business_name") or None,
@@ -145,12 +203,15 @@ def _build_config_response(org: Organization, config: Optional[OrgConfig]) -> di
         "available_meeting_types": available_meeting_types,
         "require_otp": config.require_otp if config else True,
         "require_phone_otp": config.require_phone_otp if config else False,
+        "ui_theme": ui_theme,
+        "quick_prompts": quick_prompts,
     }
 
 
 class WidgetConfigResponse(BaseModel):
     agent_name: str
     greeting_message: str
+    ask_greeting_message: str = ""
     brand_color: str
     logo_url: Optional[str] = None
     business_name: Optional[str] = None
@@ -172,6 +233,10 @@ class WidgetConfigResponse(BaseModel):
     # Absent/empty = org without catalog; widget behavior unchanged.
     has_catalog: bool = False
     catalog: Optional[dict] = None
+    # Feature 2: widget theme (position, radius, font, dark mode, branding).
+    ui_theme: Optional[dict] = None
+    # Quick prompts (suggested questions): [{title, content?, link?, show_at}].
+    quick_prompts: Optional[list] = None
 
 
 @router.get("/config", response_model=WidgetConfigResponse)
@@ -229,7 +294,10 @@ async def get_widget_config(
         response["max_booking_days_ahead"] = _horizon_days
         _day_rows = (
             await db.execute(
-                select(ScheduleDay).where(ScheduleDay.org_id == org.id)
+                select(ScheduleDay).where(
+                    ScheduleDay.org_id == org.id,
+                    ScheduleDay.provider_id.is_(None),
+                )
             )
         ).scalars().all()
         response["closed_weekdays"] = sorted(
@@ -358,6 +426,113 @@ async def get_widget_history(
     ]
 
 
+@router.get("/session-resume")
+@limiter.limit("30/minute")
+async def get_widget_session_resume(
+    request: Request,
+    session_id: str = Query(..., description="Chat session ID"),
+    api_key: Optional[str] = Query(
+        default=None, description="Organization API key (legacy)"
+    ),
+    widget_token: Optional[str] = Query(
+        default=None, description="Widget token (recommended)"
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pending step (directive + field_meta) for a re-joined booking session.
+
+    The widget keeps a separate backend session per section (Ask AI / Start
+    Booking) and restores the transcript from /history when the visitor
+    switches back or reloads the page. The booking section is fully
+    card-driven, so the pending step must re-render as its directive card —
+    never as free text. This computes the pending directive from the live
+    session state so the widget can render exactly the card the flow would
+    have shown next.
+    """
+    if not api_key and not widget_token:
+        raise HTTPException(
+            status_code=400,
+            detail="Either api_key or widget_token query parameter is required",
+        )
+
+    if api_key:
+        org = await _get_org_from_api_key(api_key, db)
+    else:
+        org = await _get_org_from_widget_token(widget_token, db)
+
+    if not org or not org.is_active:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    session_result = await db.execute(
+        select(ChatSession).where(
+            ChatSession.id == session_id,
+            ChatSession.org_id == org.id,
+        )
+    )
+    session = session_result.scalars().first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    from app.crud.chat import get_chat_session as _get_session_state
+    from app.schemas.agent import parse_field_definitions, order_field_definitions
+    from app.engine.evaluator import StateEvaluator
+
+    chat_session = await _get_session_state(db, session_id)
+    if chat_session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Ask-AI sessions are free-text Q&A: nothing card-shaped to restore.
+    collected = chat_session.collected_data if isinstance(chat_session.collected_data, dict) else {}
+    if str(collected.get("_mode") or "").strip().lower() == "ask":
+        return {"directive": "TEXT_INPUT", "field_meta": None, "message": None}
+
+    # Finished bookings show the confirmed card, not a stale step.
+    if str(getattr(chat_session, "session_status", "") or "").upper() == "CONFIRMED":
+        return {
+            "directive": "BOOKING_CONFIRMED_CARD",
+            "field_meta": {},
+            "message": "Your booking has been confirmed.",
+        }
+
+    # Field definitions: the session's own snapshot is authoritative (admin
+    # may have changed the org config after this session started).
+    snapshot = collected.get("field_definitions_snapshot") or []
+    if isinstance(snapshot, list) and snapshot:
+        field_definitions = order_field_definitions(parse_field_definitions(snapshot))
+    else:
+        cfg_result = await db.execute(select(OrgConfig).where(OrgConfig.org_id == org.id))
+        org_config = cfg_result.scalars().first()
+        if not org_config:
+            raise HTTPException(status_code=404, detail="Organization configuration not found")
+        field_definitions = order_field_definitions(
+            parse_field_definitions(org_config.field_definitions or org_config.required_fields)
+        )
+
+    next_action = StateEvaluator.determine_next_action(
+        list(chat_session.missing_fields or []),
+        str(chat_session.current_intent or "START_BOOKING"),
+        field_definitions=field_definitions,
+    )
+    directive = str(next_action.get("directive") or "TEXT_INPUT")
+    field_meta = next_action.get("field_meta")
+    message = None
+
+    # All details collected → the pending step is the review card.
+    # (PROCESS_BOOKING is a one-turn action, not a restorable UI state.)
+    if directive in ("REQUEST_CONFIRMATION", "PROCESS_BOOKING", "BOOKING_SUMMARY_CARD"):
+        directive = "REQUEST_CONFIRMATION"
+        try:
+            from app.engine.message_processor import _build_confirmation_summary
+
+            fd_map = {fd.name: fd for fd in field_definitions}
+            message, _ = _build_confirmation_summary(chat_session, fd_map)
+        except Exception:
+            logger.warning("session-resume summary build failed", exc_info=True)
+            message = None
+
+    return {"directive": directive, "field_meta": field_meta, "message": message}
+
+
 class WidgetAvailabilitySlot(BaseModel):
     slot_id: str
     label_user_tz: str
@@ -389,6 +564,11 @@ class WidgetAvailabilityResponse(BaseModel):
     ]
     policy_reason_code: Optional[Literal["same_day_disabled", "past_time_cutoff"]] = None
     slots: list[WidgetAvailabilitySlot]
+    # Suggestions-first (Feature 1): total free slots before truncation so the
+    # widget can render "2-3 pills + Show N more" without a second fetch.
+    total_available: int = 0
+    truncated: bool = False
+    suggestion_limit: int = 3
 
 
 def _resolve_effective_timezone(
@@ -413,7 +593,11 @@ def _format_label_user_tz(dt_user: datetime) -> str:
     return dt_user.strftime("%I:%M %p").lstrip("0")
 
 
-def _build_virtual_slot_id(org_id: str, start_utc: datetime) -> str:
+def _build_virtual_slot_id(
+    org_id: str, start_utc: datetime, provider_id: Optional[str] = None
+) -> str:
+    if provider_id:
+        return f"virtual|{org_id}|{provider_id}|{start_utc.isoformat()}"
     return f"virtual|{org_id}|{start_utc.isoformat()}"
 
 
@@ -433,6 +617,18 @@ async def get_widget_availability(
     ),
     widget_token: Optional[str] = Query(
         default=None, description="Widget token (recommended)"
+    ),
+    unit_id: Optional[str] = Query(
+        default=None, description="Department/unit filter (org-mode)"
+    ),
+    provider_id: Optional[str] = Query(
+        default=None, description="Doctor/provider filter (org-mode)"
+    ),
+    limit: Optional[int] = Query(
+        default=None,
+        ge=1,
+        le=50,
+        description="Suggestions-first: return only the first N AVAILABLE slots (e.g. 3). Unavailable slots are omitted when limit is set.",
     ),
     db: AsyncSession = Depends(get_db),
 ):
@@ -496,8 +692,20 @@ async def get_widget_availability(
         org_zone = ZoneInfo("UTC")
         normalized_org_tz = "UTC"
     user_zone = ZoneInfo(effective_tz)
+    # Org-mode: validate dept/doctor belong to this org; None = individual flow.
+    _eff_provider_id = None
+    try:
+        from app.services.catalog_service import validate_catalog_selection
+
+        if unit_id or provider_id:
+            await validate_catalog_selection(db, org.id, unit_id, provider_id)
+        _eff_provider_id = provider_id
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception:
+        _eff_provider_id = provider_id
     slot_inventory, availability_status = await compute_slot_inventory(
-        db, org.id, target_date, org_config=config
+        db, org.id, target_date, org_config=config, provider_id=_eff_provider_id
     )
     allow_same_day_booking = bool(
         config.allow_same_day_booking if config else False
@@ -520,6 +728,22 @@ async def get_widget_availability(
         )
     )
     slot_duration_minutes = schedule_result.scalar() or 60
+    # Per-doctor duration wins for org-mode display
+    try:
+        if _eff_provider_id:
+            from app.models.service_unit import Provider as _P
+
+            _prow = (
+                await db.execute(
+                    select(_P).where(
+                        _P.id == _eff_provider_id, _P.org_id == org.id
+                    )
+                )
+            ).scalars().first()
+            if _prow is not None and getattr(_prow, "slot_duration_minutes", None):
+                slot_duration_minutes = int(_prow.slot_duration_minutes)
+    except Exception:
+        pass
     slots: list[WidgetAvailabilitySlot] = []
     for item in slot_inventory:
         start_utc = item["start_utc"]
@@ -528,7 +752,9 @@ async def get_widget_availability(
         end_org = end_utc.astimezone(org_zone)
         start_user = start_utc.astimezone(user_zone)
         end_user = end_utc.astimezone(user_zone)
-        slot_id = _build_virtual_slot_id(str(org.id), start_utc)
+        slot_id = _build_virtual_slot_id(
+            str(org.id), start_utc, _eff_provider_id
+        )
         slots.append(
             WidgetAvailabilitySlot(
                 slot_id=slot_id,
@@ -544,6 +770,18 @@ async def get_widget_availability(
             )
         )
 
+    total_available = sum(1 for s in slots if s.available)
+    truncated = False
+    suggestion_limit = 3
+    if limit is not None and limit > 0:
+        suggestion_limit = int(limit)
+        available_only = [s for s in slots if s.available]
+        if len(available_only) > suggestion_limit:
+            slots = available_only[:suggestion_limit]
+            truncated = True
+        else:
+            slots = available_only
+
     return WidgetAvailabilityResponse(
         date=target_date.isoformat(),
         org_timezone=normalized_org_tz,
@@ -554,6 +792,9 @@ async def get_widget_availability(
         availability_status=availability_status,
         policy_reason_code=policy_reason_code,
         slots=slots,
+        total_available=total_available,
+        truncated=truncated,
+        suggestion_limit=suggestion_limit,
     )
 
 
@@ -634,6 +875,70 @@ class ClientLogRequest(BaseModel):
     hasConfirmationResult: Optional[bool] = None
     detail: Optional[str] = None
     phone_masked: Optional[str] = None
+
+
+@router.get("/invite/{booking_id}")
+@limiter.limit("60/minute")
+async def widget_booking_invite(
+    request: Request,
+    booking_id: str,
+    widget_token: Optional[str] = Query(default=None),
+    api_key: Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Feature 3: public .ics download for a confirmed booking.
+
+    Auth: same org scoping as other widget endpoints (widget_token or
+    api_key). Only the owning org's booking is served — cross-tenant 404.
+    No PII beyond what the customer already gave (name/email in SUMMARY).
+    """
+    from fastapi.responses import PlainTextResponse
+
+    if not api_key and not widget_token:
+        raise HTTPException(status_code=400, detail="Either api_key or widget_token query parameter is required")
+    org = await _get_org_from_api_key(api_key, db) if api_key else await _get_org_from_widget_token(widget_token, db)  # type: ignore[arg-type]
+    if not org or not org.is_active:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    try:
+        import uuid as _uuid
+
+        _bid = _uuid.UUID(str(booking_id))
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Invalid booking id") from exc
+    from app.models.booking import Booking as _Booking
+
+    res = await db.execute(select(_Booking).where(_Booking.id == _bid, _Booking.org_id == org.id))
+    booking = res.scalars().first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    def _fmt_ics(dt) -> str:
+        try:
+            import datetime as _dt
+
+            if getattr(dt, "tzinfo", None) is None:
+                dt = dt.replace(tzinfo=_dt.timezone.utc)
+            return dt.astimezone(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        except Exception:
+            return ""
+
+    start = getattr(booking, "user_slot_start_at", None) or getattr(booking, "org_slot_start_at", None)
+    end = getattr(booking, "user_slot_end_at", None) or getattr(booking, "org_slot_end_at", None)
+    summary = f"Appointment with {org.name or 'our team'}"
+    description = f"Booked as {(getattr(booking, 'customer_name', '') or '').replace(chr(10), ' ')}"
+    if getattr(booking, "meeting_link_url", None):
+        description += f"\\nMeeting link: {booking.meeting_link_url}"
+    uid = f"{booking.id}@dotstark.booking"
+    ics = (
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//DotStark//Booking//EN\r\n"
+        f"BEGIN:VEVENT\r\nUID:{uid}\r\nDTSTAMP:{_fmt_ics(start)}\r\nDTSTART:{_fmt_ics(start)}\r\nDTEND:{_fmt_ics(end)}\r\n"
+        f"SUMMARY:{summary}\r\nDESCRIPTION:{description}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+    return PlainTextResponse(
+        ics,
+        media_type="text/calendar",
+        headers={"Content-Disposition": f"attachment; filename=booking-{booking.id}.ics"},
+    )
 
 
 @router.post("/client-log")

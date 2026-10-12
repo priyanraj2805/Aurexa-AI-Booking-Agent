@@ -295,6 +295,7 @@ class TestChatDispatch:
             state_data={
                 "name": "Recipient Drift",
                 "contact_email": "fresh-contact@test.com",
+                "_review_presented": True,
                 "email": "stale-legacy@test.com",
                 "phone": "5551234567",
                 "date": booking_date.date().isoformat(),
@@ -361,6 +362,7 @@ class TestChatDispatch:
             state_data={
                 "name": "Recipient Drift",
                 "contact_email": "fresh-confirm@test.com",
+                "_review_presented": True,
                 "email": "stale-confirm@test.com",
                 "phone": "5551234567",
                 "date": booking_date.date().isoformat(),
@@ -804,6 +806,7 @@ class TestChatDispatch:
             state_data={
                 "name": "TZ Fallback User",
                 "email": "tz-fallback@test.com",
+                "_review_presented": True,
                 "phone": "5551231234",
                 "date": booking_date.date().isoformat(),
                 "time": "15:00",
@@ -895,6 +898,7 @@ class TestMeetingLinkGeneration:
             state_data={
                 "name": "TZ Snapshot",
                 "email": "tz-snapshot@test.com",
+                "_review_presented": True,
                 "phone": "5551234567",
                 "date": "2030-01-07",
                 "time": "9:00 AM",
@@ -1002,6 +1006,7 @@ class TestMeetingLinkGeneration:
             state_data={
                 "name": "Calendar TZ",
                 "email": "calendar-tz@test.com",
+                "_review_presented": True,
                 "phone": "5559990000",
                 "date": "2030-01-07",
                 "time": "12:30 PM",
@@ -1095,6 +1100,7 @@ class TestMeetingLinkGeneration:
             org_id=org.id,
             state_data={
                 "name": "Online Link Test",
+                "_review_presented": True,
                 "email": "online-link@test.com",
                 "phone": "5551234567",
                 "date": booking_date.date().isoformat(),
@@ -1182,6 +1188,7 @@ class TestMeetingLinkGeneration:
             org_id=org.id,
             state_data={
                 "name": "Degraded Link Test",
+                "_review_presented": True,
                 "email": "degraded-link@test.com",
                 "phone": "5559876543",
                 "date": booking_date.date().isoformat(),
@@ -1298,6 +1305,7 @@ class TestMeetingLinkGeneration:
             org_id=org.id,
             state_data={
                 "name": "Hybrid Test",
+                "_review_presented": True,
                 "email": "hybrid@test.com",
                 "phone": "5551112233",
                 "date": booking_date.date().isoformat(),
@@ -1382,6 +1390,7 @@ class TestMeetingLinkGeneration:
             org_id=org.id,
             state_data={
                 "name": "Late Policy",
+                "_review_presented": True,
                 "email": "late@test.com",
                 "phone": "5559991234",
                 "date": booking_date.date().isoformat(),
@@ -1442,6 +1451,7 @@ class TestMeetingLinkGeneration:
             org_id=org.id,
             state_data={
                 "name": "Mode Revalidation",
+                "_review_presented": True,
                 "email": "mode-revalidation@test.com",
                 "phone": "5551239876",
                 "date": booking_date.date().isoformat(),
@@ -1502,6 +1512,7 @@ class TestMeetingLinkGeneration:
             org_id=org.id,
             state_data={
                 "name": "Hybrid Gate",
+                "_review_presented": True,
                 "email": "hybrid-gate@test.com",
                 "phone": "5553214567",
                 "date": booking_date.date().isoformat(),
@@ -1534,17 +1545,26 @@ class TestMeetingLinkGeneration:
         )
         assert booking_result.scalars().first() is None
 
-    async def test_confirm_time_online_degradation_returns_actionable_guidance(
-        self, client: AsyncClient, db_session: AsyncSession
+    async def test_confirm_time_online_without_path_confirms_booking_degraded(
+        self, client: AsyncClient, db_session: AsyncSession, monkeypatch
     ):
+        """ONLINE pick with no connected online path must NOT deadlock.
+
+        Regression: the old code refused with TEXT_INPUT ("can't finalize
+        ..."), so confirm → summary → confirm looped forever and no booking
+        row was ever created. Product contract is degraded confirmation:
+        the booking is created with UNAVAILABLE link status + ops alert.
+        """
         org = await _create_org_with_config(db_session)
         cfg_result = await db_session.execute(
             select(OrgConfig).where(OrgConfig.org_id == org.id)
         )
         cfg = cfg_result.scalars().first()
         cfg.require_otp = False
-        cfg.meeting_mode = "ONLINE_ONLY"
-        cfg.allow_hybrid_selection = False
+        # Mirror the live deadlock: HYBRID org, customer picked ONLINE, but
+        # no calendar/provider connected at all.
+        cfg.meeting_mode = "HYBRID"
+        cfg.allow_hybrid_selection = True
         cfg.meeting_provider_default = "NONE"
         cfg.google_calendar_connected = False
         cfg.outlook_calendar_connected = False
@@ -1565,6 +1585,7 @@ class TestMeetingLinkGeneration:
             org_id=org.id,
             state_data={
                 "name": "Online Path",
+                "_review_presented": True,
                 "email": "online@test.com",
                 "phone": "5551112222",
                 "date": booking_date.date().isoformat(),
@@ -1580,6 +1601,27 @@ class TestMeetingLinkGeneration:
         await db_session.commit()
         await db_session.refresh(session)
 
+        async def _fail_if_called(*args, **kwargs):
+            raise AssertionError("provider factory must be skipped with no online path")
+
+        monkeypatch.setattr(
+            "app.core.integrations.meeting_providers.factory.generate_meeting_link",
+            _fail_if_called,
+        )
+
+        async def _noop_emails(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr("app.core.mail.send_confirmation_emails", _noop_emails)
+
+        async def _noop_calendar_event(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr(
+            "app.core.integrations.google_calendar.create_booking_calendar_event",
+            _noop_calendar_event,
+        )
+
         resp = await client.post(
             "/api/v1/chat/message/dispatch",
             json={"message": "yes please", "session_id": str(session.id)},
@@ -1587,13 +1629,26 @@ class TestMeetingLinkGeneration:
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert "can't finalize an online meeting" in body["action"]["message"].lower()
-        assert "choose an offline meeting option" in body["action"]["message"].lower()
+        assert body["action"]["widget_directive"] == "BOOKING_CONFIRMED_CARD"
+        assert "meeting link" in body["action"]["message"].lower()
+
+        from app.models.config import MeetingLinkStatus
 
         booking_result = await db_session.execute(
             select(Booking).where(Booking.session_id == session.id)
         )
-        assert booking_result.scalars().first() is None
+        booking = booking_result.scalars().first()
+        assert booking is not None
+        assert booking.meeting_link_status == MeetingLinkStatus.UNAVAILABLE
+        assert booking.meeting_link_url is None
+
+        alert_result = await db_session.execute(
+            select(SystemAlert).where(
+                SystemAlert.org_id == org.id,
+                SystemAlert.code == "ONLINE_MEETING_PATH_MISSING",
+            )
+        )
+        assert alert_result.scalars().first() is not None
 
     async def test_cancel_confirmed_booking_email_payload_includes_meeting_snapshot_fields(
         self, client: AsyncClient, db_session: AsyncSession, monkeypatch
@@ -1851,6 +1906,7 @@ class TestConfirmationEmailMeetingLink:
             org_id=org.id,
             state_data={
                 "name": "Ready Link Test",
+                "_review_presented": True,
                 "email": "ready-link@test.com",
                 "phone": "5551234567",
                 "date": booking_date.date().isoformat(),
@@ -1952,6 +2008,7 @@ class TestConfirmationEmailMeetingLink:
             org_id=org.id,
             state_data={
                 "name": "Unavailable Link Test",
+                "_review_presented": True,
                 "email": "unavailable-link@test.com",
                 "phone": "5557654321",
                 "date": booking_date.date().isoformat(),
@@ -2041,6 +2098,7 @@ class TestConfirmationEmailMeetingLink:
             org_id=org.id,
             state_data={
                 "name": "Dual Time Test",
+                "_review_presented": True,
                 "email": "dual-time@test.com",
                 "phone": "5551112222",
                 "date": booking_date.date().isoformat(),

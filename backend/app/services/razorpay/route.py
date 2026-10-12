@@ -73,6 +73,58 @@ def _safe_account_log(account_id: Optional[str]) -> str:
 
 # ── Linked Accounts ──────────────────────────────────────────────────────
 
+# Docs (route/integration-guide#business-type). Validated client-side so a
+# bad value never reaches Razorpay mid-onboarding.
+BUSINESS_TYPES = frozenset({
+    "individual", "proprietorship", "partnership", "private_limited",
+    "public_limited", "llp", "trust", "ngo", "society",
+    "not_yet_registered", "educational_institutes", "other",
+})
+
+# Docs KYC table: company-type entities need Business PAN + GST on the
+# Linked Account; individual/not_yet_registered need neither (their KYC is
+# stakeholder PAN + bank account).
+_COMPANY_BUSINESS_TYPES = frozenset({
+    "llp", "partnership", "private_limited", "public_limited",
+    "trust", "ngo", "society", "educational_institutes", "other",
+})
+_PAN_RE = re.compile(r"^[A-Za-z]{5}\d{4}[A-Za-z]$")
+_GST_RE = re.compile(r"^[0-9]{2}[A-Za-z]{5}\d{4}[A-Za-z]\d[A-Z][A-Z\d]$", re.IGNORECASE)
+
+
+def validate_registered_address(address: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Validate the required ``profile.addresses.registered`` object.
+
+    Docs (create-linked-account): ``profile`` → ``addresses`` → ``registered``
+    is required. ``postal_code`` must be exactly 6 characters; Razorpay also
+    rejects bank names/URLs in name-like fields, so values are trimmed here.
+    """
+    if not isinstance(address, dict):
+        raise ValueError("Registered business address is required (street, city, state, postal code)")
+    street1 = str(address.get("street1") or "").strip()
+    city = str(address.get("city") or "").strip()
+    state = str(address.get("state") or "").strip()
+    postal_code = re.sub(r"\s", "", str(address.get("postal_code") or ""))
+    country = str(address.get("country") or "IN").strip() or "IN"
+    if not street1 or not city or not state:
+        raise ValueError("Street, city and state are required for the registered address")
+    if not re.fullmatch(r"\d{6}", postal_code):
+        raise ValueError("Postal code must be exactly 6 digits")
+    if len(state) < 2 or len(state) > 32:
+        raise ValueError("State must be 2-32 characters")
+    out: Dict[str, Any] = {
+        "street1": street1[:100],
+        "city": city[:100],
+        "state": state[:32],
+        "postal_code": postal_code,
+        "country": country[:64],
+    }
+    street2 = str(address.get("street2") or "").strip()
+    if street2:
+        out["street2"] = street2[:100]
+    return out
+
+
 def build_linked_account_payload(
     *,
     email: str,
@@ -85,26 +137,55 @@ def build_linked_account_payload(
     category: str = "healthcare",
     subcategory: str = "clinic",
     business_model: str = "Appointment booking services",
+    registered_address: Optional[Dict[str, Any]] = None,
+    legal_pan: Optional[str] = None,
+    legal_gst: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build POST /v2/accounts payload with documented fields only."""
     if not email or not phone or not reference_id or not legal_business_name:
         raise ValueError("email, phone, reference_id and legal_business_name are required")
-    return {
+    biz_type = str(business_type or "").strip().lower()
+    if biz_type not in BUSINESS_TYPES:
+        raise ValueError(
+            "Invalid business type. Allowed: " + ", ".join(sorted(BUSINESS_TYPES))
+        )
+    address = validate_registered_address(registered_address)
+    legal_info: Dict[str, Any] = {}
+    if legal_pan:
+        pan = legal_pan.strip().upper()
+        if not _PAN_RE.match(pan):
+            raise ValueError("Invalid business PAN format (e.g. AAACL1234C)")
+        legal_info["pan"] = pan
+    if legal_gst:
+        gst = legal_gst.strip().upper()
+        if not _GST_RE.match(gst):
+            raise ValueError("Invalid GSTIN format (e.g. 18AABCU9603R1ZM)")
+        legal_info["gst"] = gst
+    if biz_type in _COMPANY_BUSINESS_TYPES and "pan" not in legal_info:
+        # Docs KYC table: Business PAN is mandatory for company-type entities.
+        raise ValueError("Business PAN is required for this business type")
+    payload: Dict[str, Any] = {
         "email": email,
         "phone": phone,
         "type": "route",
         "reference_id": reference_id,
         "legal_business_name": legal_business_name,
-        "business_type": business_type,
+        "business_type": biz_type,
         "contact_name": contact_name or email.split("@")[0],
         "customer_facing_business_name": customer_facing_business_name or legal_business_name,
         "profile": {
             "category": category,
             "subcategory": subcategory,
             "business_model": business_model,
+            # Docs: profile → addresses → registered is REQUIRED.
+            "addresses": {"registered": address},
         },
         "notes": {"aurexa": "true", "reference_id": reference_id},
     }
+    if legal_info:
+        # Passed through to Razorpay for KYC; never persisted or logged here.
+        payload["legal_info"] = legal_info
+    return payload
 
 
 async def create_linked_account(client: RouteClient, payload: Dict[str, Any]) -> Dict[str, Any]:

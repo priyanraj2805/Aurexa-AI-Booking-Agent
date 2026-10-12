@@ -314,6 +314,11 @@ export default function AgentCorePage() {
 
   // Organization settings
   const [brandColor, setBrandColor] = useState("#3B82F6");
+  // Feature 2: widget theme (stored in custom_prompts.ui_theme, no migration)
+  const [widgetPosition, setWidgetPosition] = useState<"bottom-right" | "bottom-left" | "center">("bottom-right");
+  const [borderRadius, setBorderRadius] = useState(16);
+  const [darkMode, setDarkMode] = useState(true);
+  const [showBranding, setShowBranding] = useState(true);
   const [businessName, setBusinessName] = useState("");
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const [logoUploading, setLogoUploading] = useState(false);
@@ -479,6 +484,13 @@ export default function AgentCorePage() {
   // Booking settings state
   const [requireOtp, setRequireOtp] = useState(true);
   const [requirePhoneOtp, setRequirePhoneOtp] = useState(false);
+  // Feature 4: booking reminders (stored in custom_prompts.reminders)
+  const [reminder24h, setReminder24h] = useState(true);
+  const [reminder1h, setReminder1h] = useState(true);
+  // Quick prompts (suggested questions, stored in custom_prompts.quick_prompts).
+  // Works for both organization and individual orgs — no gating.
+  type QuickPrompt = { title: string; content: string; link: string; show_at: "start" | "followup" | "both" };
+  const [quickPrompts, setQuickPrompts] = useState<QuickPrompt[]>([]);
   // WhatsApp booking toggle state (Integrations → WhatsApp). Phone OTP is
   // only meaningful while WhatsApp booking is enabled; null = not loaded yet.
   const [waBookingEnabled, setWaBookingEnabled] = useState<boolean | null>(null);
@@ -514,6 +526,31 @@ export default function AgentCorePage() {
       }
       setLogoUrl((config as unknown as { logo_url?: string | null }).logo_url || null);
       setLogoUrlInput((config as unknown as { logo_url?: string | null }).logo_url || "");
+      const _rem = (config.custom_prompts as unknown as { reminders?: { email_24h?: boolean; email_1h?: boolean } })?.reminders;
+      if (_rem && typeof _rem === "object") {
+        if (typeof _rem.email_24h === "boolean") setReminder24h(_rem.email_24h);
+        if (typeof _rem.email_1h === "boolean") setReminder1h(_rem.email_1h);
+      }
+      const _qp = (config.custom_prompts as unknown as { quick_prompts?: unknown })?.quick_prompts;
+      if (Array.isArray(_qp)) {
+        setQuickPrompts(
+          _qp.filter((x): x is Record<string, unknown> => typeof x === "object" && x !== null).slice(0, 8).map((x) => ({
+            title: String(x.title || ""),
+            content: String(x.content || ""),
+            link: String(x.link || ""),
+            show_at: (["start", "followup", "both"] as const).includes(x.show_at as "start" | "followup" | "both") ? (x.show_at as "start" | "followup" | "both") : "both",
+          }))
+        );
+      } else {
+        setQuickPrompts([]);
+      }
+      const _theme = (config.custom_prompts as unknown as { ui_theme?: { position?: string; border_radius?: number; dark_mode?: boolean; show_branding?: boolean } })?.ui_theme;
+      if (_theme && typeof _theme === "object") {
+        if (_theme.position === "bottom-left" || _theme.position === "center" || _theme.position === "bottom-right") setWidgetPosition(_theme.position);
+        if (typeof _theme.border_radius === "number") setBorderRadius(Math.max(0, Math.min(28, _theme.border_radius)));
+        if (typeof _theme.dark_mode === "boolean") setDarkMode(_theme.dark_mode);
+        if (typeof _theme.show_branding === "boolean") setShowBranding(_theme.show_branding);
+      }
       if (config.custom_prompts && typeof config.custom_prompts === "object") {
         const rawTone = String(config.custom_prompts.tone || "professional").toLowerCase();
         let normTone = config.custom_prompts.tone || "professional";
@@ -589,6 +626,11 @@ export default function AgentCorePage() {
     if ((origPersona.business_name || "") !== (persona.business_name || "")) return true;
     if ((origPersona.business_tagline || "") !== (persona.business_tagline || "")) return true;
     if ((config.ui_brand_color || "#3B82F6").toLowerCase() !== (brandColor || "#3B82F6").toLowerCase()) return true;
+    const _origTheme = (config.custom_prompts as unknown as { ui_theme?: { position?: string; border_radius?: number; dark_mode?: boolean; show_branding?: boolean } })?.ui_theme;
+    if ((_origTheme?.position || "bottom-right") !== widgetPosition) return true;
+    if ((_origTheme?.border_radius ?? 16) !== borderRadius) return true;
+    if ((_origTheme?.dark_mode ?? true) !== darkMode) return true;
+    if ((_origTheme?.show_branding ?? true) !== showBranding) return true;
     const origBusinessName = (config as unknown as { business_name?: string | null }).business_name || "";
     if ((origBusinessName || "") !== (businessName || "")) return true;
     const origLogo = (config as unknown as { logo_url?: string | null }).logo_url || null;
@@ -596,6 +638,18 @@ export default function AgentCorePage() {
     if ((config.require_otp ?? true) !== requireOtp) return true;
     const origPhoneOtp = (config as unknown as { require_phone_otp?: boolean }).require_phone_otp ?? false;
     if (origPhoneOtp !== requirePhoneOtp) return true;
+    const _origRem = (config.custom_prompts as unknown as { reminders?: { email_24h?: boolean; email_1h?: boolean } })?.reminders;
+    if ((_origRem?.email_24h ?? true) !== reminder24h) return true;
+    if ((_origRem?.email_1h ?? true) !== reminder1h) return true;
+    const _origQpRaw = (config.custom_prompts as unknown as { quick_prompts?: unknown })?.quick_prompts;
+    const _normQp = (v: unknown) =>
+      (Array.isArray(v) ? v : []).filter((x): x is Record<string, unknown> => typeof x === "object" && x !== null).slice(0, 8).map((x) => ({
+        title: String(x.title || ""),
+        content: String(x.content || ""),
+        link: String(x.link || ""),
+        show_at: (["start", "followup", "both"] as const).includes(x.show_at as "start" | "followup" | "both") ? (x.show_at as "start" | "followup" | "both") : "both",
+      }));
+    if (JSON.stringify(_normQp(_origQpRaw)) !== JSON.stringify(quickPrompts)) return true;
     const mp = (config as unknown as { meeting_policy?: { meeting_mode?: string; allow_hybrid_selection?: boolean; meeting_provider_default?: string } }).meeting_policy;
     if (mp) {
       if ((mp.meeting_mode || "OFFLINE_ONLY") !== meetingMode) return true;
@@ -603,7 +657,7 @@ export default function AgentCorePage() {
       if ((mp.meeting_provider_default || "NONE") !== meetingProviderDefault) return true;
     }
     return false;
-  }, [config, fieldDefs, persona, brandColor, businessName, logoUrl, requireOtp, requirePhoneOtp, meetingMode, allowHybridSelection, meetingProviderDefault]);
+  }, [config, fieldDefs, persona, brandColor, widgetPosition, borderRadius, darkMode, showBranding, businessName, logoUrl, requireOtp, requirePhoneOtp, reminder24h, reminder1h, quickPrompts, meetingMode, allowHybridSelection, meetingProviderDefault]);
 
   useEffect(() => {
     if (!isDirty) return;
@@ -655,7 +709,28 @@ export default function AgentCorePage() {
     try {
       const payload: Record<string, unknown> = {
         ui_brand_color: brandColor,
-        custom_prompts: persona,
+        custom_prompts: {
+          ...persona,
+          ui_theme: {
+            position: widgetPosition,
+            border_radius: borderRadius,
+            dark_mode: darkMode,
+            show_branding: showBranding,
+          },
+          reminders: {
+            email_24h: reminder24h,
+            email_1h: reminder1h,
+          },
+          quick_prompts: quickPrompts
+            .filter((q) => q.title.trim() && (q.content.trim() || q.link.trim()))
+            .slice(0, 8)
+            .map((q) => ({
+              title: q.title.trim(),
+              content: q.content.trim() || undefined,
+              link: q.link.trim() || undefined,
+              show_at: q.show_at,
+            })),
+        },
         require_otp: requireOtp,
         require_phone_otp: requirePhoneOtp,
         business_name: businessName,
@@ -1004,7 +1079,118 @@ export default function AgentCorePage() {
               Widget theme color.
             </p>
           </div>
+          <div>
+            <label className="text-[13px] text-muted-foreground font-medium mb-2 block">
+              Widget Position
+            </label>
+            <div className="flex items-center gap-2">
+              {(["bottom-right", "bottom-left", "center"] as const).map((pos) => (
+                <button
+                  key={pos}
+                  type="button"
+                  onClick={() => setWidgetPosition(pos)}
+                  className={`text-xs font-medium px-3 py-1.5 rounded-md border transition-colors ${widgetPosition === pos ? "bg-primary text-primary-foreground border-primary" : "bg-background border-border hover:bg-accent"}`}
+                >
+                  {pos === "bottom-right" ? "Bottom right" : pos === "bottom-left" ? "Bottom left" : "Center"}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="text-[13px] text-muted-foreground font-medium mb-2 block">
+              Corner Radius ({borderRadius}px)
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={28}
+              value={borderRadius}
+              onChange={(e) => setBorderRadius(Number(e.target.value))}
+              className="w-full max-w-56"
+            />
+          </div>
+          <div className="flex items-center gap-6">
+            <label className="flex items-center gap-2 text-[13px] cursor-pointer">
+              <input type="checkbox" checked={darkMode} onChange={(e) => setDarkMode(e.target.checked)} className="size-4" />
+              Dark mode
+            </label>
+            <label className="flex items-center gap-2 text-[13px] cursor-pointer">
+              <input type="checkbox" checked={showBranding} onChange={(e) => setShowBranding(e.target.checked)} className="size-4" />
+              Show branding
+            </label>
+          </div>
         </div>
+      </div>
+
+      {/* Quick Prompts — suggested questions in chat (works for all org types) */}
+      <div className="bg-card border border-border rounded-xl p-4 sm:p-6">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-1">
+          <div>
+            <h3 className="text-base font-semibold">Quick Prompts</h3>
+            <p className="text-[13px] text-muted-foreground">
+              Tappable suggestion buttons in chat, so visitors tap instead of typing. Max 8 — 3 to 4 best.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => quickPrompts.length < 8 && setQuickPrompts([...quickPrompts, { title: "", content: "", link: "", show_at: "both" }])}
+            disabled={quickPrompts.length >= 8}
+            className="text-[13px] font-medium px-3 py-2 rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-40"
+          >
+            + Add Prompt
+          </button>
+        </div>
+        {quickPrompts.length === 0 ? (
+          <p className="text-[13px] text-muted-foreground mt-3">No quick prompts yet. Example: “Book appointment”, “Prices”, “Timings”.</p>
+        ) : (
+          <div className="space-y-3 mt-4">
+            {quickPrompts.map((q, i) => (
+              <div key={i} className="border border-border rounded-lg p-3 bg-background space-y-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <input
+                    value={q.title}
+                    onChange={(e) => setQuickPrompts(quickPrompts.map((x, j) => (j === i ? { ...x, title: e.target.value } : x)))}
+                    placeholder="Button title (e.g. Book appointment)"
+                    maxLength={60}
+                    className="bg-background border border-border px-3 py-2 rounded-md text-[13px] focus:outline-none focus:border-primary"
+                  />
+                  <select
+                    value={q.show_at}
+                    onChange={(e) => setQuickPrompts(quickPrompts.map((x, j) => (j === i ? { ...x, show_at: e.target.value as "start" | "followup" | "both" } : x)))}
+                    className="bg-background border border-border px-3 py-2 rounded-md text-[13px]"
+                    title="Where it shows"
+                  >
+                    <option value="both">Start + Follow-up</option>
+                    <option value="start">Start only</option>
+                    <option value="followup">Follow-up only</option>
+                  </select>
+                </div>
+                <input
+                  value={q.content}
+                  onChange={(e) => setQuickPrompts(quickPrompts.map((x, j) => (j === i ? { ...x, content: e.target.value } : x)))}
+                  placeholder="Message sent on tap (leave empty if link only)"
+                  maxLength={300}
+                  className="w-full bg-background border border-border px-3 py-2 rounded-md text-[13px] focus:outline-none focus:border-primary"
+                />
+                <div className="flex gap-2">
+                  <input
+                    value={q.link}
+                    onChange={(e) => setQuickPrompts(quickPrompts.map((x, j) => (j === i ? { ...x, link: e.target.value } : x)))}
+                    placeholder="Link URL instead (optional, https://…)"
+                    className="flex-1 min-w-0 bg-background border border-border px-3 py-2 rounded-md text-[13px] focus:outline-none focus:border-primary"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setQuickPrompts(quickPrompts.filter((_, j) => j !== i))}
+                    className="text-xs font-medium px-3 py-2 rounded-md bg-secondary border border-border hover:bg-accent"
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Field Definitions — full width */}
@@ -1147,6 +1333,28 @@ export default function AgentCorePage() {
                   <span className="text-amber-500">⚠ Disabled — bookings will be confirmed without phone OTP</span>
                 )}
               </p>
+            </div>
+          </div>
+          {/* Booking reminders */}
+          <div className="flex items-start gap-4 p-4 bg-background border border-border rounded-lg">
+            <div className="flex items-center justify-center size-9 rounded-lg bg-amber-500/10 text-amber-500 shrink-0 mt-0.5">
+              <CalendarDays className="size-5" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-[13px] font-semibold">Booking Reminders</p>
+              <p className="text-[12px] text-muted-foreground mt-0.5">
+                Automatic email reminders before appointments. Reduces no-shows.
+              </p>
+              <div className="flex flex-wrap gap-5 mt-3">
+                <label className="flex items-center gap-2 text-[13px] cursor-pointer">
+                  <input type="checkbox" checked={reminder24h} onChange={(e) => setReminder24h(e.target.checked)} className="size-4" />
+                  24-hour email
+                </label>
+                <label className="flex items-center gap-2 text-[13px] cursor-pointer">
+                  <input type="checkbox" checked={reminder1h} onChange={(e) => setReminder1h(e.target.checked)} className="size-4" />
+                  1-hour email
+                </label>
+              </div>
             </div>
           </div>
         </div>

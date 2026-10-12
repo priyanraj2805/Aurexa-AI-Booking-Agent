@@ -1108,6 +1108,12 @@ const TABS: TabDef[] = [
 
 export default function AvailabilityPage() {
   const [tab, setTab] = useState<Tab>("schedule");
+  const [isOrg, setIsOrg] = useState(false);
+  useEffect(() => {
+    import("@/lib/org-api").then(({ orgApi }) =>
+      orgApi.scope().then((s) => setIsOrg(s.org_type === "organization")).catch(() => {})
+    ).catch(() => {});
+  }, []);
   const [indicatorStyle, setIndicatorStyle] = useState({ left: 4, width: 0, opacity: 0 });
   const tabsRef = useRef<(HTMLButtonElement | null)[]>([]);
 
@@ -1134,6 +1140,20 @@ export default function AvailabilityPage() {
           </p>
         </div>
       </div>
+
+      {isOrg && (
+        <div className="mb-6 border border-primary/30 bg-primary/5 rounded-xl p-4 text-sm">
+          <p className="font-semibold">🏥 Organization default hours</p>
+          <p className="text-muted-foreground text-xs mt-1">
+            This is the fallback used when a team member has no custom time-table. Manage each
+            member&apos;s own hours, timezone and duration in{" "}
+            <a href="/dashboard/departments" className="text-primary hover:underline font-medium">
+              Departments → open a department → Hours
+            </a>
+            .
+          </p>
+        </div>
+      )}
 
       {/* Tab bar with sliding indicator */}
       <div className="relative flex items-center gap-1 bg-secondary/50 p-1 rounded-xl mb-6 w-fit max-w-full overflow-x-auto border border-border">

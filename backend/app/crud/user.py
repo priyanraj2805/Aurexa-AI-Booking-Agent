@@ -53,9 +53,11 @@ async def create_user_with_org(db: AsyncSession, data: UserRegister) -> tuple:
     db.add(config)
 
     # 3. Create user
+    # Passwords are stripped: leading/trailing spaces are virtually always
+    # autocorrect/autofill accidents, and login verifies the stripped form.
     user = User(
         email=data.email.lower().strip(),
-        hashed_password=hash_password(data.password),
+        hashed_password=hash_password(data.password.strip()),
         full_name=data.full_name.strip(),
         org_id=org.id,
         is_active=True,
@@ -72,6 +74,6 @@ async def update_user_password(
     db: AsyncSession, user: User, new_password: str
 ) -> None:
     """Set a new password hash for the user (forgot-password flow)."""
-    user.hashed_password = hash_password(new_password)
+    user.hashed_password = hash_password(new_password.strip())
     await db.commit()
     await db.refresh(user)

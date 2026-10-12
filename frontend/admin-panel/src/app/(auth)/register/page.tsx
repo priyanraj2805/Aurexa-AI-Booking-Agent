@@ -18,6 +18,7 @@ export default function RegisterPage() {
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [step, setStep] = useState<"details" | "otp">("details");
+  const [orgType, setOrgType] = useState<"individual" | "organization">("individual");
   const { register, sendOtp } = useAuth();
   const router = useRouter();
 
@@ -53,7 +54,7 @@ export default function RegisterPage() {
   };
 
   const handleRegister = async (code: string) => {
-    await register({ full_name: fullName, org_name: orgName, email, password, otp_code: code });
+    await register({ full_name: fullName, org_name: orgName, email, password, otp_code: code, org_type: orgType });
     router.push("/login?registered=1");
   };
 
@@ -113,10 +114,40 @@ export default function RegisterPage() {
                 />
               </div>
 
+              {/* Account Type: individual shop vs organization mall */}
+              <div>
+                <label className="block text-xs font-medium text-[var(--text-secondary,#a1a1aa)] mb-1.5 uppercase tracking-wider">
+                  Account Type
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setOrgType("individual")}
+                    disabled={isLoading}
+                    className={`px-3 py-2.5 rounded-lg text-sm border transition-all ${orgType === "individual" ? "border-[#3b82f6] bg-[#3b82f6]/10 text-white" : "border-[var(--border,#27272a)] text-[var(--text-muted,#71717a)]"}`}
+                  >
+                    Just me
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOrgType("organization")}
+                    disabled={isLoading}
+                    className={`px-3 py-2.5 rounded-lg text-sm border transition-all ${orgType === "organization" ? "border-[#3b82f6] bg-[#3b82f6]/10 text-white" : "border-[var(--border,#27272a)] text-[var(--text-muted,#71717a)]"}`}
+                  >
+                    Organization
+                  </button>
+                </div>
+                <p className="text-xs text-[var(--text-muted,#71717a)] mt-1.5">
+                  {orgType === "individual"
+                    ? "Single doctor / shop — your own hours and bookings."
+                    : "Hospital / chain — manage departments, doctors and staff."}
+                </p>
+              </div>
+
               {/* Organization Name */}
               <div>
                 <label htmlFor="orgName" className="block text-xs font-medium text-[var(--text-secondary,#a1a1aa)] mb-1.5 uppercase tracking-wider">
-                  Organization Name
+                  {orgType === "organization" ? "Hospital / Organization Name" : "Organization Name"}
                 </label>
                 <input
                   id="orgName"

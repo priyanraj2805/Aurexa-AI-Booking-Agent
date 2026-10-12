@@ -87,10 +87,54 @@ async def dispatch_message(
             raise HTTPException(status_code=403, detail="Forbidden")
     else:
         new_session = await crud_chat.create_chat_session(
-            db, str(org.id), channel="web"
+            db, str(org.id), channel="web", mode=body.mode
         )
         chat_session = await crud_chat.get_chat_session(db, str(new_session.id))
         body.session_id = str(new_session.id)
+
+    # Org-mode: validate + pin department/doctor to this chat session.
+    # Individual sessions send nothing and keep old behavior.
+    if body.unit_id or body.provider_id:
+        try:
+            from app.services.catalog_service import validate_catalog_selection
+
+            _unit, _provider = await validate_catalog_selection(
+                db, org.id, body.unit_id, body.provider_id
+            )
+            try:
+                if _unit is not None:
+                    chat_session.unit_id = _unit.id
+                if _provider is not None:
+                    chat_session.provider_id = _provider.id
+            except Exception:
+                pass
+            try:
+                cd = chat_session.collected_data or {}
+                if _unit is not None:
+                    cd["unit_id"] = str(_unit.id)
+                    cd["unit_name"] = _unit.name
+                if _provider is not None:
+                    cd["provider_id"] = str(_provider.id)
+                    cd["provider_name"] = _provider.full_name
+                    # Explicit choice consumes any pending offered list.
+                    cd.pop("_provider_options", None)
+                chat_session.collected_data = cd
+            except Exception:
+                pass
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Widget conversation mode (ask | booking): pinned to collected_data so
+    # every turn of the session honors it. Invalid values rejected by schema.
+    if body.mode in ("ask", "booking"):
+        try:
+            cd = chat_session.collected_data or {}
+            if cd.get("_mode") != body.mode:
+                cd["_mode"] = body.mode
+                chat_session.collected_data = cd
+                await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+        except Exception:
+            pass
 
     # Thread additive timezone/slot metadata into session state for confirm-time persistence
     session_changed = False

@@ -342,6 +342,10 @@ class TestTimezonePolicyCommitPath:
                 "time": booking_time,
                 "user_timezone": user_timezone,
                 "timezone_source": "user_selected",
+                # New contract: OTP/booking only after the review card went
+                # out. These tests exercise the commit path itself, so the
+                # session starts as if the customer already saw the summary.
+                "_review_presented": True,
             },
             missing_fields=[],
             current_intent="CONFIRM_BOOKING",

@@ -186,20 +186,12 @@ def _mock_graph(monkeypatch, llm_text, llm_intent="START_BOOKING"):
 
 
 @pytest.mark.asyncio
-async def test_bare_confirm_reaches_booking_gate_despite_stale_chitchat_intent(monkeypatch):
-    """Bare 'confirm' must resolve to PROCESS_BOOKING even when a stale
-    CHITCHAT intent lingers on the session (the stuck-loop regression)."""
+async def test_bare_confirm_gets_summary_first_despite_stale_chitchat_intent(monkeypatch):
+    """New contract: OTP/booking only after the review card went out. A bare
+    'confirm' with no prior card resolves to the summary (not the booking
+    flow), even when a stale CHITCHAT intent lingers (the stuck-loop
+    regression still resolves toward confirm, just via the card first)."""
     _mock_graph(monkeypatch, "confirm?", llm_intent="START_BOOKING")
-    gate_calls = []
-
-    async def _fake_gate(*_args, **_kwargs):
-        gate_calls.append(True)
-        return ("gate reached", "REQUIRE_OTP_MODAL", {})
-
-    monkeypatch.setattr(
-        "app.engine.langgraph_orchestrator.message_processor._handle_booking_flow",
-        _fake_gate,
-    )
     payload = await process_message_with_graph(
         db=SimpleNamespace(),
         org=SimpleNamespace(id=uuid.UUID("00000000-0000-0000-0000-000000000001"), name="DotStark"),
@@ -209,23 +201,15 @@ async def test_bare_confirm_reaches_booking_gate_despite_stale_chitchat_intent(m
         background_tasks=None,
     )
 
-    assert gate_calls == [True]
-    assert payload.message == "gate reached"
+    assert payload.widget_directive == "REQUEST_CONFIRMATION"
+    assert "Is everything correct?" in payload.message
 
 
 @pytest.mark.asyncio
-async def test_bare_ok_reaches_booking_gate(monkeypatch):
+async def test_bare_ok_gets_summary_first(monkeypatch):
+    """Same contract as above for a bare 'ok': card first, booking flow only
+    after the card was presented (marker set by the render)."""
     _mock_graph(monkeypatch, "ok?", llm_intent="START_BOOKING")
-    gate_calls = []
-
-    async def _fake_gate(*_args, **_kwargs):
-        gate_calls.append(True)
-        return ("gate reached", "REQUIRE_OTP_MODAL", {})
-
-    monkeypatch.setattr(
-        "app.engine.langgraph_orchestrator.message_processor._handle_booking_flow",
-        _fake_gate,
-    )
     payload = await process_message_with_graph(
         db=SimpleNamespace(),
         org=SimpleNamespace(id=uuid.UUID("00000000-0000-0000-0000-000000000001"), name="DotStark"),
@@ -235,8 +219,55 @@ async def test_bare_ok_reaches_booking_gate(monkeypatch):
         background_tasks=None,
     )
 
-    assert gate_calls == [True]
-    assert payload.message == "gate reached"
+    assert payload.widget_directive == "REQUEST_CONFIRMATION"
+    assert "Is everything correct?" in payload.message
+
+
+@pytest.mark.asyncio
+async def test_confirm_after_summary_reaches_booking_gate(monkeypatch):
+    """The second confirm (card already presented, marker set) proceeds into
+    the booking flow normally — the contract adds one preview turn, not a
+    loop. Asserted at the choke itself: the review gate must let a marked
+    session through to slot lock."""
+    from app.engine import message_processor as _mp
+
+    lock_calls = []
+
+    async def _fake_lock(*_args, **_kwargs):
+        lock_calls.append(True)
+
+    monkeypatch.setattr(_mp, "_lock_slot_for_booking", _fake_lock)
+    session = _full_session()
+    session.collected_data["_review_presented"] = True
+    fd_map = {
+        f["name"]: SimpleNamespace(
+            label=f["label"], type=f["type"], icon="", options=[]
+        )
+        for f in session.collected_data["field_definitions_snapshot"]
+    }
+    try:
+        # Falls through the gate (no summary reroute) into downstream flow
+        # which needs a real DB and will fail there — the lock call proves
+        # gate passage regardless of where it lands afterwards.
+        await _mp._handle_booking_flow(
+            db=SimpleNamespace(),
+            org=SimpleNamespace(
+                id=uuid.UUID("00000000-0000-0000-0000-000000000001")
+            ),
+            org_config=SimpleNamespace(
+                require_otp=False, require_phone_otp=False, timezone="UTC"
+            ),
+            chat_session=session,
+            intent="CONFIRM_BOOKING",
+            require_otp=False,
+            fd_map=fd_map,
+            background_tasks=None,
+            require_phone_otp=False,
+            user_confirmed=True,
+        )
+    except Exception:
+        pass
+    assert lock_calls == [True]
 
 
 def test_pure_confirm_never_matches_cancel_sentences():

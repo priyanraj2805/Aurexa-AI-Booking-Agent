@@ -23,6 +23,7 @@ from app.core.sweeper import (
     cleanup_expired_slot_locks,
 )
 from app.core.email_delivery_service import process_due_email_retries
+from app.services.reminders import send_due_booking_reminders
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +313,11 @@ async def run_cleanup_loop():
                 expiring = await check_expiring_subscriptions(db)
                 if expiring:
                     logger.info(f"Sent {expiring} plan expiry reminder(s)")
+
+                # Feature 4: booking reminders (24h + 1h email, deduped)
+                booking_reminders = await send_due_booking_reminders(db)
+                if booking_reminders:
+                    logger.info(f"Sent {booking_reminders} booking reminder(s)")
         except asyncio.CancelledError:
             logger.info("Background cleanup task cancelled")
             break

@@ -141,7 +141,10 @@ class Settings(BaseSettings):
     RAZORPAY_ROUTE_API_BASE: str = os.getenv("RAZORPAY_ROUTE_API_BASE", "https://api.razorpay.com")
     # Default platform commission in basis points (1000 = 10%). Integer math only.
     # Per-transfer value is persisted; this is only the fallback default.
-    RAZORPAY_ROUTE_COMMISSION_BPS: int = int(os.getenv("RAZORPAY_ROUTE_COMMISSION_BPS", "1000"))
+    # Business model is subscription-based (orgs pay a plan fee, like ChatGPT),
+    # so NO per-booking commission: 100% of each payment goes to the provider.
+    # Razorpay's own gateway fee still applies (deducted from platform balance).
+    RAZORPAY_ROUTE_COMMISSION_BPS: int = int(os.getenv("RAZORPAY_ROUTE_COMMISSION_BPS", "0"))
 
     # ── OTP delivery ─────────────────────────────────────────────────────
     # Phone OTP is always delivered via WhatsApp (Meta Cloud API).

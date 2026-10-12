@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useAuth } from "@/lib/auth-context";
+import { useAuth, notifyAuthChange } from "@/lib/auth-context";
 import { apiFetch } from "@/lib/api";
 import { Loader2 } from "lucide-react";
 
@@ -27,6 +27,7 @@ export default function AuthCallbackPage() {
           skipAuth: true,
         });
         await refresh();
+        notifyAuthChange();
         router.replace("/dashboard");
       } catch {
         setError("This sign-in link expired or was already used. Please sign in again.");

@@ -100,6 +100,13 @@ async def test_booking_blocked_until_phone_otp_then_confirmed(client: AsyncClien
     org = await _make_org(db_session, require_phone_otp=True, require_otp=False)
     sess = await _make_sess(db_session, org, phone="+916350063338")
     sid = str(sess.id)
+    # New contract: OTP/booking only after the review card went out.
+    from sqlalchemy.orm.attributes import flag_modified
+
+    sess.state_data["_review_presented"] = True
+    flag_modified(sess, "state_data")
+    db_session.add(sess)
+    await db_session.commit()
     # Slot
     slot_start = datetime.fromisoformat(f"{BOOKING_DATE}T10:00:00+00:00")
     slot = TimeSlot(org_id=org.id, start_time=slot_start, end_time=slot_start+timedelta(hours=1), is_booked=False)

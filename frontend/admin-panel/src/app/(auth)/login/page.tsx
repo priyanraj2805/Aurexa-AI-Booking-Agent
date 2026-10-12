@@ -27,7 +27,8 @@ export default function LoginPage() {
     setIsLoading(true);
 
     try {
-      await login(email, password);
+      // Trim accidental whitespace (mobile autocorrect loves trailing spaces).
+      await login(email.trim(), password.trim());
     } catch (err: unknown) {
       let message: string;
       if (err instanceof TypeError && (err.message === "Failed to fetch" || err.message === "NetworkError when attempting to fetch resource.")) {

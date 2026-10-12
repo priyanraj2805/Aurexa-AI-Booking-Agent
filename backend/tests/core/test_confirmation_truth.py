@@ -37,6 +37,44 @@ FALSE_CONFIRMATIONS = [
 ]
 
 
+def test_review_summary_marks_session_as_previewed() -> None:
+    """The OTP/booking gate requires the review card to have gone out.
+    Production: time saved → "I'll confirm" → "Yes" → OTP, and the customer
+    never saw the details. The builder stamps the marker every caller (and
+    the gate) relies on."""
+    from app.schemas.agent import ChatSessionState
+
+    from app.engine import message_processor as mp
+
+    state = ChatSessionState(
+        session_id="00000000-0000-0000-0000-000000000001",
+        org_id="00000000-0000-0000-0000-000000000002",
+        channel="web",
+        collected_data={
+            "name": "Rohan Sharma",
+            "email": "rohan@example.com",
+            "phone": "+919822047136",
+            "date": "2026-10-06",
+            "time": "1:30 PM",
+        },
+    )
+    def _fd(icon, label, ftype):
+        return type("F", (), {"icon": icon, "label": label, "type": ftype,
+                              "unit": None, "options": None})()
+
+    fd_map = {
+        "name": _fd("\U0001f468", "Full Name", "text"),
+        "email": _fd("\U0001f4e7", "Email Address", "email"),
+        "phone": _fd("\U0001f4de", "Phone Number", "phone"),
+        "date": _fd("\U0001f4c5", "Preferred Date", "date"),
+        "time": _fd("\u23f0", "Preferred Time", "time"),
+    }
+    msg, directive = mp._build_confirmation_summary(state, fd_map)
+    assert directive == "REQUEST_CONFIRMATION"
+    assert "Is everything correct?" in msg
+    assert state.collected_data.get("_review_presented") is True
+
+
 def test_date_subject_claims_need_an_adverb_of_completion() -> None:
     """Bare date/time phrasing must stay safe: questions, mid-flow text
     ("the date is set"), negations and confirm-requests are not claims."""
