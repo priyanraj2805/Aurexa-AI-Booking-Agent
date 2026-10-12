@@ -568,7 +568,15 @@
                         </button>
                     </div>
                     <div class="messages" id="message-list" role="log" aria-label="Chat messages" aria-live="polite"></div>
-                    <div class="quick-prompts-bar" id="quick-prompts-bar" style="display:none" aria-label="Suggested questions"></div>
+                    <!-- Suggestions row. The switch-pill group is a SIBLING of the
+                         scrolling bar (not a sticky child of it), so a scrolled
+                         suggestion can never slide under/behind the switch control. -->
+                    <div class="qp-bar-wrap" id="qp-bar-wrap">
+                        <span class="qp-switch-slot" id="qp-switch-slot"></span>
+                        <button class="qp-nav qp-nav-left" id="qp-nav-left" type="button" aria-label="Scroll suggestions left">‹</button>
+                        <div class="quick-prompts-bar" id="quick-prompts-bar" style="display:none" aria-label="Suggested questions"></div>
+                        <button class="qp-nav qp-nav-right" id="qp-nav-right" type="button" aria-label="Scroll suggestions right">›</button>
+                    </div>
                     <div class="input-area">
                         <input type="text" placeholder="Type a message..." id="user-input" autocomplete="off" aria-label="Type your message">
                         <button class="send-btn" id="send-trigger" title="Send message" aria-label="Send message">
@@ -594,6 +602,7 @@
       this._msgList = this.shadowRoot.getElementById("message-list");
       this._inputArea = this.shadowRoot.querySelector(".input-area");
       this._qpBar = this.shadowRoot.getElementById("quick-prompts-bar");
+      try { this._bindQpNav(); } catch (_) {}
       this._homeView = this.shadowRoot.getElementById("home-view");
       this._backBtn = this.shadowRoot.getElementById("back-btn");
       this._canGoHome = false;
@@ -859,6 +868,10 @@
       // Department only — the member is chosen later, AFTER the date
       // (engine-driven REQUIRE_PROVIDER_PICKER with members working
       // that date). Never pre-pin a member here.
+      // Native <select> in LISTBOX mode (size attr): renders the options as
+      // an inline scrollable list inside the card. A collapsed <select>
+      // opens an OS-level popup that escapes the widget bounds; the listbox
+      // never pops out — same element, same behaviour, always contained.
       this._clearDirectiveCards();
       const div = document.createElement("div");
       div.className = "message agent field-input-card directive-card";
@@ -869,6 +882,7 @@
       const select = document.createElement("select");
       select.className = "widget-dept-select";
       select.setAttribute("aria-label", "Choose department");
+      select.size = Math.max(3, Math.min(6, units.length));
       const hint = document.createElement("option");
       hint.value = "";
       hint.textContent = `Select department (${units.length} available)…`;
@@ -1938,6 +1952,7 @@
       btn.onclick = () => this._switchSection("ask");
       this._qpBar.appendChild(btn);
       this._qpBar.style.display = "flex";
+      try { this._refreshQpNav(); } catch (_) {}
     }
 
     _switchSection(mode) {
@@ -2074,7 +2089,113 @@
           this._qpBar.innerHTML = "";
           this._qpBar.style.display = "none";
         }
+        // The pinned switch group lives outside the bar, so it needs its own
+        // reset — otherwise a stale "Start Booking" pill survives every
+        // re-render and the de-dup guard blocks the fresh one.
+        const slot = this.shadowRoot && this.shadowRoot.getElementById("qp-switch-slot");
+        if (slot) slot.innerHTML = "";
+        const wrap = this._qpWrap || (this.shadowRoot && this.shadowRoot.getElementById("qp-bar-wrap"));
+        if (wrap) wrap.classList.remove("qp-has-switch");
         this._msgList.querySelectorAll(".quick-prompts").forEach((el) => el.remove());
+      } catch (_) {}
+      try { this._refreshQpNav(); } catch (_) {}
+    }
+
+    _bindQpNav() {
+      // One-time wiring for the suggestions-bar scroll controls: arrow
+      // buttons + mouse-wheel-to-horizontal. Laptop users have no touch
+      // swipe and the bar hides its scrollbar, so without this the
+      // overflow pills are unreachable on desktop.
+      if (this._qpNavBound) return;
+      this._qpNavBound = true;
+      try {
+        const wrap = this.shadowRoot.getElementById("qp-bar-wrap");
+        const bar = this._qpBar;
+        const left = this.shadowRoot.getElementById("qp-nav-left");
+        const right = this.shadowRoot.getElementById("qp-nav-right");
+        if (!wrap || !bar || !left || !right) return;
+        this._qpWrap = wrap;
+        left.addEventListener("click", () => { try { this._qpScrollOne(-1); } catch (_) {} });
+        right.addEventListener("click", () => { try { this._qpScrollOne(1); } catch (_) {} });
+        bar.addEventListener("scroll", () => { try { this._refreshQpNav(); } catch (_) {} }, { passive: true });
+        bar.addEventListener("wheel", (e) => {
+          // Quantized: one wheel notch = exactly one pill. A short lockout
+          // swallows the burst of events a single flick produces so fast
+          // scrolling can never jump multiple pills per action.
+          try {
+            const max = bar.scrollWidth - bar.clientWidth;
+            if (max <= 2) return; // no overflow: leave page scroll alone
+            const dx = (e.deltaX || 0) + (e.deltaY || 0);
+            if (!dx) return;
+            const now = Date.now();
+            if (now - (this._qpWheelLock || 0) < 350) { e.preventDefault(); return; }
+            if ((dx > 0 && bar.scrollLeft < max - 1) || (dx < 0 && bar.scrollLeft > 1)) {
+              e.preventDefault();
+              this._qpWheelLock = now;
+              this._qpScrollOne(dx > 0 ? 1 : -1);
+            }
+          } catch (_) {}
+        }, { passive: false });
+        window.addEventListener("resize", () => { try { this._refreshQpNav(); } catch (_) {} });
+      } catch (_) {}
+    }
+
+    _refreshQpNav() {
+      // Show each arrow only while there is content to scroll that way.
+      // Called after every bar paint, on scroll, and on window resize.
+      // Both arrows are static siblings of the scroll area, so showing one
+      // can never cover a pill.
+      try {
+        const wrap = this._qpWrap || (this.shadowRoot && this.shadowRoot.getElementById("qp-bar-wrap"));
+        const bar = this._qpBar;
+        if (!wrap || !bar) return;
+        const visible = bar.style.display !== "none" && bar.children.length > 0;
+        const max = bar.scrollWidth - bar.clientWidth;
+        const canLeft = visible && bar.scrollLeft > 4;
+        const canRight = visible && max > 4 && bar.scrollLeft < max - 4;
+        wrap.classList.toggle("qp-can-left", !!canLeft);
+        wrap.classList.toggle("qp-can-right", !!canRight);
+      } catch (_) {}
+    }
+
+    _qpSuggestPills() {
+      // Suggestion pills only — the switch control lives outside the bar now,
+      // so this is simply every pill in the scroll area.
+      try {
+        const bar = this._qpBar;
+        if (!bar) return [];
+        return Array.from(bar.children).filter(
+          (el) => el.classList && el.classList.contains("qp-pill") && !el.classList.contains("qp-mode")
+        );
+      } catch (_) { return []; }
+    }
+
+    _qpScrollOne(dir) {
+      // Scroll EXACTLY one suggestion pill per action. No wrap compensation
+      // needed: the switch group is not inside the scroller, so the first
+      // pill is always fully visible once the scroll area starts.
+      try {
+        const bar = this._qpBar;
+        if (!bar) return;
+        const barR = bar.getBoundingClientRect();
+        const leftOf = (el) => el.getBoundingClientRect().left - barR.left + bar.scrollLeft;
+        const pills = this._qpSuggestPills();
+        if (!pills.length) return;
+        const tol = 4;
+        const edge = bar.scrollLeft + tol;
+        let target = dir > 0 ? null : 0;
+        if (dir > 0) {
+          for (const p of pills) {
+            if (leftOf(p) > edge) { target = leftOf(p); break; }
+          }
+          if (target === null) target = bar.scrollWidth;
+        } else {
+          for (let i = pills.length - 1; i >= 0; i--) {
+            if (leftOf(pills[i]) < edge - tol) { target = leftOf(pills[i]); break; }
+          }
+        }
+        try { bar.scrollTo({ left: Math.max(0, target), behavior: "smooth" }); }
+        catch (_) { bar.scrollLeft = Math.max(0, target); }
       } catch (_) {}
     }
 
@@ -2082,16 +2203,29 @@
       // Persistent way back into guided booking from Ask AI. Rendered as
       // part of every ask-mode bar paint so follow-up re-renders (which
       // clear the bar) can never drop it.
+      // It lives in #qp-switch-slot — a NON-scrolling sibling of the pill bar
+      // — so the switch control can never be overlapped by a scrolled pill.
       try {
-        if (!this._qpBar || this._qpBar.querySelector('[data-switch="booking"]')) return;
+        const slot = this.shadowRoot.getElementById("qp-switch-slot");
+        const wrap = this._qpWrap || this.shadowRoot.getElementById("qp-bar-wrap");
+        if (!slot || !wrap) return;
+        if (slot.querySelector('[data-switch="booking"]')) return;
+        const group = document.createElement("span");
+        group.className = "qp-switch-wrap";
         const btn = document.createElement("button");
         btn.className = "qp-pill qp-mode";
         btn.textContent = "📅 Start Booking";
         btn.setAttribute("aria-label", "Switch to guided booking");
         btn.dataset.switch = "booking";
         btn.onclick = () => this._switchSection("booking");
-        this._qpBar.appendChild(btn);
-        this._qpBar.style.display = "flex";
+        group.appendChild(btn);
+        slot.appendChild(group);
+        // Divider so the switch control never reads as another suggestion.
+        const sep = document.createElement("span");
+        sep.className = "qp-sep";
+        sep.setAttribute("aria-hidden", "true");
+        slot.appendChild(sep);
+        wrap.classList.add("qp-has-switch");
       } catch (_) {}
     }
 
@@ -2121,9 +2255,13 @@
       // prompts configured (otherwise there is no way back to booking).
       if (this._chatMode === "ask") {
         this._appendBookingSwitchPill();
-      } else if (this._qpBar.children.length) {
+      }
+      // The switch pill is pinned OUTSIDE the scroller, so the bar itself is
+      // only shown when there is at least one suggestion to scroll.
+      if (this._qpBar.children.length) {
         this._qpBar.style.display = "flex";
       }
+      try { this._refreshQpNav(); } catch (_) {}
     }
 
     async _renderDirectiveUI(directive, fieldMeta, agentMessage) {
@@ -3743,12 +3881,63 @@
                     align-items: center;
                 }
 
+                .qp-bar-wrap {
+                    position: relative;
+                    display: flex;
+                    align-items: center;
+                    box-sizing: border-box;
+                    /* Outer padding lives here (NOT on the scroll area) so the
+                       scrollbar/pills always start after the pinned switch group. */
+                    padding: 10px 16px 4px;
+                    background: var(--bg-card);
+                }
+                /* Pinned section-switch group. Lives OUTSIDE .quick-prompts-bar,
+                   so it has no scroll container to bleed through — the earlier
+                   sticky-inside-the-scroller approach kept letting a sliver of a
+                   scrolled pill show at the left edge. */
+                .qp-switch-slot {
+                    display: none;
+                    flex-shrink: 0;
+                    align-items: center;
+                    gap: 8px;
+                    padding-right: 10px;
+                }
+                .qp-bar-wrap.qp-has-switch .qp-switch-slot { display: flex; }
+                /* Scroll arrows for the suggestions bar (laptop/desktop have
+                   no touch swipe and the bar hides its scrollbar). Static flex
+                   siblings — never overlayed on the pills. */
+                .qp-nav {
+                    flex-shrink: 0;
+                    align-self: center;
+                    width: 22px;
+                    height: 22px;
+                    border-radius: 50%;
+                    border: 1px solid var(--border);
+                    background: var(--bg-card, #121212);
+                    color: #fff;
+                    font-size: 15px;
+                    font-weight: 700;
+                    line-height: 1;
+                    padding: 0 0 2px;
+                    cursor: pointer;
+                    display: none;
+                    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+                }
+                .qp-nav:hover {
+                    border-color: var(--accent);
+                    color: var(--accent);
+                }
+                .qp-bar-wrap.qp-can-left > #qp-nav-left { display: block; margin: 0 8px 0 4px; }
+                .qp-bar-wrap.qp-can-right > #qp-nav-right { display: block; margin: 0 0 0 8px; }
                 /* ════════ QUICK PROMPTS BAR (Mando-style pills above input) ════════ */
                 .quick-prompts-bar {
                     display: none;
+                    flex: 1 1 auto;
+                    min-width: 0;
                     gap: 8px;
-                    padding: 10px 16px 4px;
+                    padding: 0;
                     overflow-x: auto;
+                    overflow-y: hidden;
                     background: var(--bg-card);
                     scrollbar-width: none;
                 }
@@ -3776,6 +3965,37 @@
                 }
                 .qp-pill:active {
                     transform: scale(0.96);
+                }
+                /* Mode-switch pills (Start Booking / Ask AI instead) must NOT
+                   look like suggestion pills — users confused the two. Switch
+                   pills are accent-outlined navigation controls, separated
+                   from suggestion pills by a divider. */
+                .qp-pill.qp-mode {
+                    background: transparent;
+                    border: 1.5px solid var(--accent);
+                    color: var(--accent);
+                }
+                .qp-pill.qp-mode:hover {
+                    background: var(--accent-glow);
+                    box-shadow: none;
+                    transform: translateY(-1px);
+                }
+                .qp-sep {
+                    flex-shrink: 0;
+                    width: 1px;
+                    align-self: stretch;
+                    margin: 4px 2px;
+                    background: var(--border);
+                }
+                /* The switch-pill group is NOT inside the scroller — see
+                   .qp-switch-slot. Kept as a rule so nothing inherits a
+                   background/position that could let pills bleed through. */
+                .qp-switch-wrap {
+                    flex-shrink: 0;
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    background: transparent;
                 }
 
                 .input-area input {
@@ -4065,6 +4285,23 @@
                 }
                 .widget-dept-select:focus {
                     border-color: var(--accent);
+                }
+
+                /* Department listbox: native <select size> renders inline (no
+                   OS popup), so the options can never escape the widget. */
+                .widget-dept-select[size] {
+                    overflow-y: auto;
+                    scrollbar-width: thin;
+                    padding: 4px;
+                }
+                .widget-dept-select[size] option {
+                    padding: 9px 10px;
+                    border-radius: 6px;
+                }
+                .widget-dept-select[size] option:checked {
+                    background: var(--accent-glow);
+                    color: var(--accent);
+                    font-weight: 600;
                 }
 
                 .widget-field-actions {
@@ -4493,6 +4730,14 @@
   }
 
   customElements.define("dotstark-booking-widget", BookingWidget);
+
+  // Build stamp: proves EXACTLY which bundle a page runs (console + window).
+  // When reporting a visual bug, include this tag so we never chase ghosts
+  // in a stale cached bundle again.
+  try {
+    window._dotstarkWidgetBuild = "2026-10-12-qpslot";
+    console.info("[DotStark] widget build:", window._dotstarkWidgetBuild);
+  } catch (_) {}
 
   const el = document.createElement("dotstark-booking-widget");
   document.body.appendChild(el);

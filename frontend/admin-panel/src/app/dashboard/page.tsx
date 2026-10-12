@@ -11,6 +11,8 @@ import {
   AlertCircle,
   Rocket,
   ArrowRight,
+  ChevronRight,
+  X,
   Circle,
   TrendingUp,
   TrendingDown,
@@ -401,16 +403,17 @@ function RevenueStrip() {
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-5 pt-5 border-t border-border">
-          {/* Departments — tap to filter the team list */}
+          {/* Departments — own card; tap one to filter the team list */}
           {deptRows.length > 0 && (
-            <div>
+            <div className="min-w-0 rounded-xl border border-border bg-background p-4">
               <div className="flex items-center justify-between mb-1">
                 <h3 className="text-sm font-semibold">Departments</h3>
+                <span className="text-[11px] text-muted-foreground">{deptRows.length} total</span>
               </div>
-              <p className="text-xs text-muted-foreground mb-4">
-                Revenue in the last {range} days — tap a department to see its team members
+              <p className="text-xs text-muted-foreground mb-3">
+                Tap a department to see its team members.
               </p>
-              <div className="space-y-3 max-h-[188px] overflow-y-auto overflow-x-hidden pr-1 scrollbar-thin">
+              <div className="space-y-2 max-h-[300px] overflow-y-auto overflow-x-hidden pr-1 scrollbar-thin">
                 {deptRows.map((u) => {
                   const active = selectedUnit?.id === u.id;
                   return (
@@ -418,20 +421,28 @@ function RevenueStrip() {
                       key={u.id}
                       type="button"
                       onClick={() => setSelectedUnit(active ? null : { id: u.id, name: u.name })}
-                      className={`w-full text-left rounded-lg px-2 py-1 -mx-2 transition-colors ${
-                        active ? "bg-primary/10 ring-1 ring-primary/40" : "hover:bg-secondary/40"
+                      aria-pressed={active}
+                      className={`group w-full text-left rounded-xl border px-3 py-2.5 transition-colors ${
+                        active
+                          ? "border-primary bg-primary/10 ring-1 ring-primary/40"
+                          : "border-border bg-card hover:border-primary/50 hover:bg-secondary/40"
                       }`}
                     >
-                      <div className="flex items-center justify-between text-sm mb-1">
-                        <span className="font-medium truncate">{u.name}</span>
-                        <span className="tabular-nums font-medium">{inrFromPaise(u.gross)}</span>
+                      <div className="flex items-center gap-2 text-sm">
+                        <span className="font-semibold truncate">{u.name}</span>
+                        <span className="ml-auto tabular-nums font-semibold shrink-0">{inrFromPaise(u.gross)}</span>
+                        {active ? (
+                          <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-primary">Viewing ✕</span>
+                        ) : (
+                          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-50 group-hover:opacity-100 transition-opacity" />
+                        )}
                       </div>
-                      <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-1">
+                      <div className="mt-1 flex items-center justify-between text-[11px] text-muted-foreground">
                         <span>{u.bookings} booking{u.bookings === 1 ? "" : "s"}</span>
                         <span className="text-emerald-600 dark:text-emerald-400">{inrFromPaise(u.collected)} collected</span>
                       </div>
-                      <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
-                        <div className="h-full rounded-full bg-primary" style={{ width: `${Math.round((u.gross / maxDept) * 100)}%` }} />
+                      <div className="mt-2 h-1.5 rounded-full bg-secondary overflow-hidden">
+                        <div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(u.gross > 0 ? 4 : 0, Math.round((u.gross / maxDept) * 100))}%` }} />
                       </div>
                     </button>
                   );
@@ -440,60 +451,68 @@ function RevenueStrip() {
             </div>
           )}
 
-          {/* Team members — scoped to the tapped department */}
-          <div>
+          {/* Team members — own card; scoped to the tapped department */}
+          <div className="min-w-0 rounded-xl border border-border bg-background p-4">
             <div className="flex items-center justify-between mb-1">
               <h3 className="text-sm font-semibold">
-                {selectedUnit ? `Team members in ${selectedUnit.name}` : "Team members"}
+                Team members
+                {selectedUnit ? <span className="hidden sm:inline text-muted-foreground font-normal"> · {selectedUnit.name}</span> : null}
               </h3>
               {selectedUnit ? (
                 <button
                   type="button"
                   onClick={() => setSelectedUnit(null)}
-                  className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-full bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+                  className="inline-flex items-center gap-1 text-[11px] font-semibold pl-2.5 pr-2 py-1 rounded-full bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
                   title="Show all team members"
                 >
-                  {selectedUnit.name} ✕
+                  <span className="truncate max-w-[140px]">{selectedUnit.name}</span>
+                  <X className="h-3 w-3 shrink-0" />
                 </button>
-              ) : null}
+              ) : (
+                <span className="text-[11px] text-muted-foreground">All departments</span>
+              )}
             </div>
-            <p className="text-xs text-muted-foreground mb-4">Revenue in the last {range} days</p>
+            <p className="text-xs text-muted-foreground mb-3">
+              {selectedUnit
+                ? `Revenue in the last ${range} days — filtered to ${selectedUnit.name}`
+                : `Revenue in the last ${range} days — across all departments`}
+            </p>
             {teamRows.length || (!selectedUnit && unassignedMember) ? (
-              <div className="space-y-3 max-h-[188px] overflow-y-auto overflow-x-hidden pr-1 scrollbar-thin">
+              <div className="space-y-2 max-h-[300px] overflow-y-auto overflow-x-hidden pr-1 scrollbar-thin">
                 {teamRows.map((p) => (
-                  <div key={p.id} className="rounded-lg px-2 py-1 -mx-2">
-                    <div className="flex items-center justify-between text-sm mb-1">
-                      <span className="font-medium truncate">
+                  <div key={p.id} className="rounded-xl border border-border bg-card px-3 py-2.5">
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="font-semibold truncate">
                         {p.name}
                         {p.role_label ? (
                           <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">{p.role_label}</span>
                         ) : null}
                       </span>
-                      <span className="tabular-nums font-medium">{inrFromPaise(p.gross)}</span>
+                      <span className="ml-auto tabular-nums font-semibold shrink-0">{inrFromPaise(p.gross)}</span>
                     </div>
-                    <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-1">
+                    <div className="mt-1 flex items-center justify-between text-[11px] text-muted-foreground">
                       <span>{p.bookings} booking{p.bookings === 1 ? "" : "s"}</span>
                       <span className="text-emerald-600 dark:text-emerald-400">{inrFromPaise(p.collected)} collected</span>
                     </div>
-                    <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
-                      <div className="h-full rounded-full bg-green-500" style={{ width: `${Math.round((p.gross / maxTeam) * 100)}%` }} />
+                    <div className="mt-2 h-1.5 rounded-full bg-secondary overflow-hidden">
+                      <div className="h-full rounded-full bg-green-500" style={{ width: `${Math.max(p.gross > 0 ? 4 : 0, Math.round((p.gross / maxTeam) * 100))}%` }} />
                     </div>
                   </div>
                 ))}
                 {!selectedUnit && unassignedMember ? (
-                  <div className="rounded-lg px-2 py-1 -mx-2">
-                    <div className="flex items-center justify-between text-sm mb-1">
-                      <span className="font-medium truncate text-muted-foreground">Unassigned</span>
-                      <span className="tabular-nums font-medium">{inrFromPaise(unassignedMember.gross_revenue_paise)}</span>
+                  <div className="rounded-xl border border-dashed border-border px-3 py-2.5">
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="font-semibold truncate text-muted-foreground">Unassigned</span>
+                      <span className="ml-auto tabular-nums font-semibold shrink-0">{inrFromPaise(unassignedMember.gross_revenue_paise)}</span>
                     </div>
-                    <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-1">
-                      <span>{unassignedMember.bookings} booking{unassignedMember.bookings === 1 ? "" : "s"}</span>
+                    <div className="mt-1 text-[11px] text-muted-foreground">
+                      {unassignedMember.bookings} booking{unassignedMember.bookings === 1 ? "" : "s"}
                     </div>
                   </div>
                 ) : null}
               </div>
             ) : (
-              <p className="text-sm text-muted-foreground py-6 text-center">
+              <p className="text-sm text-muted-foreground py-6 text-center rounded-xl border border-dashed border-border">
                 {selectedUnit ? "No team members in this department." : "No bookings in this range."}
               </p>
             )}
