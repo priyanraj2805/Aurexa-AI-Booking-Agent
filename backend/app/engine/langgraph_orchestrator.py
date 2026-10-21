@@ -1553,6 +1553,24 @@ _BOOKING_DIRECTIVES = frozenset({
     "BOOKING_CONFIRMED_CARD",
 })
 
+# Field-COLLECTION directives only (no confirm / verify / pay). Used to decide
+# whether the flow is still gathering data — a collection turn is the only
+# point where an extra step (like the WhatsApp department list) can be
+# inserted without breaking the booking chain. TEXT_INPUT is included because
+# plain-text fields (name) are collected through it.
+_FIELD_COLLECT_DIRECTIVES = frozenset({
+    "TEXT_INPUT",
+    "REQUIRE_DATE_PICKER",
+    "REQUIRE_TIME_SLOT_GRID",
+    "REQUIRE_PROVIDER_PICKER",
+    "REQUIRE_SELECT",
+    "SELECT_DROPDOWN",
+    "REQUIRE_PHONE_INPUT",
+    "REQUIRE_EMAIL_INPUT",
+    "REQUIRE_NUMBER_INPUT",
+    "REQUIRE_TEXTAREA",
+})
+
 
 def downgrade_ask_directive(*, mode: Optional[str], directive: str) -> str:
     """Ask-AI mode never renders booking UI: any booking-family directive
@@ -1979,6 +1997,28 @@ async def process_message_with_graph(
     if _dup_reschedule_action is not None:
         return _dup_reschedule_action
 
+    # Org-mode WhatsApp: catch a department-name reply BEFORE anything else
+    # sees it, so the department is pinned before the flow advances. The
+    # reply is matched against the real department names in the DB — no
+    # keyword list. The flow keeps running (the graph still sees the turn);
+    # if the extractor filed the reply under the customer's details, the
+    # bogus capture is dropped further down and the field is asked again.
+    #
+    # Runs BEFORE the opening greeting on purpose: a bare "Cardiology" is
+    # name-shaped, so the greeting would adopt it as the customer's name
+    # ("Hello Cardiology!") and the department reply would be lost.
+    _dept_pick = None
+    if _session_mode(chat_session) != "ask":
+        try:
+            from app.engine import whatsapp_catalog as _wa_cat
+
+            _dept_pick = await _wa_cat.try_pick_department(
+                db, org, chat_session, message_text
+            )
+        except Exception:
+            logger.warning("whatsapp department pick failed, falling through", exc_info=True)
+            _dept_pick = None
+
     # Opening greeting: a customer whose FIRST message is their name ("Hi
     # Yash", "Amanpreet Kaur") was told "Hello! Could you please share your
     # full name?" -- the name they had just given was ignored and they were
@@ -1987,6 +2027,9 @@ async def process_message_with_graph(
     #
     # Skipped in Ask-AI mode: a name typed there is a question topic, not
     # the start of collection (it greeted "priyanshu" and asked for email).
+    #
+    # Skipped when the reply named a DEPARTMENT: that reply is a department,
+    # not a name — greeting them as "Cardiology" would be nonsense.
     #
     # Placed after the cancel / post-booking / decline / cooldown gates so
     # none of those can be bypassed, and before the LLM so the salutation is
@@ -1999,7 +2042,7 @@ async def process_message_with_graph(
                 or getattr(org_config, "required_fields", None)
             )
         )
-        if _opening_allowed:
+        if _opening_allowed and _dept_pick is None:
             _greeting_action = await message_processor.maybe_greet_opening_name(
                 db,
                 org,
@@ -2017,24 +2060,6 @@ async def process_message_with_graph(
         _greeting_action = None
     if _greeting_action is not None:
         return _greeting_action
-
-    # Org-mode WhatsApp: pick the department BEFORE the date/time.
-    # The widget has a pre-chat dropdown, so `unit_id` is already pinned
-    # there; WhatsApp has no pre-chat UI, so without this the customer
-    # never learns the business has departments or team members and the
-    # member picker never fires.
-    if _session_mode(chat_session) != "ask":
-        try:
-            from app.engine import whatsapp_catalog as _wa_cat
-
-            _dept_action = await _wa_cat.maybe_handle_department_pick(
-                db, org, chat_session, message_text
-            )
-        except Exception:
-            logger.warning("whatsapp department pick failed, falling through", exc_info=True)
-            _dept_action = None
-        if _dept_action is not None:
-            return _dept_action
 
         # ── Lead capture ──
         # Most WhatsApp conversations never become a booking. Without a
@@ -2585,6 +2610,39 @@ async def process_message_with_graph(
     if isinstance(result.get("captured_deltas"), dict) and result["captured_deltas"]:
         await decline_flow.clear_decline(db, chat_session)
     follow_up_fields = result.get("follow_up_fields")
+    # ── WhatsApp department reply that the extractor read as a detail ──
+    # The customer replied with a DEPARTMENT name ("Cardiology"). That reply
+    # reads exactly like a name, so the extractor may have filed it under
+    # the customer's name — which would book the appointment with the
+    # department as their name. The capture is bogus (the value equals the
+    # real department name), so drop it and put the field back so it is
+    # asked again. Compared against the department name itself — data, not a
+    # keyword list.
+    if _dept_pick:
+        try:
+            from app.engine import whatsapp_catalog as _wa_cat
+
+            _bogus_field = _wa_cat.detail_captured_from_department(
+                result.get("captured_deltas") or {}, _dept_pick
+            )
+        except Exception:
+            _bogus_field = None
+        if _bogus_field:
+            _already_dropped = str(
+                (chat_session.collected_data or {}).get("_dept_capture_dropped") or ""
+            )
+            if _already_dropped != _bogus_field:
+                logger.info(
+                    "whatsapp department reply dropped from field capture",
+                    extra={"field": _bogus_field, "session_id": session_id},
+                )
+                if isinstance(chat_session.collected_data, dict):
+                    chat_session.collected_data.pop(_bogus_field, None)
+                    # Never drop the same field twice: a customer whose name
+                    # IS a department name would otherwise be asked forever.
+                    chat_session.collected_data["_dept_capture_dropped"] = _bogus_field
+                _fu_now = list(follow_up_fields) if isinstance(follow_up_fields, list) else []
+                follow_up_fields = [_bogus_field] + [f for f in _fu_now if f != _bogus_field]
     if result.get("slot_unavailable"):
         existing_follow_ups = list(follow_up_fields) if isinstance(follow_up_fields, list) else []
         refreshed_slots = result.get("refreshed_slots")
@@ -3045,6 +3103,12 @@ async def process_message_with_graph(
     # (WhatsApp-only, behind no flag for now as requested — widget keeps its own path)
     # whatsapp_cloud (Meta Cloud API) is WhatsApp-class: same directives/IDs/handler.
     _is_whatsapp = str(getattr(chat_session, "channel", "")).lower() in ("whatsapp", "whatsapp_cloud")
+    # WhatsApp team-member offer (org dept flow). Declared here so the
+    # field meta can be re-applied after the evaluator's directive meta is
+    # merged over field_meta further down.
+    _wa_member_offered = False
+    _wa_members: list = []
+    _wa_unit = None
     if _is_whatsapp and directive in ("REQUIRE_DATE_PICKER", "REQUIRE_TIME_SLOT_GRID", "REQUIRE_SELECT", "SELECT_DROPDOWN", "REQUEST_CONFIRMATION", "BOOKING_SUMMARY_CARD"):
         try:
             from app.engine.booking_directive.service import DirectiveType as _DT
@@ -3162,8 +3226,66 @@ async def process_message_with_graph(
                                 # WhatsApp text-only guardrail: when user selects date, show all available slots as plain messages (no directive)
                                 # User explicitly requested: "we are not using any directives for our whatsapp bookings"
                                 if _is_whatsapp and _dtype == _DT.SELECT_SLOT:
+                                    # ── Org dept flow on WhatsApp: the team-member
+                                    # choice comes AFTER the date. WhatsApp has no
+                                    # interactive grid, so the members who work
+                                    # that day are listed as plain text and the
+                                    # customer replies with the number or the
+                                    # name. The slot list follows once a member
+                                    # is chosen.
+                                    _wa_members = []
+                                    _wa_unit = (chat_session.collected_data or {}).get("unit_id")
+                                    _wa_prov = (chat_session.collected_data or {}).get("provider_id")
+                                    if _wa_unit and not _wa_prov:
+                                        try:
+                                            from app.engine import whatsapp_catalog as _wa_cat
+
+                                            _wa_members = await _wa_cat.team_members_for_date(
+                                                db, org, _wa_unit, _target_date
+                                            )
+                                        except Exception:
+                                            logger.warning(
+                                                "whatsapp team member lookup failed",
+                                                exc_info=True,
+                                            )
+                                            _wa_members = []
+                                    _wa_member_offered = bool(_wa_members)
+                                    if _wa_member_offered:
+                                        _member_lines = []
+                                        for _i, _m in enumerate(_wa_members, start=1):
+                                            _lbl = str(_m.get("full_name") or "").strip()
+                                            if _m.get("role_label"):
+                                                _lbl += f" · {_m['role_label']}"
+                                            if _m.get("fee_display"):
+                                                _lbl += f" · {_m['fee_display']}"
+                                            _member_lines.append(f"{_i}. {_lbl}")
+                                        _date_nice = _target_date.strftime("%A, %B %d")
+                                        assistant_message = (
+                                            f"Who would you like to see on {_date_nice}?\n"
+                                            + "\n".join(_member_lines)
+                                            + "\n\nReply with the number or the team member's name."
+                                        )
+                                        # The pending offer is what lets the NEXT
+                                        # reply ("2", "Dr Sharma") pin the member —
+                                        # resolve_pending_provider reads it at
+                                        # engine entry.
+                                        _cd_members = dict(chat_session.collected_data or {})
+                                        _cd_members["_provider_options"] = [
+                                            {
+                                                "id": str(_m.get("id")),
+                                                "full_name": _m.get("full_name"),
+                                            }
+                                            for _m in _wa_members
+                                        ]
+                                        chat_session.collected_data = _cd_members
+                                        try:
+                                            await crud_chat.update_chat_session(
+                                                db, chat_session.session_id, chat_session
+                                            )
+                                        except Exception:
+                                            pass
                                     # Build plain-text slots list for WhatsApp (no interactive)
-                                    if _slot_labels:
+                                    if _slot_labels and not _wa_member_offered:
                                         slots_text = "\n".join([f"• {label}" for label in _slot_labels])
                                         # If the customer already replied with a time
                                         # that is not on this list, say so plainly
@@ -3249,19 +3371,30 @@ async def process_message_with_graph(
                                         # on the next turn, when the slot
                                         # options are not being re-rendered.
                                         field_meta["available_slots"] = _slot_labels
-                                    else:
+                                    elif not _wa_member_offered:
                                         assistant_message = f"No available slots for {str(_target)}. Please try another date (e.g., tomorrow)."
                                     directive = "TEXT_INPUT"
-                                    field_meta.update(
-                                        {
-                                            "name": "time",
-                                            "type": "time",
-                                            "label": "Preferred Time",
-                                            "available_slots": _slot_labels,
-                                            "target_date": str(_target),
-                                            "whatsapp_text_slots": True,
-                                        }
-                                    )
+                                    if _wa_member_offered:
+                                        field_meta.update(
+                                            {
+                                                "name": "provider",
+                                                "type": "provider",
+                                                "label": "Choose team member",
+                                                "unit_id": str(_wa_unit),
+                                                "providers": _wa_members,
+                                            }
+                                        )
+                                    else:
+                                        field_meta.update(
+                                            {
+                                                "name": "time",
+                                                "type": "time",
+                                                "label": "Preferred Time",
+                                                "available_slots": _slot_labels,
+                                                "target_date": str(_target),
+                                                "whatsapp_text_slots": True,
+                                            }
+                                        )
                                     # Skip directive creation - text only
                                     _raw = []
                                     # Continue to bypass directive creation; will return as TEXT_INPUT below
@@ -3559,6 +3692,20 @@ async def process_message_with_graph(
         field_meta["directive_validation_error"] = validation_error
     elif isinstance(directive_meta, dict):
         field_meta.update(directive_meta)
+    # The WhatsApp team-member offer owns this turn's field. The evaluator's
+    # directive meta ("time") is merged over field_meta just above, so the
+    # member field is re-applied here — otherwise the next-field guard asks
+    # for a time and the member list is lost.
+    if _wa_member_offered:
+        field_meta.update(
+            {
+                "name": "provider",
+                "type": "provider",
+                "label": "Choose team member",
+                "unit_id": str(_wa_unit),
+                "providers": _wa_members,
+            }
+        )
 
     validation_errors = result.get("validation_errors")
     if isinstance(validation_errors, dict):
@@ -3714,6 +3861,53 @@ async def process_message_with_graph(
     # transports to show both (answer + step) rather than dropping the answer.
     if result.get("knowledge_answer") and isinstance(field_meta, dict):
         field_meta["knowledge_answer"] = True
+
+    # ── Org-mode WhatsApp: offer the department list ──
+    # The web widget renders a department dropdown BEFORE the chat starts, so
+    # `unit_id` is already pinned there. WhatsApp has no pre-chat UI — the
+    # list has to be offered INSIDE the conversation.
+    #
+    # When to offer is decided by STATE and the agent's own output, never by
+    # matching words ("book", "appointment") in the message:
+    #   * the flow must still be COLLECTING a field, so the list never
+    #     appears at the confirm / verify / pay step;
+    #   * the turn must not be a knowledge answer (the agent already
+    #     answered a question from the business materials);
+    #   * the agent's intent must not be ASK_QUESTION;
+    #   * the list is offered at most once per session.
+    if _session_mode(chat_session) != "ask":
+        try:
+            from app.engine import whatsapp_catalog as _wa_cat
+
+            _graph_intent = str(
+                result.get("current_intent")
+                or getattr(chat_session, "current_intent", "")
+                or ""
+            ).upper()
+            _is_knowledge_turn = bool(result.get("knowledge_answer"))
+            _is_booking_turn = (
+                directive in _FIELD_COLLECT_DIRECTIVES
+                and bool(follow_up_fields)
+                and not _is_knowledge_turn
+                and _graph_intent != "ASK_QUESTION"
+            )
+            if _is_booking_turn:
+                _dept_offer = await _wa_cat.build_department_offer(
+                    db, org, chat_session
+                )
+                if _dept_offer is not None:
+                    await _persist_transcript_best_effort(
+                        db,
+                        session_id=session_id,
+                        user_message=_transcript_user_text,
+                        user_external_id=_inbound_id,
+                        assistant_message=_dept_offer.message,
+                        directive=_dept_offer.widget_directive or "TEXT_INPUT",
+                        intent=_graph_intent or chat_session.current_intent,
+                    )
+                    return _dept_offer
+        except Exception:
+            logger.warning("whatsapp department offer failed, falling through", exc_info=True)
 
     booking_field_meta: Optional[Dict[str, Any]] = None
     raw_require_otp = getattr(org_config, "require_otp", True)

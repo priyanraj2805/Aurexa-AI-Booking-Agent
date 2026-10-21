@@ -500,6 +500,24 @@ async def match_unit_choice(
     frag = [u for u in units if lowered in str(u["name"]).strip().lower()]
     if len(frag) == 1:
         return frag[0]
+    # Unique PREFIX: the customer typed the start of the name ("cardio" for
+    # "Cardiology"). Needed on WhatsApp where the list is paged and the
+    # exact name may not be on screen yet.
+    prefix = [u for u in units if str(u["name"]).strip().lower().startswith(lowered)]
+    if len(prefix) == 1:
+        return prefix[0]
+    # The department NAME appears inside the sentence: "do you have
+    # dermatology?" / "I need a dentist" / "book me for neurology".
+    # This is the natural way people ask on WhatsApp.
+    if len(lowered) >= 4:
+        inside = [
+            u
+            for u in units
+            if len(str(u["name"]).strip()) >= 4
+            and str(u["name"]).strip().lower() in lowered
+        ]
+        if len(inside) == 1:
+            return inside[0]
     return None
 
 
