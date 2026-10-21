@@ -39,7 +39,10 @@ $env:Path = "$bin;$bin\sdk;$env:Path"
 
 if (-not ($env:CLOUDSDK_PYTHON -and (Test-Path $env:CLOUDSDK_PYTHON))) {
     $py = $null
-    try { $py = (& py -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1) } catch {}
+    try {
+        $out = & py -c "import sys; print(sys.executable)" 2>$null
+        $py = ($out | Where-Object { $_ -match "python\.exe$" } | Select-Object -First 1)
+    } catch {}
     if (-not $py) {
         foreach ($p in @("$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
                          "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",

@@ -39,8 +39,9 @@ function Warn($msg) { Write-Host "    $msg" -ForegroundColor Yellow }
 Step "Checking the gcloud CLI"
 
 function Resolve-Gcloud {
-    $c = Get-Command gcloud -ErrorAction SilentlyContinue
-    if ($c) { return $c.Source }
+    # gcloud.cmd first, ALWAYS. The SDK folder also ships gcloud.ps1 (a
+    # PowerShell wrapper); Get-Command gcloud can return that one, and
+    # PowerShell cannot execute it when the execution policy blocks scripts.
     $candidates = @(
         "$env:USERPROFILE\gcloud-cli\google-cloud-sdk\bin\gcloud.cmd",
         "$env:LOCALAPPDATA\Google\Cloud SDK\bin\gcloud.cmd",
@@ -48,6 +49,10 @@ function Resolve-Gcloud {
         "C:\Program Files\Google\Cloud SDK\bin\gcloud.cmd"
     )
     foreach ($p in $candidates) { if (Test-Path $p) { return $p } }
+    foreach ($n in @("gcloud.cmd", "gcloud.exe")) {
+        $c = Get-Command $n -ErrorAction SilentlyContinue
+        if ($c) { return $c.Source }
+    }
     return $null
 }
 
@@ -56,7 +61,10 @@ function Resolve-Gcloud {
 function Ensure-GcloudPython {
     if ($env:CLOUDSDK_PYTHON -and (Test-Path $env:CLOUDSDK_PYTHON)) { return }
     $py = $null
-    try { $py = (& py -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1) } catch {}
+    try {
+        $out = & py -c "import sys; print(sys.executable)" 2>$null
+        $py = ($out | Where-Object { $_ -match "python\.exe$" } | Select-Object -First 1)
+    } catch {}
     if (-not $py) {
         foreach ($p in @("$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
                          "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
@@ -89,6 +97,16 @@ if (-not $gcloud) {
     Ok "gcloud: $gcloud"
 }
 Ensure-GcloudPython
+
+# Sanity: gcloud must actually run before we go further.
+$gcloudVer = (& $gcloud version 2>&1) -join "`n"
+if ($gcloudVer -notmatch "Google Cloud SDK") {
+    Write-Host "    gcloud does not run:" -ForegroundColor Red
+    Write-Host "    $gcloudVer" -ForegroundColor Red
+    Write-Host "    CLOUDSDK_PYTHON=$env:CLOUDSDK_PYTHON" -ForegroundColor Yellow
+    exit 1
+}
+Ok "gcloud works"
 
 # ------------------------------------------------------------
 # 2. Auth + project
