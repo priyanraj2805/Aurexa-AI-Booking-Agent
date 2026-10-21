@@ -71,7 +71,11 @@ def test_review_summary_marks_session_as_previewed() -> None:
     }
     msg, directive = mp._build_confirmation_summary(state, fd_map)
     assert directive == "REQUEST_CONFIRMATION"
-    assert "Is everything correct?" in msg
+    # The review card carries the details + the action hint. The old
+    # "Is everything correct?" line was removed — the widget renders
+    # Confirm/Edit/Cancel buttons, so the question was noise.
+    assert "Tap *Confirm* to book" in msg
+    assert "Is everything correct?" not in msg
     assert state.collected_data.get("_review_presented") is True
 
 

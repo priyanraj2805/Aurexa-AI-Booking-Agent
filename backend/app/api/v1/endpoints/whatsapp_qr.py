@@ -429,6 +429,12 @@ class QrInboundPayload(BaseModel):
     optionId: Optional[str] = Field(default=None, alias="optionId")
     timestamp: Optional[int] = None
     pushName: Optional[str] = None
+    # Media (photo / voice note / file). The gateway sends the type and
+    # caption; `text` stays empty and we describe the attachment so the
+    # agent is not blind.
+    mediaType: Optional[str] = Field(default=None, alias="mediaType")
+    mediaCaption: Optional[str] = Field(default=None, alias="mediaCaption")
+    mediaId: Optional[str] = Field(default=None, alias="mediaId")
 
 
 class QrEventPayload(BaseModel):
@@ -611,6 +617,18 @@ async def qr_inbound(    payload: QrInboundPayload,
 
     from_phone = "".join(c for c in str(payload.from_number or "") if c.isdigit())
     text = str(payload.text or "").strip()
+    # Media: no text, but a photo / voice note / file arrived. Describe it
+    # so the agent can continue the booking instead of going silent.
+    _media_type = str(payload.mediaType or "").strip().lower()
+    # Stickers are reactions, not content — they stay unhandled.
+    if not text and _media_type and _media_type != "sticker":
+        _label = {
+            "image": "a photo",
+            "audio": "a voice note",
+            "video": "a video",
+            "document": "a document",
+        }.get(_media_type, "an attachment")
+        text = str(payload.mediaCaption or "").strip() or f"[Customer sent {_label}]"
     # Exact text the human sent, captured before any directive-tap rewrite.
     # Booking logic consumes the (possibly rewritten) `text`; the transcript
     # and audit trail must record what was actually received.
@@ -629,6 +647,40 @@ async def qr_inbound(    payload: QrInboundPayload,
     if len(from_phone) < 7 or not text:
         release_message(f"qr:{payload.messageId}")
         return {"status": "ignored"}
+
+    # ── Opt-out (STOP) handling — checked BEFORE anything else ──
+    # Meta requires a stop request to be honoured immediately; replying
+    # again risks the business number being banned. An opted-out number
+    # gets no reply at all.
+    try:
+        from app.services import whatsapp_engagement as _wa_eng
+
+        if _wa_eng.is_stop_request(text):
+            await _wa_eng.record_opt_out(
+                db,
+                org.id,
+                from_phone,
+                reason="stop",
+                channel="whatsapp",
+            )
+            try:
+                from app.core import whatsapp_client as _wa_cli
+
+                await _wa_cli.send_booking_reply(
+                    from_phone, {"type": "text", "body": _wa_eng.STOP_CONFIRMATION}
+                )
+            except Exception:
+                logger.warning("stop confirmation send failed", exc_info=True)
+            release_message(f"qr:{payload.messageId}")
+            return {"status": "opted_out"}
+        if _wa_eng.is_start_request(text):
+            await _wa_eng.clear_opt_out(db, org.id, from_phone, channel="whatsapp")
+        elif await _wa_eng.is_opted_out(db, org.id, from_phone):
+            logger.info("qr inbound ignored (opted out) phone=%s***", from_phone[-4:])
+            release_message(f"qr:{payload.messageId}")
+            return {"status": "opted_out"}
+    except Exception:
+        logger.warning("opt-out gate failed, continuing", exc_info=True)
 
     # OTP codes and knowledge questions must never be rate-limited — they are
     # critical paths (booking confirmation and RAG) and knowledge bursts are

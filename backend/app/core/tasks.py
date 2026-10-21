@@ -24,8 +24,41 @@ from app.core.sweeper import (
 )
 from app.core.email_delivery_service import process_due_email_retries
 from app.services.reminders import send_due_booking_reminders
+from app.services.whatsapp_reminders import send_due_whatsapp_reminders
 
 logger = logging.getLogger(__name__)
+
+# Abandoned-booking recovery: at most one nudge per session per 24h.
+_abandoned_nudge_at: dict[str, datetime] = {}
+
+
+async def _run_abandoned_booking_recovery(db: AsyncSession) -> int:
+    """Nudge WhatsApp customers who started a booking and went quiet."""
+    sent = 0
+    try:
+        from app.services.whatsapp_lifecycle import (
+            find_abandoned_sessions,
+            send_abandoned_nudge,
+        )
+        from sqlalchemy import select as _sel
+
+        res = await db.execute(_sel(ChatSession.org_id).distinct().limit(100))
+        org_ids = [r[0] for r in res.all() if r and r[0]]
+        now = datetime.now(timezone.utc)
+        for org_id in org_ids:
+            for session in await find_abandoned_sessions(db, org_id):
+                key = f"{org_id}:{session.id}"
+                last = _abandoned_nudge_at.get(key)
+                if last and (now - last) < timedelta(hours=24):
+                    continue
+                if await send_abandoned_nudge(db, org_id, session):
+                    _abandoned_nudge_at[key] = now
+                    sent += 1
+    except Exception:
+        logger.warning("abandoned booking recovery failed", exc_info=True)
+    if sent:
+        logger.info("abandoned booking nudges sent count=%s", sent)
+    return sent
 
 # Track last run for expiry reminders to avoid spamming (once per day per org)
 _last_expiry_reminder_by_org: dict[str, datetime] = {}
@@ -318,6 +351,18 @@ async def run_cleanup_loop():
                 booking_reminders = await send_due_booking_reminders(db)
                 if booking_reminders:
                     logger.info(f"Sent {booking_reminders} booking reminder(s)")
+
+                # WhatsApp booking reminders (24h + 1h, template-based).
+                # The email path skips every WhatsApp-first booking (no email
+                # on file), so WhatsApp customers got NO reminder at all.
+                wa_reminders = await send_due_whatsapp_reminders(db)
+                if wa_reminders:
+                    logger.info(f"Sent {wa_reminders} WhatsApp booking reminder(s)")
+
+                # Abandoned WhatsApp bookings: the customer started a booking
+                # and went quiet. A template nudge brings the demand back —
+                # the one channel where a business may message first.
+                await _run_abandoned_booking_recovery(db)
         except asyncio.CancelledError:
             logger.info("Background cleanup task cancelled")
             break

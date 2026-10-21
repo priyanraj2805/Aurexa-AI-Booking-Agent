@@ -425,6 +425,84 @@ async def booking_email_context(db: AsyncSession, booking) -> Dict[str, Any]:
     return out
 
 
+async def get_active_units(db: AsyncSession, org_id: uuid.UUID) -> List[Dict[str, Any]]:
+    """Active departments with their active member count.
+
+    Used by the WhatsApp flow to offer the department list in plain text —
+    the web widget renders the same data as a dropdown, but WhatsApp has no
+    UI, so the list has to be spoken.
+    """
+    try:
+        units = (
+            await db.execute(
+                select(ServiceUnit)
+                .where(ServiceUnit.org_id == org_id, ServiceUnit.is_active.is_(True))
+                .order_by(ServiceUnit.name)
+            )
+        ).scalars().all()
+        out: List[Dict[str, Any]] = []
+        for u in units:
+            members = (
+                await db.execute(
+                    select(Provider)
+                    .join(UnitProvider, UnitProvider.provider_id == Provider.id)
+                    .where(
+                        UnitProvider.unit_id == u.id,
+                        Provider.org_id == org_id,
+                        Provider.is_active.is_(True),
+                    )
+                )
+            ).scalars().all()
+            out.append(
+                {
+                    "id": str(u.id),
+                    "name": u.name,
+                    "description": getattr(u, "description", None),
+                    "member_count": len(members),
+                }
+            )
+        return out
+    except Exception:
+        logger.warning("get_active_units failed org=%s", org_id, exc_info=True)
+        return []
+
+
+async def match_unit_choice(
+    db: AsyncSession, org_id: uuid.UUID, text: str
+) -> Optional[Dict[str, Any]]:
+    """Resolve a typed/tapped department pick to a unit.
+
+    Accepts: the unit id, a 1-based position ("2"), the exact name, or a
+    unique name fragment ("cardio"). Returns None when nothing matches
+    unambiguously — the caller then re-offers the list.
+    """
+    units = await get_active_units(db, org_id)
+    if not units:
+        return None
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    # Exact id.
+    for u in units:
+        if str(u["id"]).lower() == raw.lower():
+            return u
+    # Positional ("1", "2", ...).
+    if raw.isdigit():
+        idx = int(raw)
+        if 1 <= idx <= len(units):
+            return units[idx - 1]
+    # Exact name (case-insensitive).
+    lowered = raw.lower()
+    exact = [u for u in units if str(u["name"]).strip().lower() == lowered]
+    if len(exact) == 1:
+        return exact[0]
+    # Unique fragment.
+    frag = [u for u in units if lowered in str(u["name"]).strip().lower()]
+    if len(frag) == 1:
+        return frag[0]
+    return None
+
+
 async def get_catalog_snapshot(db: AsyncSession, org_id: uuid.UUID) -> Dict[str, Any]:
     """Active units each with their active assigned providers."""
     units = (

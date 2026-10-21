@@ -154,6 +154,36 @@ export default function IntegrationsPage() {
   const [payAttemptsLoading, setPayAttemptsLoading] = useState(false);
   const [payPage, setPayPage] = useState(1);
   const [payTotal, setPayTotal] = useState(0);
+
+  // WhatsApp engagement (leads / waitlist / funnel / opt-outs).
+  interface WaLead { id: string; name?: string; phone?: string; email?: string; channel: string; intent?: string; status: string; created_at?: string; }
+  interface WaWait { id: string; name?: string; phone?: string; target_date?: string; status: string; created_at?: string; }
+  interface WaOptOut { id: string; phone: string; reason?: string; created_at?: string; }
+  const [waLeads, setWaLeads] = useState<WaLead[]>([]);
+  const [waWaitlist, setWaWaitlist] = useState<WaWait[]>([]);
+  const [waOptOuts, setWaOptOuts] = useState<WaOptOut[]>([]);
+  const [waFunnel, setWaFunnel] = useState<Record<string, { entered: number; completed: number; abandoned: number; conversion: number }>>({});
+  const [waEngLoading, setWaEngLoading] = useState(false);
+
+  const loadWaEngagement = async () => {
+    setWaEngLoading(true);
+    try {
+      const [leads, wait, outs, funnel] = await Promise.all([
+        api.get<WaLead[]>("/dashboard/leads?limit=50"),
+        api.get<WaWait[]>("/dashboard/waitlist?limit=50"),
+        api.get<WaOptOut[]>("/dashboard/opt-outs?limit=50"),
+        api.get<{ steps?: Record<string, any> }>("/dashboard/booking-funnel?days=30"),
+      ]);
+      setWaLeads(leads ?? []);
+      setWaWaitlist(wait ?? []);
+      setWaOptOuts(outs ?? []);
+      setWaFunnel((funnel?.steps ?? {}) as any);
+    } catch {
+      /* section stays empty on error */
+    } finally {
+      setWaEngLoading(false);
+    }
+  };
   const loadPayAttempts = async (page: number) => {
     setPayAttemptsLoading(true);
     try {
@@ -480,6 +510,7 @@ export default function IntegrationsPage() {
     loadCalendarConfig();
     loadWidgetToken();
     loadRouteStatus();
+    loadWaEngagement();
     // Overview cards (e.g. WhatsApp API badge) render from this state —
     // without an initial load they permanently show "Configure".
     loadQrStatus();
@@ -1562,10 +1593,12 @@ export default function IntegrationsPage() {
                         <p className="text-xs text-muted-foreground mt-1">Click Connect, then on the business phone go to WhatsApp → Settings → Linked Devices → Link a Device and scan the code. QR refreshes automatically.</p>
                       </div>
                       {qrImg && (qrStatus?.status === "PENDING_QR" || qrStatus?.status === "DISCONNECTED") ? (
-                        <div className="flex justify-center">
-                          <img src={qrImg.dataUrl} alt="WhatsApp pairing QR code" className="size-56 rounded-xl border border-border bg-white p-2" />
-                        </div>
-                        <p className="text-[11px] text-muted-foreground">Scan within a minute — the code refreshes automatically. If your phone says “couldn’t connect”, wait for the next fresh code, don’t retry the old one.</p>
+                        <>
+                          <div className="flex justify-center">
+                            <img src={qrImg.dataUrl} alt="WhatsApp pairing QR code" className="size-56 rounded-xl border border-border bg-white p-2" />
+                          </div>
+                          <p className="text-[11px] text-muted-foreground">Scan within a minute — the code refreshes automatically. If your phone says “couldn’t connect”, wait for the next fresh code, don’t retry the old one.</p>
+                        </>
                       ) : qrWaiting ? (
                         <div className="flex flex-col items-center gap-2 py-6">
                           <Loader2 className="size-6 animate-spin text-muted-foreground" />
@@ -1583,6 +1616,103 @@ export default function IntegrationsPage() {
                       )}
                     </div>
                   )}
+
+                  {/* ── Engagement: leads, waitlist, funnel, opt-outs ── */}
+                  <div className="border border-border rounded-xl p-5 space-y-5">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h4 className="font-semibold text-sm">Engagement</h4>
+                        <p className="text-xs text-muted-foreground">Demand that never became a booking, and where conversations drop off.</p>
+                      </div>
+                      <button
+                        onClick={loadWaEngagement}
+                        className="relative inline-flex h-8 w-8 items-center justify-center rounded-full border border-border hover:bg-accent transition-colors"
+                        title="Refresh engagement data"
+                        aria-label="Refresh engagement data"
+                      >
+                        <RefreshCw className={`size-4 ${waEngLoading ? "animate-spin" : ""}`} />
+                      </button>
+                    </div>
+
+                    {/* Funnel */}
+                    <div>
+                      <p className="text-xs font-semibold mb-2">Booking funnel (last 30 days)</p>
+                      {Object.keys(waFunnel).length === 0 ? (
+                        <p className="text-xs text-muted-foreground">No funnel data yet.</p>
+                      ) : (
+                        <div className="space-y-1.5">
+                          {Object.entries(waFunnel).map(([step, v]) => (
+                            <div key={step} className="flex items-center gap-3">
+                              <span className="text-xs w-24 shrink-0 capitalize">{step.replace(/_/g, " ")}</span>
+                              <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">
+                                <div
+                                  className="h-full bg-primary"
+                                  style={{ width: `${Math.round((v.conversion || 0) * 100)}%` }}
+                                />
+                              </div>
+                              <span className="text-[11px] text-muted-foreground w-28 text-right shrink-0">
+                                {v.entered} in · {Math.round((v.conversion || 0) * 100)}%
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Leads */}
+                    <div>
+                      <p className="text-xs font-semibold mb-2">Leads ({waLeads.length})</p>
+                      {waLeads.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">No open leads.</p>
+                      ) : (
+                        <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                          {waLeads.map((l) => (
+                            <div key={l.id} className="flex items-center justify-between gap-2 text-xs border border-border/60 rounded-lg px-3 py-2">
+                              <div className="min-w-0">
+                                <span className="font-medium">{l.name || l.phone || "Unknown"}</span>
+                                {l.email ? <span className="text-muted-foreground"> · {l.email}</span> : null}
+                              </div>
+                              <span className="text-[10px] uppercase tracking-wider bg-muted px-2 py-0.5 rounded shrink-0">{l.status}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Waitlist */}
+                    <div>
+                      <p className="text-xs font-semibold mb-2">Waitlist ({waWaitlist.length})</p>
+                      {waWaitlist.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">Nobody waiting for a slot.</p>
+                      ) : (
+                        <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                          {waWaitlist.map((w) => (
+                            <div key={w.id} className="flex items-center justify-between gap-2 text-xs border border-border/60 rounded-lg px-3 py-2">
+                              <span className="font-medium">{w.name || w.phone || "Unknown"}</span>
+                              <span className="text-[10px] uppercase tracking-wider bg-amber-500/15 text-amber-600 px-2 py-0.5 rounded shrink-0">{w.status}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Opt-outs */}
+                    <div>
+                      <p className="text-xs font-semibold mb-2">Opt-outs ({waOptOuts.length})</p>
+                      {waOptOuts.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">No opted-out numbers.</p>
+                      ) : (
+                        <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                          {waOptOuts.map((o) => (
+                            <div key={o.id} className="flex items-center justify-between gap-2 text-xs border border-border/60 rounded-lg px-3 py-2">
+                              <span className="font-mono">•••{o.phone.slice(-4)}</span>
+                              <span className="text-[10px] uppercase tracking-wider bg-red-500/15 text-red-600 px-2 py-0.5 rounded shrink-0">{o.reason || "stop"}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
 
                 </div>
               )}

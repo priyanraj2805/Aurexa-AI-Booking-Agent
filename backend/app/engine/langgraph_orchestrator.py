@@ -2018,6 +2018,55 @@ async def process_message_with_graph(
     if _greeting_action is not None:
         return _greeting_action
 
+    # Org-mode WhatsApp: pick the department BEFORE the date/time.
+    # The widget has a pre-chat dropdown, so `unit_id` is already pinned
+    # there; WhatsApp has no pre-chat UI, so without this the customer
+    # never learns the business has departments or team members and the
+    # member picker never fires.
+    if _session_mode(chat_session) != "ask":
+        try:
+            from app.engine import whatsapp_catalog as _wa_cat
+
+            _dept_action = await _wa_cat.maybe_handle_department_pick(
+                db, org, chat_session, message_text
+            )
+        except Exception:
+            logger.warning("whatsapp department pick failed, falling through", exc_info=True)
+            _dept_action = None
+        if _dept_action is not None:
+            return _dept_action
+
+        # ── Lead capture ──
+        # Most WhatsApp conversations never become a booking. Without a
+        # lead row that demand is silently lost — the customer asked, the
+        # AI answered, and nobody in the business ever saw it.
+        try:
+            from app.services import whatsapp_engagement as _wa_eng
+
+            _wa_ch = str(getattr(chat_session, "channel", "") or "").lower()
+            if _wa_ch in ("whatsapp", "whatsapp_cloud"):
+                _cd0 = (
+                    chat_session.collected_data
+                    if isinstance(chat_session.collected_data, dict)
+                    else {}
+                )
+                await _wa_eng.capture_lead(
+                    db,
+                    org.id,
+                    session_id=session_id,
+                    phone="".join(c for c in str(_cd0.get("phone") or "") if c.isdigit()),
+                    name=str(_cd0.get("name") or ""),
+                    email=str(_cd0.get("email") or ""),
+                    channel=_wa_ch,
+                    intent="book",
+                    context=dict(_cd0) or None,
+                )
+                await _wa_eng.track_step(
+                    db, org.id, "started", session_id=session_id, channel=_wa_ch
+                )
+        except Exception:
+            logger.warning("lead capture failed", exc_info=True)
+
     # Field refusal: "no" / "don't want to share X" aimed at the current
     # missing field gets a soft re-ask of the SAME field — never a jump
     # ahead, never interrogation for something else.
@@ -3620,6 +3669,44 @@ async def process_message_with_graph(
                     "date_reset_required": True,
                 }
             )
+            # ── WhatsApp: offer the waitlist ──
+            # The demand is real (they wanted THAT day) and WhatsApp is the
+            # channel where we may message first. Keep the demand instead of
+            # losing it to "pick another date".
+            try:
+                _wa_ch2 = str(getattr(chat_session, "channel", "") or "").lower()
+                if _wa_ch2 in ("whatsapp", "whatsapp_cloud"):
+                    from app.services import whatsapp_engagement as _wa_eng
+
+                    _cd2 = (
+                        chat_session.collected_data
+                        if isinstance(chat_session.collected_data, dict)
+                        else {}
+                    )
+                    _wl = await _wa_eng.join_waitlist(
+                        db,
+                        org.id,
+                        session_id=session_id,
+                        unit_id=(chat_session.collected_data or {}).get("unit_id")
+                        if isinstance(chat_session.collected_data, dict)
+                        else None,
+                        provider_id=(chat_session.collected_data or {}).get("provider_id")
+                        if isinstance(chat_session.collected_data, dict)
+                        else None,
+                        phone="".join(c for c in str(_cd2.get("phone") or "") if c.isdigit()),
+                        name=str(_cd2.get("name") or ""),
+                        email=str(_cd2.get("email") or ""),
+                        target_date=None,
+                    )
+                    if _wl is not None:
+                        field_meta["waitlist_joined"] = True
+                        assistant_message = (
+                            "No slots are currently available for that date. "
+                            "I've added you to the waitlist and I'll notify you "
+                            "the moment a slot opens."
+                        )
+            except Exception:
+                logger.warning("waitlist offer failed", exc_info=True)
 
     # Knowledge-answer marker: the graph injected company materials this
     # turn, so the visible reply may carry retrieved facts. WhatsApp renders
@@ -4421,6 +4508,41 @@ async def process_message_with_graph(
                     field_meta["email_retrying"] = True
                 sent_confirmations.append(confirmation_event_key)
                 await crud_chat.update_chat_session(db, session_id, chat_session)
+
+            # ── WhatsApp: rich confirmation + lead conversion + funnel ──
+            # The email receipt carries date/time/meeting link; WhatsApp got
+            # a bare "booking confirmed" line, so the customer had nothing to
+            # show at the venue. Send a template receipt with the details.
+            try:
+                from app.services import whatsapp_engagement as _wa_eng
+                from app.services import whatsapp_reminders as _wa_rem
+
+                _wa_channel = str(getattr(chat_session, "channel", "") or "").lower()
+                if _wa_channel in ("whatsapp", "whatsapp_cloud"):
+                    if booking_row is not None:
+                        try:
+                            from app.models.organization import Organization as _OrgCls
+
+                            _o = (
+                                await db.execute(
+                                    _sel(_OrgCls).where(_OrgCls.id == org.id)
+                                )
+                            ).scalars().first()
+                            _biz = (getattr(_o, "name", "") or "Dotstark Technologies") if _o else "Dotstark Technologies"
+                        except Exception:
+                            _biz = "Dotstark Technologies"
+                        await _wa_rem.send_booking_confirmation(
+                            db, booking_row, business_name=_biz
+                        )
+                    await _wa_eng.mark_lead_converted(
+                        db, org.id, session_id, getattr(booking_row, "id", None)
+                    )
+                    await _wa_eng.track_step(
+                        db, org.id, "confirmed", session_id=session_id,
+                        channel=_wa_channel, outcome="completed",
+                    )
+            except Exception:
+                logger.warning("whatsapp confirmation/nudge failed", exc_info=True)
 
     if directive == "REQUIRE_OTP_MODAL":
         field_meta.setdefault("otp_cooldown_seconds", OTP_COOLDOWN_SECONDS)

@@ -30,6 +30,17 @@ TEMPLATE_WELCOME = "booking_welcome"
 TEMPLATE_REQUEST_EMAIL = "booking_request_email"
 TEMPLATE_REQUEST_PHONE = "bookings_request_phone"  # plural — the Active one
 
+# Lifecycle templates. Meta requires a template for any business-initiated
+# message (reminders, confirmations sent outside the 24h window). These must
+# exist AND be APPROVED in the Meta template dashboard before they can send.
+TEMPLATE_BOOKING_CONFIRMED = "booking_confirmed"
+TEMPLATE_BOOKING_REMINDER_24H = "booking_reminder_24h"
+TEMPLATE_BOOKING_REMINDER_1H = "booking_reminder_1h"
+TEMPLATE_BOOKING_CANCELLED = "booking_cancelled"
+TEMPLATE_BOOKING_RESCHEDULED = "booking_rescheduled"
+TEMPLATE_WAITLIST_JOINED = "booking_waitlist_joined"
+TEMPLATE_ABANDONED_BOOKING = "booking_abandoned"
+
 # Kill switch: false = keep pure Baileys behavior, no Cloud calls.
 TEMPLATES_ENABLED_DEFAULT = True
 
@@ -121,6 +132,63 @@ async def send_request_email(to: str, name: str, lang: Optional[str] = None) -> 
 
 async def send_request_phone(to: str, lang: Optional[str] = None) -> dict[str, Any]:
     return await send_cloud_template(to, TEMPLATE_REQUEST_PHONE, None, lang)
+
+
+# ── Lifecycle templates ───────────────────────────────────────────────
+# Meta only allows a template for business-initiated messages (reminders,
+# out-of-window confirmations). Each must be CREATED and APPROVED in the
+# Meta template dashboard with the same body params used here.
+
+async def send_booking_confirmed(
+    to: str, name: str, when: str, business: str, lang: Optional[str] = None
+) -> dict[str, Any]:
+    return await send_cloud_template(
+        to,
+        TEMPLATE_BOOKING_CONFIRMED,
+        [name or "there", when or "your appointment time", business or "Dotstark Technologies"],
+        lang,
+    )
+
+
+async def send_booking_reminder(
+    to: str, name: str, when: str, business: str, kind: str = "24h", lang: Optional[str] = None
+) -> dict[str, Any]:
+    tpl = TEMPLATE_BOOKING_REMINDER_24H if kind == "24h" else TEMPLATE_BOOKING_REMINDER_1H
+    return await send_cloud_template(
+        to, tpl, [name or "there", when or "your appointment time", business or "Dotstark Technologies"], lang
+    )
+
+
+async def send_booking_cancelled(
+    to: str, name: str, when: str, business: str, lang: Optional[str] = None
+) -> dict[str, Any]:
+    return await send_cloud_template(
+        to, TEMPLATE_BOOKING_CANCELLED, [name or "there", when or "your appointment", business or "Dotstark Technologies"], lang
+    )
+
+
+async def send_booking_rescheduled(
+    to: str, name: str, when: str, business: str, lang: Optional[str] = None
+) -> dict[str, Any]:
+    return await send_cloud_template(
+        to, TEMPLATE_BOOKING_RESCHEDULED, [name or "there", when or "your new time", business or "Dotstark Technologies"], lang
+    )
+
+
+async def send_waitlist_joined(
+    to: str, name: str, when: str, business: str, lang: Optional[str] = None
+) -> dict[str, Any]:
+    return await send_cloud_template(
+        to, TEMPLATE_WAITLIST_JOINED, [name or "there", when or "that day", business or "Dotstark Technologies"], lang
+    )
+
+
+async def send_abandoned_booking(
+    to: str, name: str, business: str, lang: Optional[str] = None
+) -> dict[str, Any]:
+    return await send_cloud_template(
+        to, TEMPLATE_ABANDONED_BOOKING, [name or "there", business or "Dotstark Technologies"], lang
+    )
 
 
 # ── Per-step resend guard ──────────────────────────────────────────────

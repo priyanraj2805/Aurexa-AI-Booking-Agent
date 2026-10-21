@@ -27,6 +27,8 @@ from app.api.v1.endpoints import (
     payment_config,
     catalog,
     staff,
+    booking_manage,
+    whatsapp_engagement_api,
 )
 from app.core.config import settings
 from app.api.v1.endpoints.internal import bridge as internal_bridge
@@ -79,6 +81,14 @@ api_router.include_router(cashfree.router, prefix="", tags=["cashfree"])
 
 # Tenant payment provider configuration (org Cashfree connect).
 api_router.include_router(payment_config.router, prefix="", tags=["payment-config"])
+
+# Public self-service booking management (signed link from WhatsApp).
+api_router.include_router(booking_manage.router, prefix="", tags=["booking-manage"])
+
+# WhatsApp engagement dashboard: leads, waitlist, opt-outs, funnel.
+api_router.include_router(
+    whatsapp_engagement_api.router, prefix="", tags=["whatsapp-engagement"]
+)
 
 # Super Admin internal bridge — registered ONLY when the env gate is on.
 # (verify_bridge additionally 404s while disabled, so this is doubly inert.)

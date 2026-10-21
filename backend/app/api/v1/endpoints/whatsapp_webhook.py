@@ -133,6 +133,29 @@ def _normalize_message(message: dict, phone_number_id: str) -> Optional[dict]:
         if isinstance(body, dict):
             text = str(body.get("body") or "")
         message_type = "text"
+    elif raw_type in ("image", "audio", "video", "document"):
+        # Media: the customer sent a photo / voice note / file. The agent
+        # must not go blind — describe the attachment so the booking flow can
+        # continue ("I've received your photo, let me continue with the
+        # booking").
+        #
+        # Stickers are deliberately NOT handled: they are reactions, not
+        # content, and treating one as a request would start a booking
+        # nobody asked for.
+        media = message.get(raw_type) or {}
+        caption = ""
+        media_id = ""
+        if isinstance(media, dict):
+            caption = str(media.get("caption") or "").strip()
+            media_id = str(media.get("id") or "").strip()
+        label = {
+            "image": "a photo",
+            "audio": "a voice note",
+            "video": "a video",
+            "document": "a document",
+        }.get(raw_type, "an attachment")
+        text = caption or f"[Customer sent {label}]"
+        message_type = "media"
     elif raw_type == "interactive":
         interactive = message.get("interactive") or {}
         if isinstance(interactive, dict):
@@ -241,6 +264,42 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
         if org is None:
             logger.info("meta webhook booking skipped (no org with booking enabled)")
             return False
+
+        # ── Opt-out (STOP) handling — checked BEFORE anything else ──
+        # Mirrors the QR transport exactly: an opted-out number gets no
+        # reply at all, and a stop request is acknowledged once.
+        try:
+            from app.services import whatsapp_engagement as _wa_eng
+
+            if _wa_eng.is_stop_request(text):
+                await _wa_eng.record_opt_out(
+                    db,
+                    org.id,
+                    from_phone,
+                    reason="stop",
+                    channel="whatsapp_cloud",
+                )
+                try:
+                    from app.core import whatsapp_cloud as _cloud
+
+                    await _cloud.send_booking_reply(
+                        from_phone,
+                        {"type": "text", "body": _wa_eng.STOP_CONFIRMATION},
+                    )
+                except Exception:
+                    logger.warning("stop confirmation send failed", exc_info=True)
+                return True
+            if _wa_eng.is_start_request(text):
+                await _wa_eng.clear_opt_out(
+                    db, org.id, from_phone, channel="whatsapp_cloud"
+                )
+            elif await _wa_eng.is_opted_out(db, org.id, from_phone):
+                logger.info(
+                    "meta webhook ignored (opted out) phone=%s***", from_phone[-4:]
+                )
+                return True
+        except Exception:
+            logger.warning("opt-out gate failed, continuing", exc_info=True)
 
         # Rate limit mirrors QR: OTP codes and knowledge questions exempt.
         is_otp_code = bool(re.match(r"^\d{6}$", text))

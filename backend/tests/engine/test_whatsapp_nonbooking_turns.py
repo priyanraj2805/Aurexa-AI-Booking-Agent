@@ -202,7 +202,11 @@ async def test_bare_confirm_gets_summary_first_despite_stale_chitchat_intent(mon
     )
 
     assert payload.widget_directive == "REQUEST_CONFIRMATION"
-    assert "Is everything correct?" in payload.message
+    # The summary card carries the details + the action hint. The old
+    # "Is everything correct?" line was removed (the widget renders buttons,
+    # so the question was noise there too).
+    assert "Tap *Confirm* to book" in payload.message
+    assert "Is everything correct?" not in payload.message
 
 
 @pytest.mark.asyncio
@@ -220,7 +224,8 @@ async def test_bare_ok_gets_summary_first(monkeypatch):
     )
 
     assert payload.widget_directive == "REQUEST_CONFIRMATION"
-    assert "Is everything correct?" in payload.message
+    assert "Tap *Confirm* to book" in payload.message
+    assert "Is everything correct?" not in payload.message
 
 
 @pytest.mark.asyncio
