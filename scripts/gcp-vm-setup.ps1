@@ -202,6 +202,7 @@ Push "deploy-secrets/credentials.json"          "/tmp/credentials.json"
 $dump = Get-ChildItem "db-dump-*.dump" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($dump) { Push $dump.Name "/tmp/$($dump.Name)" } else { Warn "no db-dump-*.dump found (Phase 0 not run?)" }
 if (Test-Path "wa-auth.tar.gz") { Push "wa-auth.tar.gz" "/tmp/wa-auth.tar.gz" } else { Warn "no wa-auth.tar.gz found" }
+if (Test-Path "app-images.tar") { Push "app-images.tar" "/tmp/app-images.tar" } else { Warn "no app-images.tar found - the VM will build (slower, needs RAM). Run scripts/gcp-images-export.ps1" }
 
 # ------------------------------------------------------------
 # 5. Run the setup on the VM

@@ -72,6 +72,14 @@ chmod 600 "$REPO_DIR/.env" "$REPO_DIR/backend/.env.docker" \
           "$REPO_DIR/backend-super/.env.docker" \
           "$REPO_DIR/cloudflared/credentials.json" 2>/dev/null || true
 
+# Pin the compose project name. Without it the project name is derived from
+# the directory name (BookingChatBot -> bookingagent) and the image tags
+# would not match the ones exported from the laptop (booking_agent-*).
+if ! grep -q '^COMPOSE_PROJECT_NAME=' "$REPO_DIR/.env" 2>/dev/null; then
+  printf '\nCOMPOSE_PROJECT_NAME=booking_agent\n' >> "$REPO_DIR/.env"
+fi
+grep '^COMPOSE_PROJECT_NAME=' "$REPO_DIR/.env" || true
+
 # ------------------------------------------------------------
 # 4. Fix the stale Zoom redirect (points at an old quick-tunnel URL)
 # ------------------------------------------------------------
@@ -83,7 +91,19 @@ if grep -q '^ZOOM_REDIRECT_URI=' "$REPO_DIR/backend/.env.docker" 2>/dev/null; th
 fi
 
 # ------------------------------------------------------------
-# 5. Database
+# 5. App images (exported on the build machine - no build on the VM)
+# ------------------------------------------------------------
+if [ -f /tmp/app-images.tar ]; then
+  say "Loading the app images from /tmp/app-images.tar"
+  docker load -i /tmp/app-images.tar
+  docker images --format '  {{.Repository}}:{{.Tag}}  {{.Size}}' | grep booking_agent || true
+  rm -f /tmp/app-images.tar
+else
+  warn "no /tmp/app-images.tar - the VM will build the images (slower, needs RAM)"
+fi
+
+# ------------------------------------------------------------
+# 6. Database
 # ------------------------------------------------------------
 DUMP="$(ls -1 /tmp/db-dump-*.dump 2>/dev/null | head -1 || true)"
 if [ -n "$DUMP" ]; then
@@ -94,7 +114,7 @@ else
 fi
 
 # ------------------------------------------------------------
-# 6. WhatsApp (Baileys) session
+# 7. WhatsApp (Baileys) session
 # ------------------------------------------------------------
 if [ -f /tmp/wa-auth.tar.gz ]; then
   say "Restoring the WhatsApp session"
@@ -109,7 +129,7 @@ else
 fi
 
 # ------------------------------------------------------------
-# 7. Build + start (named tunnel, no quick tunnels)
+# 8. Build + start (named tunnel, no quick tunnels)
 # ------------------------------------------------------------
 say "Building and starting the app (this takes 15-25 min the first time)"
 bash scripts/gcp-deploy-prod.sh

@@ -68,9 +68,27 @@ for f in .env backend/.env.docker backend-super/.env.docker; do
 done
 echo "bridge secret synced (len=${#BRIDGE_SECRET})"
 
-# ── 3. Build ───────────────────────────────────────────────────────────────
-say "Building images (slow on first run — the admin panel compiles Next.js)"
-docker compose build $APP_SERVICES
+# ── 3. Build (only what is missing) ────────────────────────────────────────
+# The app images are normally exported on the build machine and loaded here
+# (scripts/gcp-images-export.ps1). Building on the VM would need 3-4 GB of
+# RAM and ~25 minutes, so an already-present image is never rebuilt.
+say "Checking the app images"
+BUILD_LIST=""
+for svc in backend admin-panel backend-super super-admin wa-gateway; do
+  img="booking_agent-${svc}"
+  if docker image inspect "$img" >/dev/null 2>&1; then
+    echo "  $img - present"
+  else
+    echo "  $img - MISSING (will build)"
+    BUILD_LIST="$BUILD_LIST $svc"
+  fi
+done
+if [ -n "$BUILD_LIST" ]; then
+  say "Building:$BUILD_LIST"
+  docker compose build $BUILD_LIST
+else
+  say "All app images already present - skipping the build"
+fi
 
 # ── 4. Start data layer first ──────────────────────────────────────────────
 say "Starting postgres + redis"

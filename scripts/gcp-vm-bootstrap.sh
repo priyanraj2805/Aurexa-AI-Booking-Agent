@@ -32,7 +32,19 @@ fi
 sudo systemctl enable --now docker
 
 say "Adding current user to the docker group (no sudo needed for docker)"
-sudo usermod -aG docker "${USER}"
+# When this script runs as `sudo bash script`, $USER is root, so
+# `usermod -aG docker $USER` would only add root and the real user would
+# still need sudo for every docker command. SUDO_USER is the account that
+# actually invoked sudo - that is the one that needs the docker group.
+TARGET_USER="${SUDO_USER:-${USER}}"
+if [ "$TARGET_USER" = "root" ]; then
+  # Invoked as root with no SUDO_USER (e.g. a GCP start-up script): use the
+  # first non-system user that owns a home directory.
+  TARGET_USER="$(awk -F: '$3 >= 1000 && $3 < 65534 && $7 !~ "/nonexistent" { print $1; exit }' /etc/passwd)"
+fi
+echo "  adding '$TARGET_USER' to the docker group"
+sudo usermod -aG docker "$TARGET_USER"
+getent group docker
 
 say "Opening firewall ports"
 sudo ufw allow 22/tcp    || true   # SSH
