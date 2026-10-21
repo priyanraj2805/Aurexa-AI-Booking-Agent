@@ -164,3 +164,5 @@ db-dump-*.sql
 # the WhatsApp device session. NEVER commit these.
 deploy-secrets/
 wa-auth.tar.gz
+# Exported container images for the GCP deploy (380 MB binary)
+app-images.tar
