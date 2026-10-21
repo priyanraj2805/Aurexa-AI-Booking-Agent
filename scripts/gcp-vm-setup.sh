@@ -89,8 +89,12 @@ install_secret /tmp/backend.env.docker             "$REPO_DIR/backend/.env.docke
 install_secret /tmp/backend-super.env.docker       "$REPO_DIR/backend-super/.env.docker"
 install_secret /tmp/credentials.json               "$REPO_DIR/cloudflared/credentials.json"
 chmod 600 "$REPO_DIR/.env" "$REPO_DIR/backend/.env.docker" \
-          "$REPO_DIR/backend-super/.env.docker" \
-          "$REPO_DIR/cloudflared/credentials.json" 2>/dev/null || true
+          "$REPO_DIR/backend-super/.env.docker" 2>/dev/null || true
+# The tunnel credentials are bind-mounted into the cloudflared container,
+# which runs as a non-root UID. A 0600 file owned by the deploy user is
+# unreadable inside the container ("permission denied" -> crash loop).
+chmod 644 "$REPO_DIR/cloudflared/credentials.json" 2>/dev/null || true
+chown 65532:65532 "$REPO_DIR/cloudflared/credentials.json" 2>/dev/null || true
 
 # Pin the compose project name. Without it the project name is derived from
 # the directory name (BookingChatBot -> bookingagent) and the image tags
