@@ -181,7 +181,7 @@ Ok "VM: $($target.Name)  zone: $($target.Zone)"
 # 4. Upload everything
 # ------------------------------------------------------------
 Step "Uploading files to the VM"
-$common = @("-z", $target.Zone, $target.Name)
+$common = @("-z", $target.Zone, $target.Name, "--project", $curProject, "--quiet")
 
 function Push([string]$local, [string]$remote) {
     Write-Host "    $local  ->  $remote"
