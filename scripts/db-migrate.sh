@@ -55,8 +55,21 @@ case "$CMD" in
     say "Restoring ${FILE} into ${PGDB_NAME}"
     # The container must be up and the target database must exist.
     docker compose up -d postgres
-    docker compose exec -T postgres pg_isready -U "$PGUSER_NAME" -d "$PGDB_NAME" \
-      || die "postgres is not ready"
+    # Postgres needs ~10s to initialise a fresh volume. A single check
+    # right after "up -d" fails on a brand new VM.
+    printf "  waiting for postgres"
+    _ready=0
+    for _i in $(seq 1 60); do
+      if docker compose exec -T postgres pg_isready -U "$PGUSER_NAME" -d "$PGDB_NAME" >/dev/null 2>&1; then
+        _ready=1
+        echo " ready after $((_i * 2))s"
+        break
+      fi
+      printf "."
+      sleep 2
+    done
+    echo ""
+    [ "$_ready" = "1" ] || die "postgres did not become ready in 120s"
     docker compose exec -T postgres psql -U "$PGUSER_NAME" -lqt \
       | cut -d'|' -f1 | tr -d ' ' | grep -qx "$PGDB_NAME" \
       || die "Database ${PGDB_NAME} does not exist inside the container."
