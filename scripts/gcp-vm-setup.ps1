@@ -25,7 +25,11 @@ param(
     [string]$Project = ""
 )
 
-$ErrorActionPreference = "Stop"
+# Native commands (gcloud) write their progress and "not logged in" notices
+# to STDERR. With ErrorActionPreference = "Stop" that becomes a terminating
+# NativeCommandError and kills the script on a perfectly normal state. We
+# check $LASTEXITCODE ourselves, and explicit `throw` still terminates.
+$ErrorActionPreference = "Continue"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
@@ -115,11 +119,19 @@ Step "Checking the gcloud login"
 $authList = (& $gcloud auth list 2>&1) -join "`n"
 if ($authList -notmatch "ACTIVE") {
     Write-Host ""
-    Write-Host "  You are not logged in yet. Run these two commands, then re-run this script:" -ForegroundColor Yellow
-    Write-Host "      $gcloud init" -ForegroundColor Yellow
-    Write-Host "      $gcloud auth login" -ForegroundColor Yellow
+    Write-Host "    Not logged in yet - signing in now." -ForegroundColor Yellow
+    Write-Host "      1. A Google sign-in page will open in your browser" -ForegroundColor Yellow
+    Write-Host "      2. Sign in with the account that owns project aurexa-512306" -ForegroundColor Yellow
+    Write-Host "      3. Click ALLOW" -ForegroundColor Yellow
+    Write-Host "      4. Copy the verification code and paste it below" -ForegroundColor Yellow
     Write-Host ""
-    exit 1
+    & $gcloud auth login
+    Write-Host ""
+    $authList = (& $gcloud auth list 2>&1) -join "`n"
+    if ($authList -notmatch "ACTIVE") {
+        Write-Host "    Still not logged in. Try: $gcloud auth login" -ForegroundColor Red
+        exit 1
+    }
 }
 Ok "logged in"
 

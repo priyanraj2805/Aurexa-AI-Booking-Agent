@@ -17,6 +17,7 @@ param(
     [string]$Project = ""
 )
 
+# Native commands write to stderr - do not let that terminate the script.
 $ErrorActionPreference = "Continue"
 
 $sdk = "$env:USERPROFILE\gcloud-cli\google-cloud-sdk"
