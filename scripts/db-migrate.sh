@@ -19,6 +19,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+warn() { printf '\n\033[1;33m[warn] %s\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31m[fail] %s\033[0m\n' "$*" >&2; exit 1; }
 
 # Read POSTGRES_* out of the root .env (compose reads it from there).
@@ -79,6 +80,22 @@ case "$CMD" in
       --clean --if-exists --no-owner --no-privileges /tmp/restore.dump \
       || warn "pg_restore reported errors — check: docker compose logs postgres"
     docker compose exec -T postgres rm -f /tmp/restore.dump
+    # The source database carries orphaned rows (a super_admin row was
+    # deleted without the FKs existing), so pg_restore cannot create three
+    # constraints in the super_admin schema. Clean the orphans and add the
+    # constraints back so the schema matches what the migrations expect.
+    say "Repairing orphaned super_admin rows"
+    docker compose exec -T postgres psql -U "$PGUSER_NAME" -d "$PGDB_NAME" -q <<'SQL'
+DELETE FROM super_admin.admin_sessions WHERE admin_id IS NOT NULL AND admin_id NOT IN (SELECT id FROM super_admin.super_admins);
+DELETE FROM super_admin.audit_logs WHERE actor_id IS NOT NULL AND actor_id NOT IN (SELECT id FROM super_admin.super_admins);
+DELETE FROM super_admin.login_attempts WHERE admin_id IS NOT NULL AND admin_id NOT IN (SELECT id FROM super_admin.super_admins);
+ALTER TABLE super_admin.admin_sessions DROP CONSTRAINT IF EXISTS admin_sessions_admin_id_fkey;
+ALTER TABLE super_admin.audit_logs DROP CONSTRAINT IF EXISTS audit_logs_actor_id_fkey;
+ALTER TABLE super_admin.login_attempts DROP CONSTRAINT IF EXISTS login_attempts_admin_id_fkey;
+ALTER TABLE super_admin.admin_sessions ADD CONSTRAINT admin_sessions_admin_id_fkey FOREIGN KEY (admin_id) REFERENCES super_admin.super_admins(id) ON DELETE CASCADE;
+ALTER TABLE super_admin.audit_logs ADD CONSTRAINT audit_logs_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES super_admin.super_admins(id) ON DELETE SET NULL;
+ALTER TABLE super_admin.login_attempts ADD CONSTRAINT login_attempts_admin_id_fkey FOREIGN KEY (admin_id) REFERENCES super_admin.super_admins(id) ON DELETE SET NULL;
+SQL
     say "Restore done. Row counts:"
     for t in organizations bookings chat_sessions service_units providers; do
       printf '  %-20s ' "$t"
