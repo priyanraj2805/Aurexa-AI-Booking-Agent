@@ -166,3 +166,6 @@ deploy-secrets/
 wa-auth.tar.gz
 # Exported container images for the GCP deploy (380 MB binary)
 app-images.tar
+backend-image.tar
+# The committed tree, exported for the VM (the repo is private)
+repo.tar.gz
