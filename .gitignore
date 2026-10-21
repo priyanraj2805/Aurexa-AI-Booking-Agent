@@ -160,3 +160,7 @@ Commit Changes And Branching.md
 # pg_dump archives (binary, can be large) must never be committed
 db-dump-*.dump
 db-dump-*.sql
+# Real secrets (LLM key, Cashfree secret, SMTP password, JWT secret) and
+# the WhatsApp device session. NEVER commit these.
+deploy-secrets/
+wa-auth.tar.gz
