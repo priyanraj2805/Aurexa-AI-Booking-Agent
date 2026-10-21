@@ -181,12 +181,14 @@ Ok "VM: $($target.Name)  zone: $($target.Zone)"
 # 4. Upload everything
 # ------------------------------------------------------------
 Step "Uploading files to the VM"
-$common = @("-z", $target.Zone, $target.Name, "--project", $curProject, "--quiet")
+# scp takes the instance inside the destination (INSTANCE:/path), so it must
+# NOT also get an instance positional - it rejects that as "unrecognized
+# arguments". ssh takes the instance as its own positional.
+$commonFlags = @("--zone", $target.Zone, "--project", $curProject, "--quiet")
 
 function Push([string]$local, [string]$remote) {
     Write-Host "    $local  ->  $remote"
-    # gcloud scp wants the instance inside the destination: INSTANCE:/remote/path
-    & $gcloud compute scp $local "$($target.Name):$remote" @common
+    & $gcloud compute scp $local "$($target.Name):$remote" @commonFlags
     if ($LASTEXITCODE -ne 0) { throw "scp failed: $local" }
 }
 
@@ -207,13 +209,13 @@ if (Test-Path "wa-auth.tar.gz") { Push "wa-auth.tar.gz" "/tmp/wa-auth.tar.gz" } 
 Step "Running the setup on the VM (clone, secrets, DB restore, build, start)"
 Write-Host "    first run installs Docker and builds the images - this takes 15-25 min." -ForegroundColor Yellow
 Write-Host ""
-& $gcloud compute ssh @common $target.Name --command "bash /tmp/gcp-vm-setup.sh"
+& $gcloud compute ssh $target.Name @commonFlags --command "bash /tmp/gcp-vm-setup.sh"
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "  The remote script exited with $LASTEXITCODE." -ForegroundColor Yellow
     Write-Host "  Re-run it after 'newgrp docker':" -ForegroundColor Yellow
-    Write-Host "      $gcloud compute ssh -z $($target.Zone) $($target.Name) --command `"newgrp docker`"" -ForegroundColor Yellow
-    Write-Host "      $gcloud compute ssh -z $($target.Zone) $($target.Name) --command `"bash /tmp/gcp-vm-setup.sh`"" -ForegroundColor Yellow
+    Write-Host "      $gcloud compute ssh $target.Name @commonFlags --command `"newgrp docker`"" -ForegroundColor Yellow
+    Write-Host "      $gcloud compute ssh $target.Name @commonFlags --command `"bash /tmp/gcp-vm-setup.sh`"" -ForegroundColor Yellow
     exit $LASTEXITCODE
 }
 
