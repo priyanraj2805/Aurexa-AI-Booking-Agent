@@ -143,12 +143,19 @@ ABANDONED_MIN_AGE_MINUTES = 60
 
 async def find_abandoned_sessions(
     db: AsyncSession, org_id: Any, *, min_age_minutes: int = ABANDONED_MIN_AGE_MINUTES
-) -> List[ChatSession]:
-    """WhatsApp sessions with booking started but never confirmed."""
+) -> List[Dict[str, Any]]:
+    """WhatsApp sessions with booking started but never confirmed.
+
+    Returns PLAIN DICTS ({"id", "state"}), not ORM objects. Reading an
+    attribute on an ORM instance that was expired by a commit in the middle
+    of the loop triggers a synchronous refresh, which inside an async
+    context raises MissingGreenlet and kills the whole recovery run. The
+    columns are selected up front so nothing can lazy-load later.
+    """
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=min_age_minutes)
         res = await db.execute(
-            _sel(ChatSession)
+            _sel(ChatSession.id, ChatSession.state_data)
             .where(
                 ChatSession.org_id == org_id,
                 ChatSession.channel.in_(("whatsapp", "whatsapp_cloud")),
@@ -158,13 +165,13 @@ async def find_abandoned_sessions(
             )
             .limit(200)
         )
-        sessions = list(res.scalars().all())
+        rows = res.all()
     except Exception:
         logger.warning("abandoned session lookup failed", exc_info=True)
         return []
-    out: List[ChatSession] = []
-    for s in sessions:
-        state = s.state_data if isinstance(s.state_data, dict) else {}
+    out: List[Dict[str, Any]] = []
+    for sid, raw_state in rows:
+        state = raw_state if isinstance(raw_state, dict) else {}
         if not str(state.get("phone") or "").strip():
             continue
         # Never touch a session that already has a live booking.
@@ -172,7 +179,7 @@ async def find_abandoned_sessions(
             live = (
                 await db.execute(
                     _sel(func.count(Booking.id)).where(
-                        Booking.session_id == s.id,
+                        Booking.session_id == sid,
                         Booking.attendance_status == "SCHEDULED",
                     )
                 )
@@ -181,25 +188,29 @@ async def find_abandoned_sessions(
             live = 0
         if live:
             continue
-        out.append(s)
+        out.append({"id": sid, "state": state})
     return out
 
 
 async def send_abandoned_nudge(
-    db: AsyncSession, org_id: Any, session: ChatSession
+    db: AsyncSession, org_id: Any, session: Dict[str, Any]
 ) -> bool:
-    """One nudge per abandoned session. Dedupe via the funnel/lead state."""
+    """One nudge per abandoned session. Dedupe via the funnel/lead state.
+
+    `session` is the dict produced by find_abandoned_sessions (id + state).
+    """
     try:
         from app.services import whatsapp_engagement as _eng
 
-        state = session.state_data if isinstance(session.state_data, dict) else {}
+        state = session.get("state") if isinstance(session.get("state"), dict) else {}
+        session_id = session.get("id")
         phone = "".join(c for c in str(state.get("phone") or "") if c.isdigit())
         if not phone:
             return False
         if await _eng.is_opted_out(db, org_id, phone):
             return False
         if await _eng.already_delivered(
-            db, session.id, "abandoned_nudge"
+            db, session_id, "abandoned_nudge"
         ):
             return False
         from app.core import whatsapp_templates as _tpl
@@ -208,7 +219,7 @@ async def send_abandoned_nudge(
             phone, str(state.get("name") or ""), "our team"
         )
         await _eng.log_delivery(
-            db, org_id, booking_id=session.id, channel="abandoned_nudge",
+            db, org_id, booking_id=session_id, channel="abandoned_nudge",
             phone=phone, template_name=_tpl.TEMPLATE_ABANDONED_BOOKING,
             status="sent" if res.get("success") else "failed",
             error=str(res.get("error") or "")[:500],

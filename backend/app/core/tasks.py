@@ -47,7 +47,7 @@ async def _run_abandoned_booking_recovery(db: AsyncSession) -> int:
         now = datetime.now(timezone.utc)
         for org_id in org_ids:
             for session in await find_abandoned_sessions(db, org_id):
-                key = f"{org_id}:{session.id}"
+                key = f"{org_id}:{session['id']}"
                 last = _abandoned_nudge_at.get(key)
                 if last and (now - last) < timedelta(hours=24):
                     continue
