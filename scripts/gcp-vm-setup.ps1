@@ -51,21 +51,36 @@ function Resolve-Gcloud {
     return $null
 }
 
+# The Windows SDK zip ships without a bundled Python, so gcloud needs
+# CLOUDSDK_PYTHON. Find one and set it if it is not already set.
+function Ensure-GcloudPython {
+    if ($env:CLOUDSDK_PYTHON -and (Test-Path $env:CLOUDSDK_PYTHON)) { return }
+    $py = $null
+    try { $py = (& py -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1) } catch {}
+    if (-not $py) {
+        foreach ($p in @("$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+                         "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+                         "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe")) {
+            if (Test-Path $p) { $py = $p; break }
+        }
+    }
+    if ($py) {
+        $env:CLOUDSDK_PYTHON = $py.Trim()
+        Ok "CLOUDSDK_PYTHON = $($env:CLOUDSDK_PYTHON)"
+    }
+}
+
 $gcloud = Resolve-Gcloud
 if (-not $gcloud) {
     Write-Host "    gcloud not found - installing the Google Cloud CLI..." -ForegroundColor Yellow
     $zip = "$env:USERPROFILE\gcloud.zip"
     $dest = "$env:USERPROFILE\gcloud-cli"
     Invoke-WebRequest "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-windows-x86_64.zip" -OutFile $zip
-    Expand-Archive $zip -DestinationPath $dest -Force
-    $installer = Join-Path $dest "google-cloud-sdk\install.bat"
-    if (Test-Path $installer) { & $installer | Out-Null }
+    New-Item -ItemType Directory -Force -Path $dest | Out-Null
+    # tar extracts ~20x faster than Expand-Archive on this machine
+    tar -xf $zip -C $dest
     $gcloud = Resolve-Gcloud
-    if (-not $gcloud) {
-        $gcloud = Join-Path $dest "google-cloud-sdk\bin\gcloud.cmd"
-        if (-not (Test-Path $gcloud)) { throw "gcloud install failed" }
-    }
-    # make it available in this session
+    if (-not $gcloud) { throw "gcloud install failed" }
     $bin = Split-Path -Parent $gcloud
     $env:Path = "$bin;$env:Path"
     [Environment]::SetEnvironmentVariable("Path", "$bin;" + [Environment]::GetEnvironmentVariable("Path", "User"), "User")
@@ -73,6 +88,7 @@ if (-not $gcloud) {
 } else {
     Ok "gcloud: $gcloud"
 }
+Ensure-GcloudPython
 
 # ------------------------------------------------------------
 # 2. Auth + project
