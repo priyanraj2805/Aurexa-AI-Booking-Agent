@@ -155,3 +155,8 @@ docs/ways-of-work/plan/global-scheduling/hybrid-meeting-timezone/implementation-
 .research/
 bookig_agent_V1
 Commit Changes And Branching.md
+
+# ── GCP deploy artefacts ──────────────────────────────────────────────
+# pg_dump archives (binary, can be large) must never be committed
+db-dump-*.dump
+db-dump-*.sql
