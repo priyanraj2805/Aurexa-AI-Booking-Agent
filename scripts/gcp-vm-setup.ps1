@@ -226,8 +226,8 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "  The remote script exited with $LASTEXITCODE." -ForegroundColor Yellow
     Write-Host "  Re-run it after 'newgrp docker':" -ForegroundColor Yellow
-    Write-Host "      $gcloud compute ssh $target.Name @commonFlags --command `"newgrp docker`"" -ForegroundColor Yellow
-    Write-Host "      $gcloud compute ssh $target.Name @commonFlags --command `"bash /tmp/gcp-vm-setup.sh`"" -ForegroundColor Yellow
+    Write-Host "      $gcloud compute ssh $($target.Name) --zone $($target.Zone) --project $curProject --quiet --command `"newgrp docker`"" -ForegroundColor Yellow
+    Write-Host "      $gcloud compute ssh $($target.Name) --zone $($target.Zone) --project $curProject --quiet --command `"bash /tmp/gcp-vm-setup.sh`"" -ForegroundColor Yellow
     exit $LASTEXITCODE
 }
 

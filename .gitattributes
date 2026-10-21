@@ -1,0 +1,19 @@
+# Normalise line endings so shell scripts run on Linux.
+# Without this, a .sh file checked out with CRLF dies with
+# "set: pipefail: invalid option name".
+*.sh text eol=lf
+*.bash text eol=lf
+Dockerfile text eol=lf
+docker-entrypoint.sh text eol=lf
+
+# PowerShell is fine either way, but CRLF is the Windows convention.
+*.ps1 text eol=crlf
+
+# Keep binary files binary.
+*.tar text eol=lf
+*.gz binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary

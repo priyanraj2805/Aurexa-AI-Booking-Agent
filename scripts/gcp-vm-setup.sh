@@ -49,6 +49,10 @@ if [ -f /tmp/repo.tar.gz ]; then
   mkdir -p "$REPO_DIR"
   tar -xzf /tmp/repo.tar.gz -C "$REPO_DIR"
   rm -f /tmp/repo.tar.gz
+  # Windows checkout can leave CRLF endings. A shell script with CRLF dies
+  # with "set: pipefail: invalid option name", so strip them here too.
+  find "$REPO_DIR" -name "*.sh" -type f -exec sed -i 's/\r$//' {} + 2>/dev/null || true
+  find "$REPO_DIR" -name "Dockerfile" -type f -exec sed -i 's/\r$//' {} + 2>/dev/null || true
 elif [ ! -d "$REPO_DIR/.git" ]; then
   git clone https://github.com/ManojDS17/BookingChatBot.git "$REPO_DIR"
 fi
