@@ -202,7 +202,17 @@ Push "deploy-secrets/credentials.json"          "/tmp/credentials.json"
 $dump = Get-ChildItem "db-dump-*.dump" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($dump) { Push $dump.Name "/tmp/$($dump.Name)" } else { Warn "no db-dump-*.dump found (Phase 0 not run?)" }
 if (Test-Path "wa-auth.tar.gz") { Push "wa-auth.tar.gz" "/tmp/wa-auth.tar.gz" } else { Warn "no wa-auth.tar.gz found" }
-if (Test-Path "app-images.tar") { Push "app-images.tar" "/tmp/app-images.tar" } else { Warn "no app-images.tar found - the VM will build (slower, needs RAM). Run scripts/gcp-images-export.ps1" }
+if (Test-Path "app-images.tar") {
+    # Skip the 380 MB upload when the VM already has the images loaded.
+    $hasImages = (& $gcloud compute ssh $target.Name @commonFlags --command "docker image inspect booking_agent-backend >/dev/null 2>&1 && echo YES || echo NO" 2>$null) -join ""
+    if ($hasImages -match "YES") {
+        Ok "the VM already has the app images - skipping the upload"
+    } else {
+        Push "app-images.tar" "/tmp/app-images.tar"
+    }
+} else {
+    Warn "no app-images.tar found - the VM will build (slower, needs RAM). Run scripts/gcp-images-export.ps1"
+}
 
 # The repository is PRIVATE: a bare `git clone` on the VM would need GitHub
 # credentials. Export the committed tree instead - no token on the VM.
