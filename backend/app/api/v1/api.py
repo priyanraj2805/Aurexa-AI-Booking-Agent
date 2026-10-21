@@ -23,6 +23,8 @@ from app.api.v1.endpoints import (
     notifications,
     razorpay,
     razorpay_route,
+    cashfree,
+    payment_config,
     catalog,
     staff,
 )
@@ -71,6 +73,12 @@ api_router.include_router(razorpay.router, prefix="", tags=["razorpay"])
 
 # Razorpay Route provider payouts (additive; each route 404s unless RAZORPAY_ROUTE_ENABLED)
 api_router.include_router(razorpay_route.router, prefix="", tags=["razorpay-route"])
+
+# Cashfree payments (additive second provider; client fails closed unless CASHFREE_ENABLED)
+api_router.include_router(cashfree.router, prefix="", tags=["cashfree"])
+
+# Tenant payment provider configuration (org Cashfree connect).
+api_router.include_router(payment_config.router, prefix="", tags=["payment-config"])
 
 # Super Admin internal bridge — registered ONLY when the env gate is on.
 # (verify_bridge additionally 404s while disabled, so this is doubly inert.)

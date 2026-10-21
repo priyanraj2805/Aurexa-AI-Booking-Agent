@@ -32,6 +32,9 @@ test('backoffDelayMs grows exponentially within cap', () => {
   assert.ok(d3 >= 16000 && d3 < 17000, `d3=${d3}`);
   const dBig = backoffDelayMs(100);
   assert.ok(dBig >= 300000 && dBig < 301000, `dBig=${dBig}`);
+  // Pairing cap (QR screen): pairing sessions retry fast, never minutes.
+  const pBig = backoffDelayMs(100, 20 * 1000);
+  assert.ok(pBig >= 20000 && pBig < 21000, `pBig=${pBig}`);
 });
 
 test('outbox sends FIFO with dedupe keys', async () => {

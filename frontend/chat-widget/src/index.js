@@ -305,6 +305,9 @@
 
     async _loadHistory(sinceTimestamp = null) {
       if (!this.sessionId || !CONFIG.widgetToken) return false;
+      // Session token: a history fetch started before a section switch must
+      // not paint the old section's transcript into the new section's view.
+      const _histSession = this.sessionId;
       try {
         const base = CONFIG.apiBase.replace(/\/api\/v1\/?$/, "") + "/api/v1";
         let url = `${base}/widget/history?session_id=${encodeURIComponent(this.sessionId)}&widget_token=${encodeURIComponent(CONFIG.widgetToken)}`;
@@ -314,6 +317,7 @@
         const res = await fetch(url);
         if (!res.ok) return false;
         const messages = await res.json();
+        if (this.sessionId !== _histSession) return false;
         if (!messages || messages.length === 0) return false;
         for (const m of messages) {
           const isHumanJoined = m.metadata && m.metadata.human_joined;
@@ -324,6 +328,13 @@
               : String(m.content || "");
           // Skip appending human_joined/human_left system messages (we show them in header instead)
           if (!isHumanJoined && !isHumanLeft && content) {
+            // Skip agent messages that are directive cards — they are
+            // re-rendered as cards by _resumePendingCard, so rendering them
+            // here as bubbles causes duplicates.
+            if (m.role === "agent" && m.metadata && m.metadata.directive) {
+              if (m.id) this._renderedMessageIds.add(m.id);
+              continue;
+            }
             const alreadyRendered = !!(m.id && this._renderedMessageIds.has(m.id));
             const justRendered = this._pendingRefreshSkips.some(
               (j) => j.role === m.role && j.content === content,
@@ -472,6 +483,12 @@
     }
 
     _handleWsEvent(event) {
+      // Stale-socket echo: after a section switch the old socket is closed,
+      // but an already-queued event for the abandoned session must not
+      // render into the new section's view.
+      try {
+        if (event && event.session_id && this.sessionId && event.session_id !== this.sessionId) return;
+      } catch (_) {}
       switch (event.type) {
         case "connected":
           // Server confirmed registration; nothing else to do.
@@ -677,6 +694,9 @@
       if (brandColor) {
         this.style.setProperty("--brand-color", brandColor);
       }
+      // Primary action color for card buttons (Pay, rebook, new booking).
+      // --primary was never defined, which left those buttons transparent.
+      this.style.setProperty("--primary", brandColor || "#ea580c");
       // Feature 2: apply widget theme (position, radius, dark mode, branding)
       try { this._applyWidgetTheme(); } catch (_) {}
       // Show meeting mode badge (Online/Offline/Hybrid) if configured
@@ -1257,6 +1277,8 @@
     async _handleSend() {
       const text = this._input.value.trim();
       if (!text || this.isLoading) return;
+      // Lock immediately so a rapid second click is ignored.
+      this.isLoading = true;
       // First typed message locks the mode in: no going back to home after.
       this._canGoHome = false;
       try { this._updateBackBtn(); } catch (_) {}
@@ -1281,7 +1303,11 @@
       this._refreshTimezone();
 
       try {
-        const payload = { message: text };
+        const payload = { 
+            message: text,
+            // Client-generated message ID for server-side deduplication
+            message_id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        };
         if (this.selectedUnitId) payload.unit_id = this.selectedUnitId;
         if (this.selectedProviderId) payload.provider_id = this.selectedProviderId;
         if (this.sessionId) payload.session_id = this.sessionId;
@@ -1289,6 +1315,14 @@
         if (this._chatMode === "ask" || this._chatMode === "booking") {
           payload.mode = this._chatMode;
         }
+        // Section token: if the visitor switches sections mid-flight, the
+        // late reply belongs to the abandoned section and must never render
+        // into the new section's view (checked after the fetch resolves).
+        const _sendSession = this.sessionId || null;
+        const _sendMode = this._chatMode || null;
+        try { this._sendAbort?.abort?.(); } catch (_) {}
+        const _aborter = new AbortController();
+        this._sendAbort = _aborter;
         if (!this.sessionId) {
           this.selectedSlotId = null;
           this.timezoneFallbackUsed = false;
@@ -1309,6 +1343,7 @@
           `${CONFIG.apiBase}/chat/message/dispatch`,
           {
             method: "POST",
+            signal: _aborter.signal,
             headers: {
               "Content-Type": "application/json",
               "X-Widget-Token": CONFIG.widgetToken || "",
@@ -1323,6 +1358,12 @@
         }
 
         const data = await response.json();
+        // Section switched mid-flight → drop this reply entirely (no
+        // bubbles, no directive cards). The finally block below still
+        // resets loading state for the new section's view.
+        if (this._chatMode !== _sendMode || (_sendSession && this.sessionId !== _sendSession)) {
+          return;
+        }
         if (data.session_id) {
           this.sessionId = data.session_id;
           try {
@@ -1374,6 +1415,11 @@
 
         await this._renderDirectiveUI(directive, fieldMeta, agentMessage);
       } catch (err) {
+        // Aborted by a section switch — stay silent. The new section owns
+        // the view now; the finally block still resets loading state.
+        if (err && err.name === "AbortError") {
+          return;
+        }
         console.error("Widget Error:", err);
         thinkingEl.remove();
         this._appendBubble(
@@ -1995,6 +2041,11 @@
         } catch (_) {}
         this._ws = null;
         this._wsConnected = false;
+        // Abort any in-flight send: its late reply belongs to the abandoned
+        // section (the send handler also drops it via its section token —
+        // belt and braces).
+        try { this._sendAbort?.abort?.(); } catch (_) {}
+        this._sendAbort = null;
       } catch (_) {}
       // silent when re-joining: no greeting, no auto booking kick, no
       // composer lock — the rejoin block below restores the transcript.
@@ -2326,6 +2377,10 @@
         this._clearDirectiveCards();
         this._appendPaymentCard(fieldMeta || {});
         this._clearSkipAction();
+      } else if (directive === "SHOW_REBOOK_BUTTON") {
+        this._clearDirectiveCards();
+        this._appendRebookButton(fieldMeta || {});
+        this._clearSkipAction();
       } else if (directive === "REQUIRE_OTP_MODAL") {
         this._clearDirectiveCards();
         this._appendOTPInterface(fieldMeta || {});
@@ -2401,6 +2456,8 @@
         if (!res.ok) return;
         const data = await res.json();
         if (!data || !data.directive) return;
+        // Section switched mid-fetch → never render this card here.
+        if (this._chatMode !== "booking") return;
         this._lastDirective = data.directive;
         this._activeFieldMeta = data.field_meta || null;
         try { this._setInlineValidation(""); } catch (_) {}
@@ -2424,6 +2481,11 @@
       let totalAvailable = 0;
       if (selectedDate) {
         const availability = await this._fetchAvailabilityOptions(selectedDate);
+        // Section switched mid-fetch → never render this grid here.
+        if (this._chatMode !== "booking") {
+          try { loadingEl?.remove?.(); } catch (_) {}
+          return;
+        }
         options = availability.options;
         availabilityStatus = availability.status;
         totalAvailable = availability.total ?? options.filter((o) => o.available !== false).length;
@@ -2961,7 +3023,151 @@
       } catch { return false; }
     }
 
+    async _loadCashfree() {
+      if (window.Cashfree) return true;
+      try {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = "https://sdk.cashfree.com/js/v3/cashfree.js";
+          s.onload = resolve;
+          s.onerror = () => reject(new Error("cashfree sdk load failed"));
+          document.head.appendChild(s);
+        });
+        return !!window.Cashfree;
+      } catch { return false; }
+    }
+
+    /** Poll order status until the webhook (or our reconcile call) marks it paid. */
+    async _pollCashfreePaid(orderId, onTick) {
+      const base = CONFIG.apiBase.replace(/\/api\/v1\/?$/, "") + "/api/v1";
+      for (let i = 0; i < 40; i++) {
+        try {
+          const res = await fetch(
+            `${base}/widget/payment/cashfree/status?order_id=${encodeURIComponent(orderId)}&session_id=${encodeURIComponent(this.sessionId)}`,
+            { headers: { "X-Widget-Token": CONFIG.widgetToken || "" } }
+          );
+          if (res.ok) {
+            const j = await res.json().catch(() => ({}));
+            if (j.status === "paid") return true;
+          }
+        } catch { /* transient network error — keep polling */ }
+        onTick && onTick(i);
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      return false;
+    }
+
+    /** Single "start over" button after cancel/expiry — no free-text card. */
+    _appendRebookButton(fieldMeta = {}) {
+      const div = document.createElement("div");
+      div.className = "message agent directive-card";
+      div.setAttribute("role", "form");
+      const btn = document.createElement("button");
+      btn.textContent = fieldMeta.label || "Book a new appointment";
+      btn.style.cssText = "margin-top:10px;padding:12px 20px;border:none;border-radius:10px;background:var(--primary);color:#fff;font-weight:700;width:100%;cursor:pointer;";
+      const payload = fieldMeta.payload || "Book a new appointment";
+      btn.onclick = () => {
+        btn.disabled = true;
+        this._handleSendManual(payload);
+      };
+      div.appendChild(btn);
+      this._msgList.appendChild(div); this._scrollToBottom();
+    }
+
+    _appendCashfreePaymentCard(fieldMeta = {}) {
+      const div = document.createElement("div");
+      div.className = "message agent payment-card";
+      div.setAttribute("role", "form");
+      const amountPaise = Number(fieldMeta.amount_paise || 0);
+      const amountDisplay = fieldMeta.amount_display || (amountPaise ? `₹${(amountPaise/100).toFixed(2)}` : "₹500.00");
+      const currency = fieldMeta.currency || "INR";
+      const h = document.createElement("div");
+      h.className = "card-header";
+      h.textContent = "Payment Required";
+      const p = document.createElement("p");
+      p.style.cssText = "font-size:13px;color:var(--text-sec);margin:8px 0;";
+      p.textContent = `Your appointment total is ${amountDisplay} (${currency}). Please pay to confirm your booking. UPI, card, netbanking or wallet via Cashfree.`;
+      const btn = document.createElement("button");
+      btn.textContent = `Pay ${amountDisplay}`;
+      btn.style.cssText = "margin-top:10px;padding:12px 20px;border:none;border-radius:10px;background:var(--primary);color:#fff;font-weight:700;width:100%;cursor:pointer;";
+      const status = document.createElement("div");
+      status.id = "payment-status";
+      status.style.cssText = "font-size:12px;color:var(--text-sec);margin-top:8px;";
+      const reset = (msg) => {
+        btn.disabled = false;
+        btn.textContent = `Pay ${amountDisplay}`;
+        if (msg) status.textContent = msg;
+      };
+      btn.onclick = async () => {
+        btn.disabled = true;
+        btn.textContent = "Opening Cashfree…";
+        status.textContent = "";
+        try {
+          const base = CONFIG.apiBase.replace(/\/api\/v1\/?$/, "") + "/api/v1";
+          const orderRes = await fetch(`${base}/widget/payment/cashfree/order`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Widget-Token": CONFIG.widgetToken || "", "X-Requested-With": "XMLHttpRequest" },
+            body: JSON.stringify({ session_id: this.sessionId, widget_token: CONFIG.widgetToken })
+          });
+          if (!orderRes.ok) {
+            const e = await orderRes.json().catch(() => ({}));
+            throw new Error(
+              (e.detail && (e.detail.message || e.detail.code)) || e.detail || "Failed to create order"
+            );
+          }
+          const order = await orderRes.json();
+          if (!(await this._loadCashfree())) throw new Error("Failed to load Cashfree checkout");
+          const cashfree = window.Cashfree({
+            mode: order.environment === "production" ? "production" : "sandbox"
+          });
+          // _blank (new tab): bank/OTP pages refuse to load inside the
+          // checkout modal iframe, which dead-ended card payments. The chat
+          // tab stays alive and reconciles via status polling below.
+          status.textContent = "Opening secure payment page in a new tab…";
+          try { _logToBackend("cf_checkout_open", `${order.environment}:${order.order_id}`); } catch (_) {}
+          const result = await cashfree.checkout({
+            paymentSessionId: order.payment_session_id,
+            redirectTarget: "_blank"
+          });
+          try {
+            _logToBackend("cf_checkout_result", JSON.stringify({
+              error: result && result.error,
+              redirect: !!(result && result.redirect),
+              hasDetails: !!(result && result.paymentDetails),
+              order: order.order_id,
+            }).slice(0, 200));
+          } catch (_) {}
+          if (result && result.error) {
+            // New tab blocked or checkout errored — confirm real state anyway.
+            status.textContent = "Checking payment status…";
+          } else {
+            status.textContent = "Payment page opened — complete the payment in the new tab…";
+          }
+          const paid = await this._pollCashfreePaid(order.order_id, () => {
+            status.textContent = "Waiting for payment… complete it in the new tab.";
+          });
+          if (!paid) {
+            reset("Payment was not completed. Your appointment has not been confirmed. You can retry.");
+            return;
+          }
+          status.textContent = "Payment successful ✅";
+          this._appendSystem("Payment successful ✅ Appointment confirmed ✅");
+          this._input.value = "confirm";
+          await this._handleSend();
+        } catch (e) {
+          try { _logToBackend("cf_checkout_error", String((e && e.message) || e).slice(0, 200)); } catch (_) {}
+          reset("Error: " + (e.message || e));
+        }
+      };
+      div.appendChild(h); div.appendChild(p); div.appendChild(btn); div.appendChild(status);
+      this._msgList.appendChild(div); this._scrollToBottom();
+    }
+
     _appendPaymentCard(fieldMeta = {}) {
+      // Provider comes from the server (org's own collection rail).
+      if ((fieldMeta.payment_provider || "razorpay") === "cashfree") {
+        return this._appendCashfreePaymentCard(fieldMeta);
+      }
       const div = document.createElement("div");
       div.className = "message agent payment-card";
       div.setAttribute("role", "form");
@@ -2988,7 +3194,7 @@
           const base = CONFIG.apiBase.replace(/\/api\/v1\/?$/, "") + "/api/v1";
           const orderRes = await fetch(`${base}/widget/payment/order`, {
             method: "POST",
-            headers: {"Content-Type":"application/json", "X-Widget-Token": CONFIG.widgetToken || ""},
+            headers: {"Content-Type":"application/json", "X-Widget-Token": CONFIG.widgetToken || "", "X-Requested-With": "XMLHttpRequest"},
             body: JSON.stringify({session_id: this.sessionId, widget_token: CONFIG.widgetToken})
           });
           if (!orderRes.ok) {
@@ -3008,7 +3214,7 @@
               try {
                 const vr = await fetch(`${base}/widget/payment/verify`, {
                   method: "POST",
-                  headers: {"Content-Type":"application/json", "X-Widget-Token": CONFIG.widgetToken || ""},
+                  headers: {"Content-Type":"application/json", "X-Widget-Token": CONFIG.widgetToken || "", "X-Requested-With": "XMLHttpRequest"},
                   body: JSON.stringify({
                     session_id: this.sessionId,
                     razorpay_order_id: resp.razorpay_order_id,
@@ -3089,6 +3295,23 @@
           div.appendChild(icsBtn);
         }
       } catch (_) {}
+
+      // Reschedule + Cancel shortcuts for the confirmed booking.
+      // Deterministic phrases the backend routes straight to date-pick
+      // (reschedule, details kept) or cancel-OTP (cancel) — no re-asking.
+      const _mkActionBtn = (label, text) => {
+        const b = document.createElement("button");
+        b.textContent = label;
+        b.style.cssText = `
+                    margin-top:8px;padding:10px 20px;border:1px solid var(--border);border-radius:8px;
+                    background:transparent;color:var(--text);font-size:13px;font-weight:600;
+                    cursor:pointer;width:100%;box-sizing:border-box;
+                `;
+        b.addEventListener("click", () => this._handleSendManual(text));
+        return b;
+      };
+      div.appendChild(_mkActionBtn("📅 Reschedule", "reschedule my booking"));
+      div.appendChild(_mkActionBtn("❌ Cancel Booking", "cancel my booking"));
 
       // "Start New Booking" button
       const newBtn = document.createElement("button");

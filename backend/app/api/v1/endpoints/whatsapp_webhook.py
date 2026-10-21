@@ -876,6 +876,16 @@ async def _process_booking_event(db: AsyncSession, background_tasks: BackgroundT
                 inbound_message_id=_inbound_message_id,
             )
             _dt = _time.monotonic() - _t0
+            # WhatsApp payment link: attach a tappable Cashfree link when the
+            # engine asks for payment (widget uses the JS checkout instead).
+            try:
+                from app.services.payment_service import payment_service as _pay_svc
+
+                action = await _pay_svc.attach_whatsapp_payment_link(
+                    db, org, org_config, chat_session, action
+                )
+            except Exception:
+                logger.warning("cloud payment link attach failed", exc_info=True)
             _active_id_after = None
             try:
                 if isinstance(chat_session.collected_data, dict):
@@ -1351,15 +1361,20 @@ async def inbound(
             if event.get("duplicate"):
                 continue
             if event.get("message_type") not in ("text", "interactive"):
-                release_message(f"meta:{event.get('message_id')}")
+                # Non-text/interactive messages don't go through the booking
+                # pipeline. Do NOT release the dedup key — if Meta retries
+                # the webhook we still want to recognise it as a duplicate.
                 continue
             _processed = await _process_booking_event(db, background_tasks, event)
             if _processed is True:
                 processed += 1
             elif _processed is None:
-                release_message(f"meta:{event.get('message_id')}")
+                # Processing didn't produce a reply (e.g. rate-limited).
+                # Keep the message ID marked so retries are dropped.
+                pass
         except Exception:
-            release_message(f"meta:{event.get('message_id')}")
+            # On any error, keep the message ID marked so a Meta retry
+            # doesn't re-process the same message.
             logger.exception("meta webhook event loop failed")
     return {
         "status": "ok",

@@ -6,6 +6,8 @@ from typing import Optional, Dict, Any
 class ChatMessageRequest(BaseModel):
     session_id: Optional[UUID4] = None
     message: str = Field(..., min_length=1, max_length=2000)
+    # Client-generated message ID for deduplication (optional but recommended)
+    message_id: Optional[str] = Field(default=None, max_length=64)
     selected_slot_id: Optional[str] = Field(default=None, max_length=200)
     user_timezone: Optional[str] = Field(default=None, max_length=64)
     timezone_source: Optional[str] = Field(default=None, max_length=20)

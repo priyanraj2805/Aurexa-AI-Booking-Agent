@@ -16,9 +16,14 @@ from app.crud import chat as crud_chat
 from app.engine import runtime_router
 from app.engine.user_visible_text import extract_user_visible_text
 from app.core.limiter import limiter
+import time
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# In-memory web message deduplication (per-process; same caveat as WhatsApp debouncer)
+_WEB_PROCESSED_IDS: dict[str, float] = {}
+_WEB_ID_TTL = 300  # 5 minutes
 
 
 async def _get_org_from_api_key(api_key: str, db: AsyncSession) -> Organization:
@@ -165,6 +170,26 @@ async def dispatch_message(
         raise HTTPException(
             status_code=500, detail="Organization configuration not found"
         )
+
+    # ── Web message deduplication ──────────────────────────────────
+    # Client sends `message_id` (timestamp-random). If we've seen it,
+    # return the cached response to avoid double-processing on retries.
+    msg_id = getattr(body, "message_id", None)
+    if msg_id:
+        now = time.time()
+        if msg_id in _WEB_PROCESSED_IDS:
+            logger.info(f"Dropping duplicate web message: {msg_id}")
+            # We don't have the original response cached; re-processing
+            # is idempotent for most operations (booking, OTP, etc.),
+            # but we skip to be safe. Return a lightweight acknowledgment.
+            return ChatMessageResponse(session_id=body.session_id, action={"message": "", "widget_directive": "NONE"})
+        _WEB_PROCESSED_IDS[msg_id] = now
+        # Periodic cleanup of old IDs (best-effort, no lock needed)
+        if len(_WEB_PROCESSED_IDS) > 5000:
+            cutoff = now - 300
+            for k, v in list(_WEB_PROCESSED_IDS.items()):
+                if v < cutoff:
+                    del _WEB_PROCESSED_IDS[k]
 
     result = await runtime_router.route_web_message(
         db=db,

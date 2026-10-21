@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Payment result</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f4f4f5; }
+  .box { background: #fff; border-radius: 16px; padding: 32px; max-width: 420px; text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,.08); }
+  .ok { color: #16a34a; font-size: 20px; font-weight: 700; }
+  .bad { color: #dc2626; font-size: 20px; font-weight: 700; }
+  .wait { color: #52525b; font-size: 16px; }
+  p { color: #71717a; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="box">
+  <div id="title" class="wait">Checking payment…</div>
+  <p id="sub">Please wait while we confirm your payment.</p>
+</div>
+<script>
+  (function () {
+    var q = new URLSearchParams(window.location.search);
+    var sid = q.get("sid") || "";
+    var oid = q.get("oid") || q.get("order_id") || "";
+    var base = window.location.origin + "/api/v1";
+    var title = document.getElementById("title");
+    var sub = document.getElementById("sub");
+    function done(ok, msg) {
+      title.className = ok ? "ok" : "bad";
+      title.textContent = msg;
+      sub.textContent = ok
+        ? "Your booking is confirmed. You can safely close this tab and return to the chat."
+        : "Your booking is not confirmed yet. Please return to the chat and try again.";
+      setTimeout(function () { try { window.close(); } catch (e) {} }, ok ? 4000 : 8000);
+    }
+    if (!sid || !oid) { done(false, "Missing payment reference."); return; }
+    var tries = 0;
+    (function poll() {
+      tries++;
+      fetch(base + "/widget/payment/cashfree/status?order_id=" + encodeURIComponent(oid) + "&session_id=" + encodeURIComponent(sid))
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (j) {
+          if (j && j.status === "paid") { done(true, "Payment successful!"); return; }
+          if (tries < 20) setTimeout(poll, 3000);
+          else done(false, "Payment not completed.");
+        })
+        .catch(function () {
+          if (tries < 20) setTimeout(poll, 3000);
+          else done(false, "Could not verify payment.");
+        });
+    })();
+  })();
+</script>
+</body>
+</html>

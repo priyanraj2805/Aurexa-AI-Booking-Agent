@@ -135,6 +135,35 @@ async def resolve_effective_fee(
     return None, None
 
 
+async def resolve_booking_charge(
+    db: AsyncSession,
+    org_id: uuid.UUID,
+    cfg,
+    unit_id: Any = None,
+    provider_id: Any = None,
+) -> Tuple[int, str]:
+    """Amount to actually charge for a booking.
+
+    Priority: catalog fee for the selected department/member first
+    (unit+provider > provider-only > unit-only), flat org price as
+    fallback. The tenant sets per-department/member fees in the catalog;
+    the flat price is only a legacy fallback.
+    """
+    currency = (
+        getattr(cfg, "appointment_currency", "INR") or "INR"
+    ).upper()
+    try:
+        fee_paise, fee_cur = await resolve_effective_fee(
+            db, org_id, unit_id, provider_id
+        )
+    except Exception:
+        fee_paise, fee_cur = None, None
+    if fee_paise:
+        return int(fee_paise), (fee_cur or currency).upper()
+    flat = int(getattr(cfg, "appointment_price_paise", 0) or 0)
+    return flat, currency
+
+
 async def providers_for_date(
     db: AsyncSession,
     org_id,

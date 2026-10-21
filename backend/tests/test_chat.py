@@ -1845,8 +1845,9 @@ class TestMeetingLinkGeneration:
             headers={"X-Org-API-Key": org.api_key},
         )
         assert resp3.status_code == 200
-        # Accept either cancellation card or fallback text input if cancel flow didn't fully trigger via LLM mock
+        # Accept the rebook-button card or fallback text input if cancel flow didn't fully trigger via LLM mock
         assert resp3.json()["action"]["widget_directive"] in (
+            "SHOW_REBOOK_BUTTON",
             "CANCELLED_CONFIRMATION_CARD",
             "TEXT_INPUT",
         )

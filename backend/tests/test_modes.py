@@ -8,6 +8,7 @@ from app.schemas.chat import ChatMessageRequest
 from app.engine.langgraph_orchestrator import (
     _BOOKING_DIRECTIVES,
     _session_mode,
+    downgrade_ask_directive,
     should_run_booking_gate,
 )
 
@@ -91,3 +92,22 @@ def test_mode_prompt_hint_routes_by_mode():
     assert "GUIDED BOOKING" in booking
     assert _mode_prompt_hint(None) == ""
     assert _mode_prompt_hint("party") == ""
+
+
+def test_ask_downgrade_strips_every_booking_directive():
+    # Ask-AI sessions must never render booking UI: the whole booking
+    # family collapses to TEXT_INPUT (regression: OTP modals / slot grids
+    # leaking into the Ask AI section).
+    for d in _BOOKING_DIRECTIVES:
+        assert downgrade_ask_directive(mode="ask", directive=d) == "TEXT_INPUT"
+
+
+def test_ask_downgrade_keeps_neutral_directives():
+    for d in ("TEXT_INPUT", "HUMAN_ACTIVE", "SILENT_NO_REPLY", "ASK_QUESTION"):
+        assert downgrade_ask_directive(mode="ask", directive=d) == d
+
+
+def test_ask_downgrade_passes_booking_mode_through():
+    for d in list(_BOOKING_DIRECTIVES) + ["TEXT_INPUT"]:
+        assert downgrade_ask_directive(mode="booking", directive=d) == d
+        assert downgrade_ask_directive(mode=None, directive=d) == d

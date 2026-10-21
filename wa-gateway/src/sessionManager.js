@@ -33,11 +33,17 @@ const TYPING_BEAT_MS = 8000;
 
 const RECONNECT_BASE_MS = 2000;
 const RECONNECT_MAX_MS = 5 * 60 * 1000;
+// QR pairing is interactive: an admin is staring at the screen waiting to
+// scan. A 5-minute backoff there means "click Connect, see nothing". Pairing
+// sessions (never connected before) retry fast; established sessions keep
+// the patient backoff so a dead network doesn't hot-loop sockets.
+const PAIRING_RECONNECT_MAX_MS = 20 * 1000;
 const WHATSAPP_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 // Exponential backoff with jitter for reconnects (P4 hardening).
-function backoffDelayMs(attempt) {
-  const capped = Math.min(RECONNECT_BASE_MS * 2 ** Math.max(0, attempt), RECONNECT_MAX_MS);
+function backoffDelayMs(attempt, capMs) {
+  const cap = capMs || RECONNECT_MAX_MS;
+  const capped = Math.min(RECONNECT_BASE_MS * 2 ** Math.max(0, attempt), cap);
   return capped + Math.floor(Math.random() * 1000);
 }
 
@@ -299,6 +305,12 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
   async function openSocket(id, rec) {
     const dir = await ensureAuthDir(authDir, id);
     const { state, saveCreds } = await useAuthState(dir);
+    // Socket generation: every openSocket call bumps the epoch. Stale async
+    // callbacks (QR/close from a previous socket that lost a race) must never
+    // overwrite the LIVE socket's state — serving a dead socket's QR is
+    // exactly what makes the phone say "couldn't connect" on scan.
+    rec.sockGen = (rec.sockGen || 0) + 1;
+    const myGen = rec.sockGen;
     const handle = await makeSocket({
       authDir: dir,
       state,
@@ -310,29 +322,44 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
             log.error(`inbound pipeline failed: ${err.message}`);
           });
         },        onQr: async (qrString) => {
+          // Stale-socket guard: ignore QR from a socket that already lost
+          // the race (a newer openSocket bumped the generation).
+          if (myGen !== rec.sockGen) return;
           const dataUrl = await QRCode.toDataURL(qrString, { margin: 1, width: 256 });
           const issuedAt = clock();
-          rec.qr = { dataUrl, issuedAt, expiresAt: issuedAt + QR_FRESH_MS };
+          // Rotation token: every fresh QR bumps the generation. Scan-side
+          // staleness (phone camera lag, slow admin) is handled by expiry,
+          // but a NEW socket must never serve an OLD socket's QR string —
+          // scanning it yields "couldn't connect" on the phone because the
+          // handshake reference no longer exists server-side.
+          rec.qr = { dataUrl, issuedAt, expiresAt: issuedAt + QR_FRESH_MS, gen: (rec.qrGen || 0) + 1 };
+          rec.qrGen = rec.qr.gen;
           if (rec.status !== 'connected') rec.status = 'awaiting_qr';
           touch(id);
-          log.info(`QR issued for session ${id}`);
+          log.info(`QR issued for session ${id} (gen ${rec.qr.gen})`);
         },
         onOpen: (user) => {
+          if (myGen !== rec.sockGen) return;
           rec.status = 'connected';
           rec.qr = null;
           rec.reconnectAttempts = 0;
+          rec.hasPaired = true;
           rec.phoneNumber = parsePhoneNumber(user && user.id);
           rec.displayName = (user && user.name) || null;
           touch(id);
           log.info(`session connected`);
           fireEvent(id, { type: 'connected' });
         },
-        onClose: async ({ loggedOut }) => {
+        onClose: async ({ loggedOut, closeWhy }) => {
+          // Stale-socket guard: a dead socket's close must not clobber the
+          // live socket's state or schedule a bogus reconnect.
+          if (myGen !== rec.sockGen) return;
           touch(id);
           if (loggedOut) {
             rec.status = 'logged_out';
             rec.qr = null;
             rec.handle = null;
+            rec.hasPaired = false;
             log.warn(`session logged out (unlinked from phone)`);
             fireEvent(id, { type: 'logged_out' });
             try {
@@ -342,10 +369,23 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
           }
           rec.status = 'reconnecting';
           rec.handle = null;
-          const waitMs = backoffDelayMs(rec.reconnectAttempts);
+          // The closing socket's QR is dead the moment it closes — drop it
+          // NOW so nobody scans a code whose handshake is already gone
+          // (phone shows "couldn't connect"). Fresh socket issues a new QR.
+          rec.qr = null;
+          // Pairing sessions (never authenticated) retry fast so the admin
+          // staring at the QR screen never waits minutes. Established
+          // sessions keep the patient backoff (dead network shouldn't hot-loop).
+          const capMs = rec.hasPaired ? RECONNECT_MAX_MS : PAIRING_RECONNECT_MAX_MS;
+          const waitMs = backoffDelayMs(rec.reconnectAttempts, capMs);
           rec.reconnectAttempts += 1;
-          log.warn(`socket closed, reconnecting in ${waitMs}ms (attempt ${rec.reconnectAttempts})`);
-          setTimeout(() => {
+          const why = closeWhy ? ` (${closeWhy})` : '';
+          log.warn(`socket closed${why}, reconnecting in ${waitMs}ms (attempt ${rec.reconnectAttempts})`);
+          if (rec.timer) {
+            try { clearTimeout(rec.timer); } catch (_) { /* best effort */ }
+          }
+          rec.timer = setTimeout(() => {
+            rec.timer = null;
             // Only restart if nobody else did (e.g. explicit start/logout) and no concurrent open in progress.
             const current = sessions.get(id);
             if (current === rec && rec.status === 'reconnecting' && !starting.has(id)) {
@@ -356,7 +396,8 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
               starting.set(id, p);
               p.finally(() => starting.delete(id));
             }
-          }, waitMs).unref?.();
+          }, waitMs);
+          if (rec.timer && rec.timer.unref) rec.timer.unref();
         },
       },
     });
@@ -368,10 +409,21 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
   async function start(id) {
     if (!ID_RE.test(id || '')) throw new InvalidConnectionId();
     const existing = sessions.get(id);
-    if (existing && (existing.status === 'connected' || existing.status === 'awaiting_qr' || existing.status === 'starting' || existing.status === 'reconnecting')) {
+    if (existing && existing.status === 'connected') {
       return snapshot(id, existing);
     }
     if (starting.has(id)) return starting.get(id).then(() => snapshot(id, sessions.get(id)));
+    if (existing && (existing.status === 'awaiting_qr' || existing.status === 'starting' || existing.status === 'reconnecting')) {
+      // Explicit user click ("Connect WhatsApp") must never no-op into a
+      // minutes-long backoff wait. Nudge one fresh socket attempt now and
+      // reset the attempt counter so the retry cadence restarts fast.
+      existing.reconnectAttempts = 0;
+      if (existing.timer) {
+        try { clearTimeout(existing.timer); } catch (_) { /* best effort */ }
+        existing.timer = null;
+      }
+      return forceReconnect(id);
+    }
     let rec = existing;
     if (!rec || rec.status === 'logged_out' || rec.status === 'closed') {
       if (rec && rec.status === 'logged_out') await wipeAuth(id);
@@ -430,6 +482,11 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
     if (starting.has(id)) return starting.get(id).then(() => snapshot(id, sessions.get(id)));
     const rec = sessions.get(id);
     if (!rec || rec.status === 'logged_out') return rec ? snapshot(id, rec) : null;
+    // Clear any pending backoff timer so it can't fire a second socket later.
+    if (rec.timer) {
+      try { clearTimeout(rec.timer); } catch (_) { /* best effort */ }
+      rec.timer = null;
+    }
     if (rec.handle) {
       try {
         await rec.handle.end();
@@ -519,4 +576,4 @@ function createSessionManager({ makeSocket, useAuthState, authDir, now, logger, 
   return { start, status, freshQr, logout, list, get, resume, closeAll, forceReconnect, touch, handleInboundMessage, sendTo };
 }
 
-module.exports = { createSessionManager, InvalidConnectionId, parsePhoneNumber, backoffDelayMs };
+module.exports = { createSessionManager, InvalidConnectionId, parsePhoneNumber, backoffDelayMs, PAIRING_RECONNECT_MAX_MS, RECONNECT_MAX_MS };

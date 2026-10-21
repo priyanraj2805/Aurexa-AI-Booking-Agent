@@ -96,12 +96,24 @@ async function defaultMakeSocket({ authDir, state, saveCreds, hooks, log }) {
         .catch(() => {});
     }
     if (update.connection === 'close') {
-      const code = update.lastDisconnect && update.lastDisconnect.error
-        && update.lastDisconnect.error.output
-        ? update.lastDisconnect.error.output.statusCode
-        : null;
+      const errObj = update.lastDisconnect && update.lastDisconnect.error ? update.lastDisconnect.error : null;
+      let code = null;
+      let closeWhy = '';
+      try {
+        const out = errObj && errObj.output ? errObj.output : null;
+        code = (out && out.statusCode != null) ? out.statusCode : null;
+        const boomMsg = errObj && errObj.message ? String(errObj.message).slice(0, 160) : '';
+        const payload = out && out.payload ? out.payload : null;
+        const payloadErr = payload && payload.error ? String(payload.error).slice(0, 120) : '';
+        closeWhy = [
+          code != null ? `code=${code}` : null,
+          boomMsg ? `msg=${boomMsg}` : null,
+          payloadErr && payloadErr !== boomMsg ? `payload=${payloadErr}` : null,
+        ].filter(Boolean).join(' ');
+      } catch (_) { /* logging must never break reconnect */ }
+      const loggedOut = code === LOGGED_OUT_STATUS;
       Promise.resolve()
-        .then(() => hooks.onClose({ loggedOut: code === LOGGED_OUT_STATUS, statusCode: code }))
+        .then(() => hooks.onClose({ loggedOut, closeWhy }))
         .catch(() => {});
     }
   });

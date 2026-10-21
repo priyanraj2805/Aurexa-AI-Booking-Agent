@@ -353,7 +353,8 @@ class TestFinishedSessionsStayFinished:
         for weird in ["482916", "???", "asdfgh", "👍👍👍"]:
             action = await langgraph_orchestrator.process_message_with_graph(
                 db_session, org, cfg, sess, weird)
-            assert action.widget_directive == "TEXT_INPUT", weird
+            # Expired sessions answer with the rebook button, never a booking.
+            assert action.widget_directive in ("TEXT_INPUT", "SHOW_REBOOK_BUTTON"), weird
         assert await _booking_count(db_session, org.id) == 0
 
     async def test_explicit_rebook_after_cancel_still_works(self, db_session, monkeypatch):
@@ -370,6 +371,24 @@ class TestFinishedSessionsStayFinished:
             confidence=0.95, reply="")
         action = await langgraph_orchestrator.process_message_with_graph(
             db_session, org, cfg, sess, "i want to book again")
+        assert "full name" in (action.message or "").lower()
+        assert await _booking_count(db_session, org.id) == 0
+
+    async def test_rebook_button_payload_restarts_without_classifier(self, db_session, monkeypatch):
+        # The rebook button sends a fixed phrase; the restart must NOT
+        # depend on the LLM classifying it as REBOOK.
+        from app.engine import langgraph_orchestrator
+        from app.engine import message_processor
+        org = await _make_org(db_session)
+        cfg = (await db_session.execute(
+            _sel(OrgConfig).where(
+                OrgConfig.org_id == org.id))).scalars().first()
+        sess = await _make_session(
+            db_session, org, status="CANCELLED", intent="START_BOOKING",
+            collected=dict(FULL_CONTACT))
+        self._mock_post_booking(monkeypatch)  # NEUTRAL / NONE — classifier misses
+        action = await langgraph_orchestrator.process_message_with_graph(
+            db_session, org, cfg, sess, message_processor.REBOOK_BUTTON_PAYLOAD)
         assert "full name" in (action.message or "").lower()
         assert await _booking_count(db_session, org.id) == 0
 

@@ -146,6 +146,26 @@ class Settings(BaseSettings):
     # Razorpay's own gateway fee still applies (deducted from platform balance).
     RAZORPAY_ROUTE_COMMISSION_BPS: int = int(os.getenv("RAZORPAY_ROUTE_COMMISSION_BPS", "0"))
 
+    # ── Cashfree (platform account, additive second provider) ─────────────
+    # Same platform-account model as Razorpay: orders are created on the
+    # platform Cashfree account; provider splits happen via Easy Split.
+    # Kill switch: when false, no Cashfree API call may be made.
+    CASHFREE_ENABLED: bool = os.getenv("CASHFREE_ENABLED", "false").lower() in ("true", "1", "yes")
+    CASHFREE_APP_ID: str = os.getenv("CASHFREE_APP_ID", "")
+    CASHFREE_SECRET_KEY: str = os.getenv("CASHFREE_SECRET_KEY", "")
+    # Sandbox: https://sandbox.cashfree.com/pg | Production: https://api.cashfree.com/pg
+    CASHFREE_API_BASE: str = os.getenv("CASHFREE_API_BASE", "https://sandbox.cashfree.com/pg")
+    # Platform-wide Cashfree environment for TENANT own-account keys.
+    # Tenants must NOT choose this in the dashboard — "test" while we are
+    # validating, flipped to "live" centrally at go-live. Clamped to a
+    # valid value wherever it is consumed.
+    CASHFREE_MODE: str = os.getenv("CASHFREE_MODE", "test").strip().lower()
+    CASHFREE_API_VERSION: str = os.getenv("CASHFREE_API_VERSION", "2026-01-01")
+    # Public API base for per-order webhook notify_url, e.g.
+    # https://api.dotstark.tech. Empty = rely on the account-level webhook
+    # configured in the Cashfree dashboard.
+    PUBLIC_API_BASE: str = os.getenv("PUBLIC_API_BASE", "")
+
     # ── OTP delivery ─────────────────────────────────────────────────────
     # Phone OTP is always delivered via WhatsApp (Meta Cloud API).
     OTP_ALLOW_MOCK_DELIVERY: bool = os.getenv("OTP_ALLOW_MOCK_DELIVERY", "false").lower() in ("true", "1", "yes")

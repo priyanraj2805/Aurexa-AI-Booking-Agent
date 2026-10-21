@@ -46,6 +46,7 @@ import {
   type MeetingProviderType,
 } from "@/hooks/use-dashboard";
 import { api } from "@/lib/api";
+import { PaymentsConnectCard } from "@/components/payments-connect-card";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -143,6 +144,42 @@ export default function IntegrationsPage() {
   const [runtimeUrls, setRuntimeUrls] = useState<RuntimeUrls | null>(null);
   const { data: config } = useAgentConfig();
 
+  // Transactions table (Payments & Payouts tab), paginated.
+  interface PayAttempt {
+    id: string; provider: string; order_id: string | null; amount_paise: number;
+    currency: string; status: string; created_at: string | null;
+  }
+  const PAY_PAGE_SIZE = 20;
+  const [payAttempts, setPayAttempts] = useState<PayAttempt[]>([]);
+  const [payAttemptsLoading, setPayAttemptsLoading] = useState(false);
+  const [payPage, setPayPage] = useState(1);
+  const [payTotal, setPayTotal] = useState(0);
+  const loadPayAttempts = async (page: number) => {
+    setPayAttemptsLoading(true);
+    try {
+      const offset = (page - 1) * PAY_PAGE_SIZE;
+      const res = await api.get<{ attempts: PayAttempt[]; total: number }>(
+        `/dashboard/payments/attempts?limit=${PAY_PAGE_SIZE}&offset=${offset}`
+      );
+      setPayAttempts(res.attempts ?? []);
+      setPayTotal(Number(res.total ?? 0));
+      setPayPage(page);
+    } catch {
+      /* table stays empty on error */
+    } finally {
+      setPayAttemptsLoading(false);
+    }
+  };
+  useEffect(() => {
+    if (activeTab !== "payments") return;
+    setPayPage(1);
+    loadPayAttempts(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+  const payTotalPages = Math.max(1, Math.ceil(payTotal / PAY_PAGE_SIZE));
+  const payFrom = payTotal === 0 ? 0 : (payPage - 1) * PAY_PAGE_SIZE + 1;
+  const payTo = Math.min(payTotal, payPage * PAY_PAGE_SIZE);
+
   // WhatsApp QR pairing state is declared below (qrStatus, qrImg, ...).
 
   // WhatsApp QR pairing state (Baileys transport; replaces manual token setup)
@@ -157,6 +194,9 @@ export default function IntegrationsPage() {
   const [qrBusy, setQrBusy] = useState(false);
   const [qrMsg, setQrMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [qrPairing, setQrPairing] = useState(false);
+  // True while the backend has no fresh QR to serve (socket rotating or
+  // reconnecting). Shows an explicit waiting note instead of a blank box.
+  const [qrWaiting, setQrWaiting] = useState(false);
 
   const loadQrStatus = async () => {
     try {
@@ -173,9 +213,19 @@ export default function IntegrationsPage() {
   const loadQrImage = async () => {
     try {
       const data = await api.get<{ qr_data_url: string; issued_at: number; expires_at: number }>("/dashboard/whatsapp-qr/qr");
+      // A new QR from the server always replaces the old frame — scanning a
+      // stale code is the #1 "couldn't connect" cause on the phone.
       setQrImg({ dataUrl: data.qr_data_url, expiresAt: data.expires_at });
+      setQrWaiting(false);
     } catch {
-      // NO_FRESH_QR or not started — keep previous frame; poller retries.
+      // NO_FRESH_QR (socket between rotations) or not started. Clear any
+      // expired frame so the user never scans a dead code, and show the
+      // waiting note instead of a silent blank box.
+      setQrImg((prev) => {
+        if (prev && prev.expiresAt * 1000 < Date.now()) return null;
+        return prev;
+      });
+      setQrWaiting(true);
     }
   };
   const startQrPairing = async () => {
@@ -232,6 +282,10 @@ export default function IntegrationsPage() {
     }
   };
   // Poll status + QR while the tab is open and pairing is active or connected.
+  // NOTE: QR polling is gated on the *server* status (PENDING_QR /
+  // DISCONNECTED), not only on the in-memory qrPairing flag — a page reload
+  // resets qrPairing to false but the backend session is still waiting for a
+  // scan, so the QR must keep refreshing or the user sees a dead screen.
   const qrPairingRef = useRef(false);
   qrPairingRef.current = qrPairing;
   useEffect(() => {
@@ -240,11 +294,15 @@ export default function IntegrationsPage() {
     const t = setInterval(async () => {
       const s = await loadQrStatus();
       if (!s) return;
-      if (s.status === "CONNECTED") {
+      if (s.status === "CONNECTED" || s.status === "LOGGED_OUT") {
         setQrPairing(false);
+        setQrWaiting(false);
+        if (s.status === "CONNECTED") setQrImg(null);
         return;
       }
-      if (qrPairingRef.current) await loadQrImage();
+      if (qrPairingRef.current || s.status === "PENDING_QR" || s.status === "DISCONNECTED") {
+        await loadQrImage();
+      }
     }, 4000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1212,7 +1270,7 @@ export default function IntegrationsPage() {
 
           {activeTab === "payments" && routeAvailable && (
             <div className="bg-card border border-border rounded-2xl overflow-hidden shadow-sm animate-in fade-in duration-500 slide-in-from-bottom-2">
-              <div className="flex flex-wrap items-center justify-between gap-3 p-4 sm:p-5 bg-secondary/40 border-b border-border/50">
+              <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-3 p-4 sm:p-5 bg-secondary/40 border-b border-border/50">
                 <div className="flex items-center gap-3">
                   <div className="p-2 bg-sky-500/10 rounded-lg"><CreditCard className="size-5 text-sky-600" /></div>
                   <div><h3 className="font-semibold text-base leading-none">Provider Payouts</h3><p className="text-xs text-muted-foreground mt-1">Razorpay Route • platform payments → automatic provider transfers</p></div>
@@ -1266,7 +1324,7 @@ export default function IntegrationsPage() {
                             <input value={routePostal} onChange={e=>setRoutePostal(e.target.value.replace(/\D/g, ""))} placeholder="Postal code (6 digits)" maxLength={6} className="bg-background border rounded-lg px-3 py-2 text-sm" />
                           </div>
                         </div>
-                        <button onClick={handleRouteStart} disabled={routeBusy || !routePhone || !routeStreet1 || !routeCity || !routeState || routePostal.length !== 6 || (needsLegalPan && !routeLegalPan) || (needsLegalGst && !routeLegalGst)} className="px-6 py-2.5 rounded-xl bg-sky-600 text-white text-sm font-medium hover:bg-sky-700 disabled:opacity-50">{routeBusy ? "Working…" : "Create Payout Account"}</button>
+                        <button onClick={handleRouteStart} disabled={routeBusy || !routePhone || !routeStreet1 || !routeCity || !routeState || routePostal.length !== 6 || (needsLegalPan && !routeLegalPan) || (needsLegalGst && !routeLegalGst)} className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-sky-600 text-white text-sm font-medium hover:bg-sky-700 disabled:opacity-50">{routeBusy ? "Working…" : "Create Payout Account"}</button>
                       </div>
                     )}
                     {(routeStatus?.onboarding_status==="STAKEHOLDER_PENDING"||routeStatus?.onboarding_status==="ACCOUNT_CREATED") && (
@@ -1277,14 +1335,14 @@ export default function IntegrationsPage() {
                           <input value={stakeName} onChange={e=>setStakeName(e.target.value)} placeholder="Full name (optional)" className="bg-background border rounded-lg px-3 py-2 text-sm" />
                           <input value={stakePan} onChange={e=>setStakePan(e.target.value)} placeholder="PAN (optional)" className="bg-background border rounded-lg px-3 py-2 text-sm" />
                         </div>
-                        <button onClick={handleRouteStakeholder} disabled={routeBusy} className="text-sm px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">{routeBusy ? "Saving…" : "Save business details"}</button>
+                        <button onClick={handleRouteStakeholder} disabled={routeBusy} className="w-full sm:w-auto text-sm px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">{routeBusy ? "Saving…" : "Save business details"}</button>
                       </div>
                     )}
                     {routeStatus?.onboarding_status==="PRODUCT_PENDING" && (
                       <div className="rounded-xl border p-5 space-y-3">
                         <h4 className="text-sm font-semibold">Route payouts product</h4>
                         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={routeTnc} onChange={e=>setRouteTnc(e.target.checked)} /> I accept the Razorpay Route terms for payouts</label>
-                        <button onClick={handleRouteProduct} disabled={routeBusy || !routeTnc} className="text-sm px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">{routeBusy ? "Requesting…" : "Request payouts"}</button>
+                        <button onClick={handleRouteProduct} disabled={routeBusy || !routeTnc} className="w-full sm:w-auto text-sm px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">{routeBusy ? "Requesting…" : "Request payouts"}</button>
                       </div>
                     )}
                     {routeStatus?.onboarding_status==="BANK_DETAILS_PENDING" && (
@@ -1297,7 +1355,7 @@ export default function IntegrationsPage() {
                           <input value={settleName} onChange={e=>setSettleName(e.target.value)} placeholder="Beneficiary name" className="bg-background border rounded-lg px-3 py-2 text-sm" />
                         </div>
                         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={routeTnc} onChange={e=>setRouteTnc(e.target.checked)} /> I accept the Razorpay Route terms for payouts</label>
-                        <button onClick={handleRouteSettlement} disabled={routeBusy || !routeTnc || !settleAcct || !settleIfsc || !settleName} className="text-sm px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">{routeBusy ? "Submitting…" : "Submit bank details"}</button>
+                        <button onClick={handleRouteSettlement} disabled={routeBusy || !routeTnc || !settleAcct || !settleIfsc || !settleName} className="w-full sm:w-auto text-sm px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">{routeBusy ? "Submitting…" : "Submit bank details"}</button>
                       </div>
                     )}
                     {routeStatus?.onboarding_status==="UNDER_REVIEW" && (
@@ -1343,6 +1401,79 @@ export default function IntegrationsPage() {
                     </div>
                   </>
                 )}
+              </div>
+
+              {/* ── Cashfree own-account collection ── */}
+              <div className="mt-4">
+                <PaymentsConnectCard />
+              </div>
+
+              {/* ── Recent transactions ── */}
+              <div className="mt-4 bg-card border border-border rounded-2xl overflow-hidden shadow-sm">
+                <div className="p-4 sm:p-5 border-b border-border/50">
+                  <h3 className="font-semibold text-base leading-none">Recent transactions</h3>
+                  <p className="text-xs text-muted-foreground mt-1">Every collection attempt, newest first.</p>
+                </div>
+                <div className="p-4 sm:p-5">
+                  {payAttemptsLoading ? (
+                    <p className="text-sm text-muted-foreground">Loading transactions…</p>
+                  ) : payAttempts.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No payments yet. They will appear here after the first booking payment.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-border text-left text-xs text-muted-foreground sm:text-left">
+                            <th className="py-2 pr-3 sm:pr-0 font-medium whitespace-nowrap">Date</th>
+                            <th className="py-2 pr-3 sm:pr-0 font-medium whitespace-nowrap">Provider</th>
+                            <th className="py-2 pr-3 sm:pr-0 font-medium whitespace-nowrap">Amount</th>
+                            <th className="py-2 pr-3 sm:pr-0 font-medium whitespace-nowrap">Status</th>
+                            <th className="py-2 font-medium whitespace-nowrap">Order</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {payAttempts.map((a) => (
+                            <tr key={a.id} className="border-b border-border/50 last:border-0">
+                              <td className="py-2 pr-3 sm:pr-0 text-xs sm:whitespace-normal">{a.created_at ? new Date(a.created_at).toLocaleString() : "—"}</td>
+                              <td className="py-2 pr-3 sm:pr-0 capitalize">{a.provider}</td>
+                              <td className="py-2 pr-3 sm:pr-0 font-medium">₹{(Number(a.amount_paise) / 100).toFixed(2)}</td>
+                              <td className="py-2 pr-3 sm:pr-0"><span className="rounded-full px-2 py-0.5 text-[11px] font-medium bg-zinc-500/15">{a.status}</span></td>
+                              <td className="py-2 font-mono text-[11px] text-muted-foreground truncate max-w-[180px] sm:max-w-full">{a.order_id ?? "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  {!payAttemptsLoading && payTotal > 0 && (
+                    <div className="mt-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-0 border-t border-border/50 pt-3">
+                      <p className="text-xs text-muted-foreground sm:text-start">
+                        Showing {payFrom}–{payTo} of {payTotal}
+                      </p>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={payPage <= 1 || payAttemptsLoading}
+                          onClick={() => loadPayAttempts(payPage - 1)}
+                          className="text-xs sm:text-sm px-3 py-1.5 rounded-lg border border-border bg-background hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Previous
+                        </button>
+                        <span className="text-xs sm:text-sm text-muted-foreground whitespace-nowrap">
+                          Page {payPage} of {payTotalPages}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={payPage >= payTotalPages || payAttemptsLoading}
+                          onClick={() => loadPayAttempts(payPage + 1)}
+                          className="text-xs sm:text-sm px-3 py-1.5 rounded-lg border border-border bg-background hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Next
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -1433,6 +1564,12 @@ export default function IntegrationsPage() {
                       {qrImg && (qrStatus?.status === "PENDING_QR" || qrStatus?.status === "DISCONNECTED") ? (
                         <div className="flex justify-center">
                           <img src={qrImg.dataUrl} alt="WhatsApp pairing QR code" className="size-56 rounded-xl border border-border bg-white p-2" />
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">Scan within a minute — the code refreshes automatically. If your phone says “couldn’t connect”, wait for the next fresh code, don’t retry the old one.</p>
+                      ) : qrWaiting ? (
+                        <div className="flex flex-col items-center gap-2 py-6">
+                          <Loader2 className="size-6 animate-spin text-muted-foreground" />
+                          <p className="text-xs text-muted-foreground">Preparing a fresh QR code… keep this tab open.</p>
                         </div>
                       ) : null}
                       {qrStatus && qrStatus.status !== "NOT_CONNECTED" && qrStatus.status !== "LOGGED_OUT" ? (

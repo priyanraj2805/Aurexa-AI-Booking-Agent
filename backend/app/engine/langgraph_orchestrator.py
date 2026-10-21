@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 from fastapi import BackgroundTasks
+from sqlalchemy import delete as _delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from langchain_core.messages import HumanMessage, AIMessage
@@ -835,6 +836,9 @@ def _guard_user_visible_booking_message(
     if directive == "CANCELLED_CONFIRMATION_CARD":
         return assistant_message
 
+    if directive == "SHOW_REBOOK_BUTTON":
+        return assistant_message
+
     active_field = str((field_meta or {}).get("name") or "").strip()
     invalid_error = ""
     if active_field:
@@ -1127,6 +1131,71 @@ async def _handle_post_booking_session(
             )
             return action_payload
 
+    # Deterministic button fast-path: the confirmed card's Reschedule/Cancel
+    # buttons send fixed phrases — route them without an LLM call (no
+    # misclassification, no latency). Info-questions still go to the model.
+    # NOTE: RESCHEDULE_INFO_KEYWORDS contains the bare word "reschedule",
+    # so it can't be matched blindly — that would classify every reschedule
+    # request as an info question. Only procedure/policy/step phrasings (or
+    # a real question) count as info here.
+    if status == "CONFIRMED" and not chat_session.pending_cancel:
+        _um = str(message_text or "").lower().strip()
+        _resched_info_phrases = [
+            kw
+            for kw in message_processor.RESCHEDULE_INFO_KEYWORDS
+            if kw not in ("reschedule", "rescheduling")
+        ]
+        _is_info_q = "?" in _um or message_processor._looks_like_question(_um) or any(
+            kw in _um
+            for kw in (
+                message_processor.CANCEL_INFO_KEYWORDS + _resched_info_phrases
+            )
+        )
+        _want_cancel = message_processor._contains_any(_um, message_processor.CANCEL_KEYWORDS)
+        _want_resched = message_processor._contains_any(_um, message_processor.RESCHEDULE_KEYWORDS)
+        if (_want_cancel or _want_resched) and not _is_info_q:
+            if _want_cancel:
+                # Own confirmed booking → contact lookup skipped, cancel OTP
+                # goes out now; entering it cancels. Anything else keeps the
+                # OTP-protected lookup flow.
+                _own_b, _own_s = await cancel_flow.find_own_upcoming_booking(
+                    db, org, chat_session
+                )
+                if _own_b is not None:
+                    action_payload = await cancel_flow.start_cancel_otp_for_booking(
+                        db, org, org_config, chat_session, _own_b, _own_s,
+                        background_tasks,
+                    )
+                else:
+                    action_payload = await cancel_flow.start_cancel_flow(
+                        db, chat_session, message_text, org_config=org_config
+                    )
+                await _persist_transcript_best_effort(
+                    db,
+                    session_id=chat_session.session_id,
+                    user_message=message_text,
+                    assistant_message=action_payload.message,
+                    directive=action_payload.widget_directive or "TEXT_INPUT",
+                    intent="CANCEL_BOOKING",
+                )
+                return action_payload
+            action_payload = await message_processor._reschedule_booking(
+                db,
+                org,
+                chat_session,
+                background_tasks,
+                user_message=message_text,
+            )
+            await _persist_transcript_best_effort(
+                db,
+                session_id=chat_session.session_id,
+                user_message=message_text,
+                assistant_message=action_payload.message,
+                directive=action_payload.widget_directive or "TEXT_INPUT",
+                intent="EDIT_DATA",
+            )
+            return action_payload
+
     # LLM analysis of the user's actual message.
     analysis = await _llm_post_booking_analysis(
         message_text=message_text,
@@ -1211,10 +1280,28 @@ async def _handle_post_booking_session(
             return action_payload
 
     # 4. Rebook from CANCELLED / EXPIRED → fresh booking state.
-    if status in ("CANCELLED", "EXPIRED") and action == "REBOOK" and (
-        is_action_request or classification in ("CONFIRM", "NEUTRAL")
+    # Keyword fallback (no LLM dependence): the rebook button sends a fixed
+    # phrase, and terminal sessions treat any booking-ish message as rebook.
+    _rebook_kw = message_processor.is_rebook_request_text(message_text)
+    if status in ("CANCELLED", "EXPIRED") and (
+        (action == "REBOOK" and (is_action_request or classification in ("CONFIRM", "NEUTRAL")))
+        or _rebook_kw
     ):
         cancel_flow.reset_for_new_booking(chat_session)
+        # Wipe paid attempts so the new booking requires fresh payment.
+        try:
+            from app.models.payment import PaymentAttempt as _PA
+            await db.execute(
+                _delete(_PA).where(
+                    _PA.session_id == chat_session.session_id,
+                    _PA.org_id == org.id,
+                    _PA.status == "paid",
+                )
+            )
+            await db.flush()
+        except Exception:
+            await db.rollback()
+            logger.warning("paid-attempt wipe failed on rebook", exc_info=True)
         await cancel_flow._persist_session(
             db, chat_session, remove_keys=cancel_flow.SESSION_RESET_REMOVE_KEYS
         )
@@ -1254,18 +1341,26 @@ async def _handle_post_booking_session(
     elif not reply:
         reply = {
             "CONFIRMED": "Your booking is confirmed! You can say 'cancel my booking' or 'reschedule' anytime.",
-            "CANCELLED": "Your previous booking was cancelled. Just say 'I want to book' to start a new one!",
-            "EXPIRED": "This session expired. Say 'I want to book' to start a new booking!",
+            "CANCELLED": "Your previous booking was cancelled. Tap 'Book a new appointment' below to start a new one!",
+            "EXPIRED": "This session expired. Tap 'Book a new appointment' below to start a new booking!",
         }.get(status, "Is there anything else I can help you with?")
-    action_payload = ActionPayload(
-        message=reply, widget_directive="TEXT_INPUT", is_terminal=False
-    )
+    if status in ("CANCELLED", "EXPIRED"):
+        action_payload = ActionPayload(
+            message=reply,
+            widget_directive=message_processor.REBOOK_BUTTON_DIRECTIVE,
+            field_meta=message_processor.rebook_button_field_meta(),
+            is_terminal=False,
+        )
+    else:
+        action_payload = ActionPayload(
+            message=reply, widget_directive="TEXT_INPUT", is_terminal=False
+        )
     await _persist_transcript_best_effort(
         db,
         session_id=chat_session.session_id,
         user_message=message_text,
         assistant_message=reply,
-        directive="TEXT_INPUT",
+        directive=action_payload.widget_directive or "TEXT_INPUT",
         intent=chat_session.current_intent,
     )
     return action_payload
@@ -1457,6 +1552,16 @@ _BOOKING_DIRECTIVES = frozenset({
     "REQUIRE_PAYMENT",
     "BOOKING_CONFIRMED_CARD",
 })
+
+
+def downgrade_ask_directive(*, mode: Optional[str], directive: str) -> str:
+    """Ask-AI mode never renders booking UI: any booking-family directive
+    becomes plain TEXT_INPUT. Booking mode and legacy (modeless) flows pass
+    through untouched. Single source of truth for the downgrade rule —
+    every emission point must funnel through here."""
+    if mode == "ask" and directive in _BOOKING_DIRECTIVES:
+        return "TEXT_INPUT"
+    return directive
 
 def should_run_booking_gate(
     *,
@@ -1721,7 +1826,15 @@ async def process_message_with_graph(
         db, org, org_config, chat_session, message_text, background_tasks
     )
     if cancel_action is not None:
-        return cancel_action
+        # Ask-AI mode never runs the destructive cancel flow — fall through
+        # to the graph, which answers per its mode instructions.
+        if _session_mode(chat_session) == "ask":
+            logger.info(
+                "ask_mode.skip_active_cancel",
+                extra={"session_id": session_id},
+            )
+        else:
+            return cancel_action
 
     # Post-booking gate FIRST (before decline/refusal/lookup/OTP fast-paths):
     # on a finished session (CONFIRMED / CANCELLED / EXPIRED) a 6-digit code
@@ -1924,7 +2037,12 @@ async def process_message_with_graph(
 
     # Fast-path: explicit OTP resend while awaiting verification.
     # The LLM is unreliable at routing a bare "resend", so handle it directly.
-    if _is_resend_request(message_text) and _is_awaiting_otp(chat_session):
+    # Skipped in Ask-AI mode: no OTP UI may render there.
+    if (
+        _is_resend_request(message_text)
+        and _is_awaiting_otp(chat_session)
+        and _session_mode(chat_session) != "ask"
+    ):
         return await _handle_graph_otp_resend(
             db, org, chat_session, message_text, background_tasks, org_config=org_config
         )
@@ -1972,7 +2090,10 @@ async def process_message_with_graph(
         _otp_created_at_before = _snap_row
     except Exception:
         _otp_created_at_before = None
-    if _is_six:
+    # Ask-AI mode never verifies codes and never shows OTP UI: a 6-digit
+    # number typed there is chatter, not a verification attempt (verifying
+    # would also burn the crossed session's OTP attempts).
+    if _is_six and _session_mode(chat_session) != "ask":
         # Determine which OTP channel is actually pending for this org/session.
         _raw_pp = getattr(org_config, "require_phone_otp", False)
         _raw_ep = getattr(org_config, "require_otp", True)
@@ -3699,12 +3820,13 @@ async def process_message_with_graph(
     # hardcoded reply wording here — the model acknowledges, answers, and
     # redirects in its own words.
     if _mode_now == "ask":
-        if directive in _BOOKING_DIRECTIVES:
+        _downgraded = downgrade_ask_directive(mode=_mode_now, directive=directive)
+        if _downgraded != directive:
             logger.info(
                 "ask_mode.downgrade_booking_directive",
                 extra={"session_id": session_id, "directive": directive},
             )
-            directive = "TEXT_INPUT"
+            directive = _downgraded
     if should_run_booking_gate(
         directive=directive,
         missing_fields=chat_session.missing_fields,
@@ -3742,7 +3864,9 @@ async def process_message_with_graph(
         # point, so every path (booking, knowledge, decline) is accounted for
         # exactly once instead of risking double counting.
 
-        if may_send_otp_standalone(
+        # Standalone OTP sends never run in Ask-AI mode: no code may be
+        # generated/sent and no OTP modal may render there.
+        if _session_mode(chat_session) != "ask" and may_send_otp_standalone(
             booking_gate_handled=booking_gate_handled,
             otp_required=otp_required,
             user_confirmed=_user_confirmed,
@@ -3992,7 +4116,7 @@ async def process_message_with_graph(
             )
             return _k_action
         directive = "TEXT_INPUT"
-    elif may_send_otp_standalone(
+    elif _session_mode(chat_session) != "ask" and may_send_otp_standalone(
         booking_gate_handled=booking_gate_handled,
         otp_required=phone_otp_required,
         user_confirmed=_user_confirmed,
@@ -4932,7 +5056,7 @@ async def process_message_with_graph(
                 "appointments — I don't have information about that.\n\n"
                 f"To finish your booking, please enter the verification code sent to {_dest}."
             )
-            if directive == "TEXT_INPUT":
+            if directive == "TEXT_INPUT" and _session_mode(chat_session) != "ask":
                 directive = "REQUIRE_OTP_MODAL"
                 field_meta["channel"] = _channel
 
@@ -5059,6 +5183,20 @@ async def process_message_with_graph(
     )
     if _guarded is not None:
         assistant_message, directive, field_meta = _guarded
+
+    # Ask-AI last-mile guard: no booking-family directive may leave this
+    # function in ask mode, no matter which branch above produced it
+    # (standalone sends, confirm rebuilds, code-awaiting upgrades). The
+    # reply text is already ask-safe; only the card directive is stripped.
+    _final_downgraded = downgrade_ask_directive(
+        mode=_session_mode(chat_session), directive=directive
+    )
+    if _final_downgraded != directive:
+        logger.info(
+            "ask_mode.final_downgrade_booking_directive",
+            extra={"session_id": session_id, "directive": directive},
+        )
+        directive = _final_downgraded
 
     # 3. Create ActionPayload to emulate traditional response
     action = ActionPayload(

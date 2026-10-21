@@ -82,7 +82,7 @@ test('start emits QR, refresh replaces it, freshQr expiry works', async () => {
   assert.strictEqual(mgr.freshQr(ID_A), null);
 });
 
-test('open sets connected + identity; second start is idempotent', async () => {
+test('open sets connected + identity; explicit start on connected stays idempotent', async () => {
   const { mgr, deps } = managerWithTmp();
   await mgr.start(ID_A);
   const sock = deps.created[0];
@@ -94,7 +94,45 @@ test('open sets connected + identity; second start is idempotent', async () => {
   assert.ok(snap.lastSeenAt);
 
   await mgr.start(ID_A);
-  assert.strictEqual(deps.created.length, 1); // no duplicate socket
+  assert.strictEqual(deps.created.length, 1); // no duplicate socket when connected
+});
+
+test('explicit start on reconnecting forces a fresh socket instead of no-op', async () => {
+  const { mgr, deps } = managerWithTmp();
+  await mgr.start(ID_A);
+  const sock = deps.created[0];
+  await sock.hooks.onClose({ loggedOut: false, closeWhy: 'code=500' });
+  assert.strictEqual(mgr.status(ID_A).status, 'reconnecting');
+  await mgr.start(ID_A); // user clicked Connect again — must open a new socket
+  assert.strictEqual(deps.created.length, 2);
+});
+
+test('stale socket callbacks never overwrite the live socket state', async () => {
+  const { mgr, deps } = managerWithTmp();
+  await mgr.start(ID_A);
+  const first = deps.created[0];
+  await mgr.start(ID_A); // force a second socket (simulates reconnect race)
+  const second = deps.created[1];
+  assert.ok(second && second !== first);
+  // Old socket's late QR must be ignored — serving it causes
+  // "couldn't connect" on the phone.
+  await first.hooks.onQr('QR-STALE');
+  assert.strictEqual(mgr.freshQr(ID_A), null);
+  await second.hooks.onQr('QR-LIVE');
+  assert.ok(mgr.freshQr(ID_A));
+  // Old socket's late close must not clobber the live session.
+  await first.hooks.onClose({ loggedOut: false, closeWhy: 'code=500' });
+  assert.strictEqual(mgr.status(ID_A).status, 'awaiting_qr');
+});
+
+test('closing socket drops its QR immediately', async () => {
+  const { mgr, deps } = managerWithTmp();
+  await mgr.start(ID_A);
+  const sock = deps.created[0];
+  await sock.hooks.onQr('QR-ONE');
+  assert.ok(mgr.freshQr(ID_A));
+  await sock.hooks.onClose({ loggedOut: false, closeWhy: 'code=500' });
+  assert.strictEqual(mgr.freshQr(ID_A), null); // dead socket's QR never served
 });
 
 test('logged-out close wipes auth and terminals the session', async () => {

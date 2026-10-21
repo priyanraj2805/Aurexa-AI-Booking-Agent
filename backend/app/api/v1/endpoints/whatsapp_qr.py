@@ -1385,6 +1385,17 @@ async def qr_inbound(    payload: QrInboundPayload,
             release_message(f"qr:{payload.messageId}")
             raise
 
+        # WhatsApp payment link: attach a tappable Cashfree link when the
+        # engine asks for payment (widget uses the JS checkout instead).
+        try:
+            from app.services.payment_service import payment_service as _pay_svc
+
+            action = await _pay_svc.attach_whatsapp_payment_link(
+                db, org, org_config, chat_session, action
+            )
+        except Exception:
+            logger.warning("qr payment link attach failed", exc_info=True)
+
         # Off-topic strike accounting, applied here because the engine has
         # now returned and the reply is final.
         #

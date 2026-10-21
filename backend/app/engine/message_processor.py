@@ -17,6 +17,7 @@ from fastapi import BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from asgi_correlation_id.context import correlation_id
+from app.services.payment_service import payment_service
 
 def _is_out_of_scope_request(message: str, business_scope_text: str) -> tuple[bool, str | None]:
     """Pre-LLM guard — disabled in favor of strict LLM prompt BUSINESS SCOPE (dynamic, no hardcoding)."""
@@ -126,6 +127,28 @@ def _resolve_lock_slot_start_utc(raw_value: Optional[str]) -> Optional[datetime]
 def _clear_lock_slot_metadata(chat_session: ChatSessionState) -> None:
     chat_session.collected_data.pop("locked_slot_id", None)
     chat_session.collected_data.pop("locked_slot_start_utc", None)
+
+
+async def _payments_ready_for_org(
+    db: AsyncSession, org_id, org_config
+) -> tuple[bool, str]:
+    """(payments_ready, provider) for an org's booking payment rail.
+
+    Cashfree orgs are gated on their own credentials (kill switch + own keys
+    or platform fallback). Razorpay orgs stay gated on Razorpay Route
+    TRANSFER_READY. Fail closed either way.
+    """
+    provider = (getattr(org_config, "payment_provider", "razorpay") or "razorpay").lower()
+    try:
+        if provider == "cashfree":
+            from app.services.cashfree.org_creds import is_cashfree_usable
+
+            return bool(await is_cashfree_usable(db, org_id)), provider
+        from app.services.razorpay.routing import get_org_route_context
+
+        return bool((await get_org_route_context(db, org_id)).transfer_ready), provider
+    except Exception:
+        return False, provider
 
 
 def _normalize_meeting_mode(mode: MeetingMode | str | None) -> MeetingMode:
@@ -1109,10 +1132,34 @@ def build_finished_session_reply(chat_session, status: str) -> str:
             return f"Your booking is already confirmed for {when}. Let us know if you need anything else."
         return "Your booking is confirmed! You can say 'cancel my booking' or 'reschedule' anytime."
     if status == "CANCELLED":
-        return "Your previous booking was cancelled. Just say 'I want to book' to start a new one!"
+        return "Your previous booking was cancelled. Tap 'Book a new appointment' below to start a new one!"
     if status == "EXPIRED":
-        return "This session expired. Say 'I want to book' to start a new booking!"
+        return "This session expired. Tap 'Book a new appointment' below to start a new booking!"
     return "Is there anything else I can help you with?"
+
+
+# ── Rebook button (cancelled/expired sessions) ──
+# After a booking is cancelled (or the session expires) the widget must NOT
+# show a free-text "Your answer" card — just one button that restarts the
+# booking flow from the beginning.
+REBOOK_BUTTON_DIRECTIVE = "SHOW_REBOOK_BUTTON"
+REBOOK_BUTTON_LABEL = "Book a new appointment"
+REBOOK_BUTTON_PAYLOAD = "Book a new appointment"
+
+
+def rebook_button_field_meta() -> Dict[str, Any]:
+    return {"label": REBOOK_BUTTON_LABEL, "payload": REBOOK_BUTTON_PAYLOAD}
+
+
+def is_rebook_request_text(message_text: str) -> bool:
+    """True when the message asks to start a new booking (incl. the rebook
+    button payload). Keyword-based so it never depends on LLM classification."""
+    low = str(message_text or "").lower().strip()
+    if not low:
+        return False
+    if low == REBOOK_BUTTON_PAYLOAD.lower():
+        return True
+    return any(kw in low for kw in REBOOK_KEYWORDS)
 
 
 def _build_context_aware_response(
@@ -1922,6 +1969,17 @@ async def process_message(
         )
         return action
 
+    # ── Ask-AI mode (legacy path) ──
+    # Ask-AI sessions are Q&A-only: no field-collection UI, no OTP
+    # modals, no booking execution. Mirrors the LangGraph runtime's
+    # downgrade (see langgraph_orchestrator._BOOKING_DIRECTIVES).
+    _legacy_ask_mode = False
+    try:
+        _cd_legacy = chat_session.collected_data if isinstance(chat_session.collected_data, dict) else {}
+        _legacy_ask_mode = str(_cd_legacy.get("_mode") or "").strip().lower() == "ask"
+    except Exception:
+        _legacy_ask_mode = False
+
     # ── OTP Verification (channel-aware, email then phone) ─
     _phone_verified = getattr(chat_session, "phone_otp_verified", False)
     _needs_email_otp = require_otp and not chat_session.otp_verified
@@ -1932,6 +1990,7 @@ async def process_message(
         _needs_any_otp
         and chat_session.session_status == "ACTIVE"
         and (not chat_session.missing_fields or len(chat_session.missing_fields) == 0)
+        and not _legacy_ask_mode
     ):
         import re
 
@@ -2395,7 +2454,7 @@ async def process_message(
                 # fields are needed, handle complaints).
                 directive = next_step.get("directive", "TEXT_INPUT")
                 msg = llm_generated_msg
-    elif next_step["directive"] == "PROCESS_BOOKING":
+    elif next_step["directive"] == "PROCESS_BOOKING" and not _legacy_ask_mode:
         # A field the customer explicitly asked to change was just updated.
         # The LLM quite reasonably reads a complete, edited booking as
         # "PROCESS_BOOKING" — but that must NOT book it. The customer has not
@@ -2494,18 +2553,27 @@ async def process_message(
     try:
         _price_enabled2 = bool(getattr(org_config, "appointment_price_enabled", False))
         _price_paise2 = int(getattr(org_config, "appointment_price_paise", 0) or 0)
-        # Route readiness replaces the removed sub-merchant READY check.
-        from app.services.razorpay.routing import get_org_route_context as _grc2
-        _rzp_ready2 = (await _grc2(db, org.id)).transfer_ready
-        if _price_enabled2 and _price_paise2 > 0 and _rzp_ready2:
+        _currency2 = (getattr(org_config, "appointment_currency", "INR") or "INR").upper()
+        # Provider-aware readiness + catalog charge (same as booking gate).
+        _ready2, _provider2 = await payment_service.is_usable(db, org.id, org_config)
+        if _price_enabled2:
+            try:
+                _cd2 = chat_session.collected_data if isinstance(chat_session.collected_data, dict) else {}
+                _guid2 = getattr(chat_session, "unit_id", None) or _cd2.get("unit_id")
+                _gpid2 = getattr(chat_session, "provider_id", None) or _cd2.get("provider_id")
+                _price_paise2, _currency2 = await payment_service.resolve_charge(
+                    db, org.id, org_config, _guid2, _gpid2
+                )
+            except Exception:
+                pass
+        if _price_enabled2 and _price_paise2 > 0 and _ready2:
             from app.models.payment import PaymentAttempt as _PA2
             from sqlalchemy.future import select as _sel2
             _paid2 = (await db.execute(_sel2(_PA2).where(_PA2.session_id == chat_session.session_id, _PA2.org_id == org.id, _PA2.status == "paid", _PA2.amount_paise == _price_paise2))).scalars().first()
             if not _paid2 and directive == "REQUEST_CONFIRMATION":
-                _currency2 = getattr(org_config, "appointment_currency", "INR") or "INR"
                 directive = "REQUIRE_PAYMENT"
                 msg = f"Your appointment total is ₹{_price_paise2/100:.2f}. Please pay to confirm your booking."
-                field_meta = {"amount_paise": _price_paise2, "amount_display": f"₹{_price_paise2/100:.2f}", "currency": _currency2, "session_id": str(chat_session.session_id)}
+                field_meta = {"amount_paise": _price_paise2, "amount_display": f"₹{_price_paise2/100:.2f}", "currency": _currency2, "payment_provider": _provider2, "session_id": str(chat_session.session_id)}
     except Exception:
         pass
 
@@ -2780,6 +2848,34 @@ async def process_message(
             llm_generated_msg=msg,
             agent_name=persona.get("agent_name", "Booking Assistant"),
         )
+
+    # ── Ask-AI last-mile guard (legacy path) ──
+    # No booking-family directive may leave this function in ask mode,
+    # no matter which branch above produced it. Same rule as the LangGraph
+    # runtime (single source of truth). Lazy import: langgraph_orchestrator
+    # imports this module at top level, so a top-level import would cycle.
+    # The reply text passes through untouched.
+    if _legacy_ask_mode:
+        try:
+            from app.engine.langgraph_orchestrator import (
+                downgrade_ask_directive as _downgrade_ask,
+            )
+
+            _new_directive = _downgrade_ask(mode="ask", directive=directive)
+        except Exception:
+            _new_directive = directive
+        if _new_directive != directive:
+            try:
+                logger.info(
+                    "ask_mode.legacy_downgrade_booking_directive",
+                    extra={
+                        "session_id": str(chat_session.session_id),
+                        "directive": directive,
+                    },
+                )
+            except Exception:
+                pass
+            directive = _new_directive
 
     action = ActionPayload(
         message=msg, widget_directive=directive, field_meta=field_meta
@@ -3350,19 +3446,30 @@ async def _handle_booking_flow(
                 },
             )
 
-    # ── Razorpay Route payment gate ──
-    # TRANSFER_READY is the only state that allows payments. Anything else
-    # blocks paid booking (the legacy sub-merchant flow was removed).
+    # ── Payment gate (provider-aware) ──
+    # A Cashfree org is gated on its own credentials; a Razorpay org on
+    # Razorpay Route onboarding (TRANSFER_READY is the only allowed state).
+    # A booking payment is never requested unless some provider can collect.
     _price_enabled = bool(getattr(org_config, "appointment_price_enabled", False))
     _price_paise = int(getattr(org_config, "appointment_price_paise", 0) or 0)
-    from app.services.razorpay.routing import get_org_route_context as _grc
-    _route_ready = False
-    try:
-        _route_ready = (await _grc(db, org.id)).transfer_ready
-    except Exception:
-        _route_ready = False
-    _payment_required = _price_enabled and _price_paise > 0 and _route_ready
-    if _price_enabled and _price_paise > 0 and not _route_ready:
+    _gate_currency = (getattr(org_config, "appointment_currency", "INR") or "INR").upper()
+    _payments_ready, _payment_provider = await payment_service.is_usable(
+        db, org.id, org_config
+    )
+    if _price_enabled:
+        # Cashfree tenants price per department/member in the catalog.
+        # Razorpay orgs keep the flat price (unchanged behavior).
+        try:
+            _cd0 = chat_session.collected_data if isinstance(chat_session.collected_data, dict) else {}
+            _guid0 = getattr(chat_session, "unit_id", None) or _cd0.get("unit_id")
+            _gpid0 = getattr(chat_session, "provider_id", None) or _cd0.get("provider_id")
+            _price_paise, _gate_currency = await payment_service.resolve_charge(
+                db, org.id, org_config, _guid0, _gpid0
+            )
+        except Exception:
+            pass
+    _payment_required = _price_enabled and _price_paise > 0 and _payments_ready
+    if _price_enabled and _price_paise > 0 and not _payments_ready:
         return (
             "Online payments are temporarily unavailable for this business. Please try again later or contact the business directly.",
             "TEXT_INPUT",
@@ -3392,12 +3499,12 @@ async def _handle_booking_flow(
             )
             _pending = _pending_res.scalars().first()
             # If pending and not expired, keep payment pending; else request payment
-            _currency = getattr(org_config, "appointment_currency", "INR") or "INR"
+            _currency = _gate_currency
             _meta = {
                 "amount_paise": _price_paise,
                 "amount_display": f"₹{_price_paise/100:.2f}",
                 "currency": _currency,
-                "razorpay_connected": True,
+                "payment_provider": _payment_provider,
                 "session_id": str(chat_session.session_id),
             }
             if _pending:
@@ -3459,6 +3566,29 @@ CANCEL_KEYWORDS = [
     "revoke",
     "withdraw",
 ]
+
+# Reschedule persist pruning: ONLY slot/time + runtime keys are dropped so
+# name/email/phone (+dept/doctor/mode) survive a reload. The full
+# SESSION_RESET_REMOVE_KEYS includes identity keys — using it on reschedule
+# used to erase the customer from the DB row while memory kept going, so
+# any reload/rejoin re-asked for all details.
+RESCHEDULE_REMOVE_KEYS = (
+    "date",
+    "time",
+    "selected_slot_id",
+    "selected_slot_start_utc",
+    "locked_slot_id",
+    "locked_slot_start_utc",
+    "offered_time_slots",
+    "_provider_options",
+    "_active_path_effects",
+    "_otp_policy",
+    "_otp_phone_policy",
+    "_internal",
+    "_cancel_flow",
+    "active_directive_id",
+    crud_chat.RUNTIME_CHECKPOINT_KEY,
+)
 
 # Softer cancel-adjacent phrases — these need confirmation before cancelling
 CANCEL_SOFT_KEYWORDS = [
@@ -3859,11 +3989,23 @@ async def _handle_post_booking(
                     _aborted.widget_directive or "TEXT_INPUT",
                 )
                 return _aborted
-            # OTP-gated cancel: never delete on yes/no. Start the
-            # OTP-protected cancel flow (lookup → verification code → delete).
-            action = await _cancel_flow_mod2.start_cancel_flow(
-                db, chat_session, message_text, org_config=org_config
+            # Own confirmed booking → skip the contact lookup, send the
+            # cancel OTP straight away (code → cancelled). Anything else
+            # keeps the OTP-protected cancel flow (lookup → code → delete).
+            _own_b, _own_s = await _cancel_flow_mod2.find_own_upcoming_booking(
+                db, org, chat_session
             )
+            if _own_b is not None:
+                action = await _cancel_flow_mod2.start_cancel_otp_for_booking(
+                    db, org, org_config, chat_session, _own_b, _own_s,
+                    background_tasks,
+                )
+            else:
+                # OTP-gated cancel: never delete on yes/no. Start the
+                # OTP-protected cancel flow (lookup → verification code → delete).
+                action = await _cancel_flow_mod2.start_cancel_flow(
+                    db, chat_session, message_text, org_config=org_config
+                )
             await _save_transcript(
                 db, chat_session.session_id, _transcript_user_text, action.message,
                 action.widget_directive or "TEXT_INPUT",
@@ -3928,7 +4070,7 @@ async def _handle_post_booking(
 - If they want to CANCEL a confirmed booking: Ask them to confirm by saying "cancel my booking".
 - If they want to RESCHEDULE: Tell them to cancel first, then start a new booking.
 - If they say THANKS or GOODBYE: Respond warmly.
-- If session is CANCELLED/EXPIRED and they want to rebook: Encourage them to say "I want to book".
+- If session is CANCELLED/EXPIRED and they want to rebook: Tell them to tap 'Book a new appointment' below.
 - Keep responses to 1-2 sentences max.
 - Do NOT invent information you don't have.
 
@@ -3949,8 +4091,8 @@ Output ONLY valid JSON:"""
     except Exception:
         fallback = {
             "CONFIRMED": "Your booking is confirmed! You can say 'cancel my booking' to cancel, or start a new booking anytime.",
-            "CANCELLED": "Your previous booking was cancelled. Just say 'I want to book' to start a new one!",
-            "EXPIRED": "This session expired. Say 'I want to book' to start a new booking!",
+            "CANCELLED": "Your previous booking was cancelled. Tap 'Book a new appointment' below to start a new one!",
+            "EXPIRED": "This session expired. Tap 'Book a new appointment' below to start a new booking!",
         }
         msg = fallback.get(status, "Is there anything else I can help you with?")
 
@@ -3963,6 +4105,18 @@ Output ONLY valid JSON:"""
     ):
         msg = build_finished_session_reply(chat_session, status)
 
+    if status in ("CANCELLED", "EXPIRED"):
+        action = ActionPayload(
+            message=msg,
+            widget_directive=REBOOK_BUTTON_DIRECTIVE,
+            field_meta=rebook_button_field_meta(),
+            is_terminal=False,
+        )
+        await _save_transcript(
+            db, chat_session.session_id, _transcript_user_text, msg,
+            REBOOK_BUTTON_DIRECTIVE,
+        )
+        return action
     action = ActionPayload(
         message=msg, widget_directive="TEXT_INPUT", is_terminal=False
     )
@@ -4111,9 +4265,11 @@ async def maybe_reschedule_dup_booking(
     chat_session.otp_verified = False
     chat_session.phone_otp_verified = False
     chat_session.missing_fields = ["date", "time"]
-    from app.engine.cancel_flow import _persist_session, SESSION_RESET_REMOVE_KEYS
+    # Persist WITHOUT wiping identity (see RESCHEDULE_REMOVE_KEYS): only
+    # slot/time + runtime keys go, so name/email/phone survive a reload.
+    from app.engine.cancel_flow import _persist_session
 
-    await _persist_session(db, chat_session, remove_keys=SESSION_RESET_REMOVE_KEYS)
+    await _persist_session(db, chat_session, remove_keys=RESCHEDULE_REMOVE_KEYS)
     if background_tasks:
         log_audit_event(
             background_tasks,
@@ -4175,9 +4331,11 @@ async def _reschedule_booking(
     chat_session.otp_verified = False
     chat_session.phone_otp_verified = False
     chat_session.missing_fields = ["date", "time"]
-    from app.engine.cancel_flow import _persist_session, SESSION_RESET_REMOVE_KEYS
+    # Persist WITHOUT wiping identity (see RESCHEDULE_REMOVE_KEYS): only
+    # slot/time + runtime keys go, so name/email/phone survive a reload.
+    from app.engine.cancel_flow import _persist_session
 
-    await _persist_session(db, chat_session, remove_keys=SESSION_RESET_REMOVE_KEYS)
+    await _persist_session(db, chat_session, remove_keys=RESCHEDULE_REMOVE_KEYS)
 
     if cancelled:
         if background_tasks:
@@ -4990,6 +5148,7 @@ async def _execute_booking(
         _pay_amount = None
         _pay_currency = None
         _pay_status = "not_required"
+        _paid3 = None
         # Whether the admin has this org priced. Used both to decide whether a
         # payment is expected at all and, on failure, to avoid defaulting to
         # "not_required" for an org that DOES require payment.
@@ -4998,25 +5157,32 @@ async def _execute_booking(
             _price_enabled3 = bool(getattr(org_config, "appointment_price_enabled", False))
             _price_paise3 = int(getattr(org_config, "appointment_price_paise", 0) or 0)
             _price_expected = bool(_price_enabled3 and _price_paise3 > 0)
-            from app.services.razorpay.routing import get_org_route_context as _grc3
-            _route_ready3 = False
-            try:
-                _route_ready3 = (await _grc3(db, org.id)).transfer_ready
-            except Exception:
-                _route_ready3 = False
-            _paid3 = None
-            if _price_expected and _route_ready3:
+            # Provider-aware collection readiness: Razorpay orgs need Route
+            # TRANSFER_READY; Cashfree orgs need usable keys (own or platform).
+            _payments_ready3, _pay_provider3 = await payment_service.is_usable(
+                db, org.id, org_config
+            )
+            _paid3 = None  # (initialized to None above; reset per booking attempt)
+            if _price_expected and _payments_ready3:
                 from app.models.payment import PaymentAttempt as _PA3
                 from sqlalchemy.future import select as _sel3
                 _paid3 = (await db.execute(_sel3(_PA3).where(_PA3.session_id == chat_session.session_id, _PA3.org_id == org.id, _PA3.status == "paid"))).scalars().first()
             if _paid3:
-                _pay_order_id = _paid3.razorpay_order_id
-                _pay_payment_id = _paid3.razorpay_payment_id
+                _paid3_provider = (getattr(_paid3, "provider", None) or "razorpay").lower()
+                if _paid3_provider == "cashfree":
+                    # Booking carries Razorpay-only reference columns; a
+                    # Cashfree order id must never be stored in them. The
+                    # attempt->booking link below keeps full traceability.
+                    _pay_order_id = None
+                    _pay_payment_id = None
+                else:
+                    _pay_order_id = _paid3.razorpay_order_id or getattr(_paid3, "provider_order_id", None)
+                    _pay_payment_id = _paid3.razorpay_payment_id or getattr(_paid3, "provider_payment_id", None)
                 _pay_amount = _paid3.amount_paise
                 _pay_currency = _paid3.currency
             _pay_status = resolve_payment_snapshot_status(
                 price_expected=_price_expected,
-                route_ready=_route_ready3,
+                route_ready=_payments_ready3,
                 paid_found=bool(_paid3),
             )
         except Exception:
@@ -5138,6 +5304,15 @@ async def _execute_booking(
         chat_session.session_status = "CONFIRMED"
         _clear_lock_slot_metadata(chat_session)
         await crud_chat.update_chat_session(db, chat_session.session_id, chat_session)
+
+        # Link the paid attempt to this booking (any provider). Gives full
+        # payment->booking traceability in Recent transactions.
+        if _paid3 is not None and not getattr(_paid3, "booking_id", None):
+            try:
+                _paid3.booking_id = booking.id
+                await db.flush()
+            except Exception:
+                logger.warning("link paid attempt to booking failed", exc_info=True)
 
         from app.core.org_notify import notify_org
 
@@ -5555,8 +5730,6 @@ def _build_confirmation_summary(
         lines.extend(["", "\U0001F552 *When:* " + " at ".join(when_bits)])
     lines.extend(
         [
-            "",
-            "Is everything correct?",
             "",
             "Tap *Confirm* to book, *Edit* to change something, or *Cancel* to stop.",
         ]

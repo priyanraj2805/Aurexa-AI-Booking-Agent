@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi import BackgroundTasks
-from sqlalchemy import func
+from sqlalchemy import delete as _delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -17,6 +17,7 @@ from app.schemas.agent import ActionPayload, ChatSessionState
 from app.crud import chat as crud_chat
 from app.crud import otp as otp_crud
 from app.core import mail as mailer
+from app.services.payment_service import payment_service
 
 logger = logging.getLogger(__name__)
 
@@ -870,6 +871,69 @@ async def _find_past_booking(
     return None, None
 
 
+async def find_own_upcoming_booking(
+    db: AsyncSession, org: Organization, chat_session: ChatSessionState
+) -> Tuple[Optional[Booking], Optional[datetime]]:
+    """This session's own upcoming booking — no questions asked.
+
+    1. Direct hit: Booking.session_id == this session (upcoming only).
+    2. Fallback: the session's collected email/phone via _find_upcoming_booking.
+    Only CONFIRMED sessions qualify. Returns (None, None) otherwise.
+    """
+    try:
+        if str(getattr(chat_session, "session_status", "") or "").upper() != "CONFIRMED":
+            return None, None
+        now = datetime.now(timezone.utc)
+        try:
+            _sid = uuid.UUID(str(chat_session.session_id))
+        except Exception:
+            _sid = None
+        if _sid is not None:
+            rows = (
+                await db.execute(
+                    select(Booking, TimeSlot.start_time)
+                    .join(TimeSlot, Booking.slot_id == TimeSlot.id)
+                    .where(
+                        Booking.org_id == org.id,
+                        Booking.session_id == _sid,
+                        TimeSlot.start_time >= now,
+                    )
+                    .order_by(TimeSlot.start_time.asc())
+                )
+            ).all()
+            if rows:
+                return rows[0][0], rows[0][1]
+        cd = chat_session.collected_data if isinstance(chat_session.collected_data, dict) else {}
+        _email = str(cd.get("email") or "").strip()
+        if _email:
+            return await _find_upcoming_booking(db, org, "email", _email)
+        _phone = re.sub(r"\D", "", str(cd.get("phone") or ""))
+        if len(_phone) >= 7:
+            return await _find_upcoming_booking(db, org, "phone", _phone)
+    except Exception:
+        logger.warning("find_own_upcoming_booking failed", exc_info=True)
+    return None, None
+
+
+async def start_cancel_otp_for_booking(
+    db: AsyncSession,
+    org: Organization,
+    org_config: OrgConfig,
+    chat_session: ChatSessionState,
+    booking: Booking,
+    start_time: Optional[datetime],
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> ActionPayload:
+    """Own-booking shortcut: skip the contact lookup, send the cancel OTP now.
+
+    Entering the code cancels via the normal OTP stage. When the admin
+    disabled all OTP, _send_cancel_otp executes the cancellation directly.
+    """
+    return await _send_cancel_otp(
+        db, org, org_config, chat_session, booking, start_time, background_tasks
+    )
+
+
 async def _fetch_booking(
     db: AsyncSession, org: Organization, booking_id: str
 ) -> Tuple[Optional[Booking], Optional[datetime]]:
@@ -1576,6 +1640,7 @@ async def _handle_cancel_resend(
     return action
 
 
+
 async def _execute_cancellation(
     db: AsyncSession,
     org: Organization,
@@ -1707,6 +1772,31 @@ async def _execute_cancellation(
 
     cancelled = await cancel_booking(db, booking_id=booking_id, org_id=org.id)
 
+    # Auto-refund if eligible (Cashfree only, same-day excluded)
+    try:
+        _refund_result = await payment_service.process_refund(
+            db,
+            org,
+            booking_id=booking_id,
+            session_id=session_id,
+            local_date=details.get("date") or "",
+        )
+        if _refund_result.get("refunded"):
+            logger.info(
+                "auto-refund succeeded booking=%s amount=%s reason=%s",
+                booking_id,
+                _refund_result.get("amount_display"),
+                _refund_result.get("reason"),
+            )
+        elif _refund_result.get("reason"):
+            logger.debug(
+                "auto-refund skipped booking=%s: %s",
+                booking_id,
+                _refund_result.get("reason"),
+            )
+    except Exception as refund_exc:
+        logger.warning("auto-refund wrapper failed booking=%s: %s", booking_id, refund_exc)
+
     # If the booking lived on a different session (book in A, cancel in B via
     # WhatsApp lookup), mark the ORIGINAL session CANCELLED too. Otherwise it
     # stays CONFIRMED with no Booking row — invisible in both bookings lists.
@@ -1790,8 +1880,6 @@ async def _execute_cancellation(
     # the session to ACTIVE when a new booking is requested.
     keep_keys = {
         crud_chat.FIELD_DEFINITIONS_SNAPSHOT_KEY,
-        "date",
-        "time",
     }
     collected = dict(chat_session.collected_data or {})
     pruned = {
@@ -1812,6 +1900,19 @@ async def _execute_cancellation(
     # Keep the deleted booking's id so the frontend can highlight this row
     # when arriving from a booking_cancelled notification (?highlight=booking_id).
     pruned["cancelled_booking_id"] = str(booking_id)
+    # ── Clean up stale payment attempts ──
+    # The cancelled booking's paid attempt must NOT carry over to a new
+    # booking on the same session. Delete paid attempts so the new booking
+    # requires fresh payment.
+    from app.models.payment import PaymentAttempt as _PA
+    await db.execute(
+        _delete(_PA).where(
+            _PA.session_id == chat_session.session_id,
+            _PA.org_id == org.id,
+            _PA.status == "paid",
+        )
+    )
+    await db.flush()
     chat_session.collected_data = {
         k: v for k, v in pruned.items() if v is not None
     }
@@ -1844,10 +1945,16 @@ async def _execute_cancellation(
     message = (
         f"*{slot_label}* has been cancelled, and the slot is now free. {footer}"
     )
+    # One rebook button, no free-text card: tapping it restarts booking fresh.
+    from app.engine.message_processor import (
+        REBOOK_BUTTON_DIRECTIVE as _REBOOK_DIRECTIVE,
+        rebook_button_field_meta as _rebook_meta,
+    )
+
     action = ActionPayload(
         message=message,
-        widget_directive=CANCELLED_DIRECTIVE,
-        field_meta={"booking": details},
+        widget_directive=_REBOOK_DIRECTIVE,
+        field_meta={**{"booking": details}, **_rebook_meta()},
         is_terminal=True,
     )
     await _save_transcript(
@@ -1855,7 +1962,7 @@ async def _execute_cancellation(
         session_id,
         user_message or "[verification code entered]",
         action.message,
-        CANCELLED_DIRECTIVE,
+        _REBOOK_DIRECTIVE,
         intent="CANCEL_BOOKING",
     )
     logger.info(

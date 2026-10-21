@@ -3,6 +3,7 @@ from enum import Enum
 from sqlalchemy import (
     Column,
     String,
+    Text,
     Boolean,
     Integer,
     ForeignKey,
@@ -197,3 +198,13 @@ class OrgConfig(Base):
     appointment_price_paise = Column(Integer, nullable=False, default=0, server_default="0")
     appointment_currency = Column(String(10), nullable=False, default="INR", server_default="INR")
     appointment_price_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
+
+    # Payment provider selection + per-org Cashfree credentials (Fernet
+    # encrypted at rest; see app.core.credential_crypto). When provider is
+    # "cashfree" and keys are present, booking payments run on the org's OWN
+    # Cashfree account (money settles straight into their bank). Otherwise
+    # the platform account from settings is used.
+    payment_provider = Column(String(20), nullable=False, default="razorpay", server_default="razorpay")
+    cashfree_app_id_enc = Column(Text, nullable=True)
+    cashfree_secret_enc = Column(Text, nullable=True)
+    cashfree_mode = Column(String(10), nullable=False, default="test", server_default="test")  # test|live
