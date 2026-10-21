@@ -135,9 +135,12 @@ Live URLs (unchanged — the named tunnel keeps your domains):
   Cashfree webhook : https://api.dotstark.tech/api/v1/widget/payment/cashfree/webhook
 
 CUTOVER REMINDER:
-  Stop the tunnel connector on the OLD machine, otherwise Cloudflare
-  load-balances between both and half the traffic goes to the laptop:
+  Stop the tunnel connector AND the WhatsApp gateway on the OLD machine.
+  Otherwise Cloudflare load-balances between both, and WhatsApp (Baileys)
+  rejects the second connection of the same device ("conflict / replaced"),
+  so messages get dropped:
       (old machine)  docker compose stop cloudflared
+      (old machine)  docker compose stop wa-gateway
 
 Common commands:
   logs        docker compose logs -f backend

@@ -202,23 +202,29 @@ Ye script karta hai:
 
 **Dono machines ek saath tunnel na chalaayein** — warna Cloudflare load-balance karega aur aadha traffic laptop pe jayega.
 
-### 4.1 Laptop pe: local tunnel connector band karo
+### 4.1 Laptop pe: local tunnel connector + WhatsApp gateway band karo
 ```powershell
 cd C:\Users\priyanshuraj\OneDrive\Desktop\dotstark\booking_agent
 docker compose stop cloudflared
+docker compose stop wa-gateway
 ```
+> ⚠️ **`wa-gateway` BHI band karna zaroori hai.** WhatsApp (Baileys) ek device se sirf
+> EK active connection allow karta hai. Dono jagah same session chalane par
+> `tag: conflict, type: replaced` ka loop chalta hai — dono ek dusre ko baar-baar
+> kick karte hain aur messages miss hote hain. Band karne ke baad 1-2 minute
+> lagte hain WhatsApp ko purana session release karne me.
 
-### 4.2 VM pe: tunnel confirm
+### 4.2 VM pe: confirm
 ```bash
 cd ~/BookingChatBot
-docker compose logs --tail 30 cloudflared
+docker compose logs --tail 30 cloudflared                        # "Registered tunnel connection" x4
+docker compose logs --since 60s wa-gateway | grep -c conflict    # 0 hona chahiye
 ```
-> "Registered tunnel connection" lines dikhni chahiye (multiple conns = multiple replicas)
 
 ### 4.3 Verify (browser + curl)
 ```
 https://dotstark.tech              → tenant dashboard khuli
-https://api.dotstark.tech/health   → {"status":"healthy",...}
+https://api.dotstark.tech/health   → {"status":"ok",...}
 https://super.dotstark.tech        → super admin
 ```
 
@@ -226,8 +232,12 @@ https://super.dotstark.tech        → super admin
 ```bash
 # VM pe
 docker compose logs -f backend
+docker compose logs -f gateway     # nginx access log = proof ki kaun serve kar raha hai
 ```
-Ab laptop se (ya kisi bhi WhatsApp number se) **WhatsApp message bhejo** → reply VM se aana chahiye.
+Ab **WhatsApp message bhejo** → reply VM se aana chahiye.
+
+**Proof ki traffic VM pe ja rahi hai:** VM ke `gateway` container ke nginx access log me
+`"GET /api/v1/..." 200 ... "https://dotstark.tech/dashboard/..."` dikhega.
 
 Phir browser me:
 - Dashboard → naya booking create karo (Cashfree live payment)
