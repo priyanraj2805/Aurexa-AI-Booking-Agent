@@ -40,14 +40,30 @@ echo "docker: $(docker --version)"
 # 2. Clone / update the code
 # ------------------------------------------------------------
 say "Fetching the code ($BRANCH)"
-if [ ! -d "$REPO_DIR/.git" ]; then
+# The repository is PRIVATE, so a bare `git clone` on the VM needs GitHub
+# credentials. The laptop already has them, so the committed tree is
+# exported and uploaded instead - no token ever lands on the VM.
+if [ -f /tmp/repo.tar.gz ]; then
+  say "Unpacking the code from /tmp/repo.tar.gz"
+  rm -rf "$REPO_DIR"
+  mkdir -p "$REPO_DIR"
+  tar -xzf /tmp/repo.tar.gz -C "$REPO_DIR"
+  rm -f /tmp/repo.tar.gz
+elif [ ! -d "$REPO_DIR/.git" ]; then
   git clone https://github.com/ManojDS17/BookingChatBot.git "$REPO_DIR"
 fi
 cd "$REPO_DIR"
-git fetch --all --tags
-git checkout "$BRANCH"
-git pull --ff-only origin "$BRANCH" || warn "could not fast-forward - continuing with what is on disk"
-git log --oneline -1
+# If a .git came along (or the clone worked), try to move forward. A
+# failure here is not fatal - the tree on disk is what runs.
+if [ -d .git ]; then
+  git fetch --all --tags 2>/dev/null || warn "git fetch failed (no credentials?) - using the uploaded tree"
+  git checkout "$BRANCH" 2>/dev/null || true
+  git pull --ff-only origin "$BRANCH" 2>/dev/null || warn "git pull failed - using the uploaded tree"
+  git log --oneline -1 || true
+else
+  echo "  (no git metadata - running the uploaded tree)"
+fi
+ls -1 | head -12
 
 # ------------------------------------------------------------
 # 3. Secrets (gitignored - they must be uploaded)

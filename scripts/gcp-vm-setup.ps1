@@ -204,6 +204,17 @@ if ($dump) { Push $dump.Name "/tmp/$($dump.Name)" } else { Warn "no db-dump-*.du
 if (Test-Path "wa-auth.tar.gz") { Push "wa-auth.tar.gz" "/tmp/wa-auth.tar.gz" } else { Warn "no wa-auth.tar.gz found" }
 if (Test-Path "app-images.tar") { Push "app-images.tar" "/tmp/app-images.tar" } else { Warn "no app-images.tar found - the VM will build (slower, needs RAM). Run scripts/gcp-images-export.ps1" }
 
+# The repository is PRIVATE: a bare `git clone` on the VM would need GitHub
+# credentials. Export the committed tree instead - no token on the VM.
+Step "Exporting the repository (private repo - shipped as a tarball)"
+$repoTar = "repo.tar.gz"
+if (Test-Path $repoTar) { Remove-Item $repoTar -Force }
+git archive --format=tar.gz --output=$repoTar HEAD
+if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
+$repoMb = [math]::Round((Get-Item $repoTar).Length / 1MB, 1)
+Ok "repo.tar.gz ($repoMb MB) from $(git rev-parse --short HEAD)"
+Push $repoTar "/tmp/repo.tar.gz"
+
 # ------------------------------------------------------------
 # 5. Run the setup on the VM
 # ------------------------------------------------------------
