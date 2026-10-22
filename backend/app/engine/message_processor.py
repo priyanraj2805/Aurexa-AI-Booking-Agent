@@ -3138,6 +3138,38 @@ def _verified_key_matches_context(stored_key: str, context_key: str) -> bool:
     return stored_phone == context_phone
 
 
+def resolve_payment_gate(
+    *,
+    price_enabled: bool,
+    price_paise: int,
+    payments_ready: bool,
+) -> Tuple[bool, str]:
+    """(payment_required, user_notice) for the booking gate.
+
+    `payment_required` - the customer must pay before the booking is made.
+    `user_notice` - a line to show the customer, or "" when there is
+    nothing to say.
+
+    A tenant with a price configured but no provider that can collect it
+    yet (their account is not connected / not live) must STILL get their
+    appointment - the money is collected offline. This used to return a
+    hard "Online payments are temporarily unavailable" notice that blocked
+    the booking and showed the customer the business's own payment
+    misconfiguration. The WhatsApp path never had that gate, so the two
+    channels disagreed about whether the same tenant could take a booking.
+
+    Extracted so the decision is testable on its own, the same way
+    `resolve_payment_snapshot_status` was.
+    """
+    if not price_enabled or int(price_paise or 0) <= 0:
+        return False, ""
+    if not payments_ready:
+        # Priced, but nothing can collect the money right now. Book the
+        # appointment; the business collects it offline. Never a notice.
+        return False, ""
+    return True, ""
+
+
 async def _handle_booking_flow(
     db: AsyncSession,
     org: Organization,
@@ -3468,12 +3500,31 @@ async def _handle_booking_flow(
             )
         except Exception:
             pass
-    _payment_required = _price_enabled and _price_paise > 0 and _payments_ready
+    _payment_required, _payment_notice = resolve_payment_gate(
+        price_enabled=_price_enabled,
+        price_paise=_price_paise,
+        payments_ready=_payments_ready,
+    )
     if _price_enabled and _price_paise > 0 and not _payments_ready:
-        return (
-            "Online payments are temporarily unavailable for this business. Please try again later or contact the business directly.",
-            "TEXT_INPUT",
-            None,
+        # The tenant HAS a price configured, but no provider can collect it
+        # right now (their account is not connected / not live yet).
+        #
+        # This used to return a hard "Online payments are temporarily
+        # unavailable" message, which BLOCKED the booking and showed the
+        # customer the business's payment misconfiguration. The WhatsApp
+        # path has no such gate, so the two channels disagreed.
+        #
+        # Correct behaviour: book the appointment normally. The payment
+        # snapshot resolver already treats "priced but provider not ready"
+        # as a real business state (not_required - nothing owed in the
+        # payment system, the business collects it offline), not a failure.
+        logger.info(
+            "payment provider not ready; booking without an online payment",
+            extra={
+                "org_id": str(org.id),
+                "provider": _payment_provider,
+                "amount_paise": _price_paise,
+            },
         )
     if _payment_required:
         from app.models.payment import PaymentAttempt
