@@ -245,9 +245,11 @@ export function BookingDialog({
                 </button>
               ))}
             </div>
-            <p className="text-[11px] text-muted-foreground px-1">
-              {event.meeting_type_snapshot === "ONLINE" ? "Online: Attended auto-marks when Join is clicked; otherwise manual. Offline: Admin marks after appointment." : "Offline: Admin marks attendance after the in-person appointment."}
-            </p>
+            {event.meeting_type_snapshot === "ONLINE" && (
+              <p className="text-[11px] text-muted-foreground px-1">
+                Joining the meeting marks attendance automatically.
+              </p>
+            )}
           </div>
 
           {/* Core Info */}
