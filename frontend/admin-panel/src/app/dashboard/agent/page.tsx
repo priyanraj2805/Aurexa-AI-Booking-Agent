@@ -597,7 +597,7 @@ export default function AgentCorePage() {
     }
   }, [config]);
 
-  // ── Unsaved changes guard ────────────────────────
+  // ── Unsaved changes guard (sidebar navigation) ──
   const router = useRouter();
   const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
   const [pendingUrl, setPendingUrl] = useState<string | null>(null);
@@ -658,16 +658,6 @@ export default function AgentCorePage() {
     }
     return false;
   }, [config, fieldDefs, persona, brandColor, widgetPosition, borderRadius, darkMode, showBranding, businessName, logoUrl, requireOtp, requirePhoneOtp, reminder24h, reminder1h, quickPrompts, meetingMode, allowHybridSelection, meetingProviderDefault]);
-
-  useEffect(() => {
-    if (!isDirty) return;
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = "";
-    };
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [isDirty]);
 
   useEffect(() => {
     if (!isDirty) return;
