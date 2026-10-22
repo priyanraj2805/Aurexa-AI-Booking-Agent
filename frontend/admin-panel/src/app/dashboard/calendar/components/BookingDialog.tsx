@@ -1,6 +1,6 @@
 "use client";
 
-import { X, User, Mail, Phone, Clock, Calendar as CalendarIcon, Info, ShieldCheck, Video } from "lucide-react";
+import { X, User, Mail, Phone, Clock, Calendar as CalendarIcon, Info, ShieldCheck, Video, Building2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -17,6 +17,8 @@ interface CalendarEvent {
   meeting_link_status?: string | null;
   meeting_link_url?: string | null;
   meeting_link_provider?: string | null;
+  unit_name?: string | null;
+  provider_name?: string | null;
 }
 
 function fmtTime(iso: string): string {
@@ -30,13 +32,11 @@ function fmtDateTime(iso: string): string {
   });
 }
 
-// Labels for the fields the calendar shows under "Additional Data".
-// The generic snake_case -> Title Case conversion produced awkward labels
-// ("Unit Name", "Provider Name") for what are really the department and the
-// team member.
+// Labels for the tenant's own custom booking fields. The generic
+// snake_case -> Title Case conversion produced awkward labels; these are the
+// ones worth naming properly. (The department and the doctor are not here -
+// they have their own cards, see event.unit_name / event.provider_name.)
 const FIELD_LABELS: Record<string, string> = {
-  unit_name: "Department",
-  provider_name: "Doctor",
   organisation_name: "Organisation",
 };
 
@@ -154,6 +154,24 @@ export function BookingDialog({
               </div>
               <div className="text-sm font-semibold">
                 {event.slot_start ? fmtTime(event.slot_start) : "—"}
+              </div>
+            </div>
+            <div className="bg-secondary/30 rounded-xl p-4 border border-border/50">
+              <div className="flex items-center gap-2 text-muted-foreground mb-1">
+                <Building2 className="size-3.5" />
+                <span className="text-[10px] font-semibold uppercase tracking-wider">Department</span>
+              </div>
+              <div className="text-sm font-semibold">
+                {event.unit_name || "—"}
+              </div>
+            </div>
+            <div className="bg-secondary/30 rounded-xl p-4 border border-border/50">
+              <div className="flex items-center gap-2 text-muted-foreground mb-1">
+                <User className="size-3.5" />
+                <span className="text-[10px] font-semibold uppercase tracking-wider">Doctor</span>
+              </div>
+              <div className="text-sm font-semibold">
+                {event.provider_name || "—"}
               </div>
             </div>
           </div>

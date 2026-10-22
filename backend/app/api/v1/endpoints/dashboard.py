@@ -31,7 +31,10 @@ def _parse_time(value: Optional[str]) -> Optional[time]:
 # So this is an ALLOW-list: the department, the team member and the
 # tenant's own custom booking fields - nothing else. A new internal field
 # can never reach the UI by accident.
-_CALENDAR_EXTRA_FIELDS = frozenset({"unit_name", "provider_name"})
+# The department and the team member are FIRST-CLASS fields on the event
+# (resolved from the booking's unit_id / provider_id), so the dialog shows
+# them in their own cards - not repeated in "Additional Data".
+_CALENDAR_EXTRA_FIELDS = frozenset()
 
 # The core booking fields are already shown in the dialog's own cards
 # (customer, email, phone, date, time), so they are not repeated here.
