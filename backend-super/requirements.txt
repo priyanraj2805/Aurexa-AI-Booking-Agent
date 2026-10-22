@@ -4,6 +4,11 @@ pydantic>=2.7.0
 pydantic-settings>=2.2.1
 email-validator>=2.1.0
 sqlalchemy>=2.0.29
+# SQLAlchemy's asyncio extension needs greenlet at import time. Without it
+# the container crash-loops on startup with:
+#   ImportError: The SQLAlchemy asyncio module requires that the Python
+#   'greenlet' library is installed.
+greenlet>=3.0
 asyncpg>=0.29.0
 python-dotenv>=1.0.1
 passlib[bcrypt]>=1.7.4
