@@ -362,6 +362,24 @@ jobs:
 
           trap - ERR
 
+          # Housekeeping: every release leaves a staging, backup and rollback
+          # directory behind (~50 MB each). Keep the three newest of each so a
+          # rollback is still possible, and drop the rest - otherwise a busy
+          # branch fills the 40 GB disk.
+          for prefix in bookingchatbot-staging bookingchatbot-backup \
+            bookingchatbot-rollback
+          do
+            mapfile -t old_dirs < <(
+              find "/home/${VM_USER}" -maxdepth 1 -type d -name "${prefix}-*" \
+                -printf '%T@ %p\n' 2>/dev/null | sort -rn | tail -n +4 \
+                | cut -d' ' -f2-
+            )
+            for dir in "${old_dirs[@]:-}"; do
+              [ -n "$dir" ] || continue
+              rm -rf "$dir"
+            done
+          done
+
           echo "Application deployment completed for $RELEASE_ID."
           echo "Code backup: $BACKUP/code.tar.gz"
           echo "Database dump: $BACKUP/postgres.sql"
