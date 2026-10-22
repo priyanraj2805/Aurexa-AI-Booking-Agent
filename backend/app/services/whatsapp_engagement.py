@@ -25,8 +25,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select as _sel
 
 from app.models.whatsapp_engagement import (
-    BookingFunnelEvent,
-    BookingLead,
     BookingWaitlist,
     WhatsAppDeliveryLog,
     WhatsAppOptOut,
@@ -228,98 +226,6 @@ def detect_language(text: str) -> str:
     return max(counts.items(), key=lambda kv: kv[1])[0]
 
 
-# ── Lead capture ──────────────────────────────────────────────────────
-async def capture_lead(
-    db: AsyncSession,
-    org_id: Any,
-    *,
-    session_id: Any = None,
-    phone: str = "",
-    name: str = "",
-    email: str = "",
-    channel: str = "whatsapp",
-    intent: str = "book",
-    notes: str = "",
-    context: Optional[dict] = None,
-) -> Optional[BookingLead]:
-    """Record (or refresh) a lead for a conversation.
-
-    A session is the lead key: one enquiry per session, refreshed as more
-    detail arrives. Never raises.
-    """
-    try:
-        existing = None
-        if session_id:
-            existing = (
-                await db.execute(
-                    _sel(BookingLead).where(
-                        BookingLead.session_id == session_id,
-                        BookingLead.org_id == org_id,
-                    )
-                )
-            ).scalars().first()
-        if existing is not None:
-            if phone:
-                existing.phone = phone
-            if name:
-                existing.name = name
-            if email:
-                existing.email = email
-            if notes:
-                existing.notes = notes
-            if context:
-                existing.context = context
-            await db.commit()
-            return existing
-        lead = BookingLead(
-            org_id=org_id,
-            session_id=session_id,
-            phone=phone or None,
-            name=name or None,
-            email=email or None,
-            channel=channel,
-            intent=intent,
-            notes=notes or None,
-            context=context or None,
-            status="new",
-        )
-        db.add(lead)
-        await db.commit()
-        return lead
-    except Exception:
-        logger.warning("lead capture failed", exc_info=True)
-        try:
-            await db.rollback()
-        except Exception:
-            pass
-        return None
-
-
-async def mark_lead_converted(
-    db: AsyncSession, org_id: Any, session_id: Any, booking_id: Any = None
-) -> None:
-    try:
-        lead = (
-            await db.execute(
-                _sel(BookingLead).where(
-                    BookingLead.session_id == session_id,
-                    BookingLead.org_id == org_id,
-                )
-            )
-        ).scalars().first()
-        if lead is not None:
-            lead.status = "converted"
-            if booking_id is not None:
-                lead.booking_id = booking_id
-            await db.commit()
-    except Exception:
-        logger.warning("lead convert mark failed", exc_info=True)
-        try:
-            await db.rollback()
-        except Exception:
-            pass
-
-
 # ── Waitlist ──────────────────────────────────────────────────────────
 async def join_waitlist(
     db: AsyncSession,
@@ -387,75 +293,6 @@ async def waiting_entries(db: AsyncSession, org_id: Any) -> List[BookingWaitlist
         return []
 
 
-# ── Funnel ────────────────────────────────────────────────────────────
-async def track_step(
-    db: AsyncSession,
-    org_id: Any,
-    step: str,
-    *,
-    session_id: Any = None,
-    channel: str = "whatsapp",
-    outcome: str = "entered",
-) -> None:
-    """Record a funnel step. Best-effort, never raises."""
-    try:
-        db.add(
-            BookingFunnelEvent(
-                org_id=org_id,
-                session_id=session_id,
-                channel=channel,
-                step=step,
-                outcome=outcome,
-            )
-        )
-        await db.commit()
-    except Exception:
-        logger.debug("funnel track failed", exc_info=True)
-        try:
-            await db.rollback()
-        except Exception:
-            pass
-
-
-async def funnel_breakdown(
-    db: AsyncSession, org_id: Any, *, days: int = 30, channel: Optional[str] = None
-) -> Dict[str, Any]:
-    """Per-step entered/completed counts for the dashboard."""
-    since = datetime.now(timezone.utc) - timedelta(days=max(1, int(days or 30)))
-    try:
-        conds = [
-            BookingFunnelEvent.org_id == org_id,
-            BookingFunnelEvent.created_at >= since,
-        ]
-        if channel:
-            conds.append(BookingFunnelEvent.channel == channel)
-        rows = (
-            await db.execute(
-                _sel(
-                    BookingFunnelEvent.step,
-                    BookingFunnelEvent.outcome,
-                    func.count(BookingFunnelEvent.id),
-                )
-                .where(*conds)
-                .group_by(BookingFunnelEvent.step, BookingFunnelEvent.outcome)
-            )
-        ).all()
-        steps: Dict[str, Dict[str, int]] = {}
-        for step, outcome, count in rows:
-            entry = steps.setdefault(str(step), {"entered": 0, "completed": 0, "abandoned": 0})
-            key = str(outcome) if str(outcome) in entry else "entered"
-            entry[key] = int(count or 0)
-        for entry in steps.values():
-            started = entry.get("entered", 0)
-            completed = entry.get("completed", 0)
-            entry["conversion"] = round(completed / started, 3) if started else 0.0
-        return {"days": days, "channel": channel, "steps": steps}
-    except Exception:
-        logger.warning("funnel breakdown failed", exc_info=True)
-        return {"days": days, "channel": channel, "steps": {}}
-
-
-# ── Delivery log ──────────────────────────────────────────────────────
 async def log_delivery(
     db: AsyncSession,
     org_id: Any,

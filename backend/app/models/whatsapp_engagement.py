@@ -53,44 +53,6 @@ class WhatsAppOptOut(Base):
     )
 
 
-class BookingLead(Base):
-    """A warm enquiry that is not (yet) a confirmed booking.
-
-    Most WhatsApp conversations never reach a booking. Without this the
-    demand is silently lost — the customer asked, the AI answered, and
-    nobody in the business ever saw it.
-    """
-
-    __tablename__ = "booking_leads"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    org_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("organizations.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    session_id = Column(UUID(as_uuid=True), nullable=True, index=True)
-    phone = Column(String(32), nullable=True, index=True)
-    name = Column(String(255), nullable=True)
-    email = Column(String(255), nullable=True)
-    channel = Column(String(20), nullable=False, default="whatsapp")
-    intent = Column(String(40), nullable=True)  # book | ask | price | complaint
-    notes = Column(Text, nullable=True)
-    context = Column(JSONB, nullable=True)  # collected fields snapshot
-    status = Column(String(20), nullable=False, default="new")  # new | contacted | converted | closed
-    booking_id = Column(UUID(as_uuid=True), ForeignKey("bookings.id", ondelete="SET NULL"), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
-    )
-
-    __table_args__ = (
-        Index("ix_booking_lead_org_status", "org_id", "status"),
-        Index("ix_booking_lead_org_created", "org_id", "created_at"),
-    )
-
-
 class BookingWaitlist(Base):
     """Customer waiting for a slot to free up.
 
@@ -159,30 +121,3 @@ class WhatsAppDeliveryLog(Base):
         Index("ix_wa_delivery_org_created", "org_id", "created_at"),
     )
 
-
-class BookingFunnelEvent(Base):
-    """Per-step funnel events so the dashboard can show WHERE users drop.
-
-    Web widget has the cards; WhatsApp is text-only, so the only way to
-    see the drop-off point is to record every step transition.
-    """
-
-    __tablename__ = "booking_funnel_events"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    org_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("organizations.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    session_id = Column(UUID(as_uuid=True), nullable=True, index=True)
-    channel = Column(String(20), nullable=False, default="whatsapp")
-    step = Column(String(40), nullable=False)  # started | dept | date | time | otp | payment | confirmed
-    outcome = Column(String(20), nullable=False, default="entered")  # entered | completed | abandoned
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-    __table_args__ = (
-        Index("ix_booking_funnel_org_step", "org_id", "step"),
-        Index("ix_booking_funnel_org_created", "org_id", "created_at"),
-    )

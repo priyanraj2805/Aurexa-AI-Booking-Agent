@@ -92,41 +92,6 @@ def test_within_service_window():
     assert eng.within_service_window(None, now) is False
 
 
-# ── lead capture ────────────────────────────────────────────────────
-async def test_capture_lead_is_idempotent_per_session(db_session: AsyncSession):
-    org = await _org(db_session)
-    sid = uuid.uuid4()
-    lead1 = await eng.capture_lead(
-        db_session, org.id, session_id=sid, phone="919876543210", name="A"
-    )
-    assert lead1 is not None
-    lead2 = await eng.capture_lead(
-        db_session, org.id, session_id=sid, phone="919876543210", name="B"
-    )
-    assert lead2 is not None
-    assert lead2.id == lead1.id  # refreshed, not duplicated
-    assert lead2.name == "B"
-    rows = (
-        await db_session.execute(
-            select(eng.BookingLead).where(eng.BookingLead.session_id == sid)
-        )
-    ).scalars().all()
-    assert len(rows) == 1
-
-
-async def test_mark_lead_converted(db_session: AsyncSession):
-    org = await _org(db_session)
-    sid = uuid.uuid4()
-    await eng.capture_lead(db_session, org.id, session_id=sid, phone="919876543210")
-    await eng.mark_lead_converted(db_session, org.id, sid)
-    row = (
-        await db_session.execute(
-            select(eng.BookingLead).where(eng.BookingLead.session_id == sid)
-        )
-    ).scalars().first()
-    assert row.status == "converted"
-
-
 # ── waitlist ────────────────────────────────────────────────────────
 async def test_join_waitlist_is_idempotent(db_session: AsyncSession):
     org = await _org(db_session)
@@ -141,21 +106,6 @@ async def test_join_waitlist_is_idempotent(db_session: AsyncSession):
     assert w2 is not None and w2.id == w1.id
     entries = await eng.waiting_entries(db_session, org.id)
     assert len(entries) == 1
-
-
-# ── funnel ──────────────────────────────────────────────────────────
-async def test_funnel_breakdown(db_session: AsyncSession):
-    org = await _org(db_session)
-    sid = uuid.uuid4()
-    await eng.track_step(db_session, org.id, "date", session_id=sid)
-    await eng.track_step(db_session, org.id, "date", session_id=sid, outcome="completed")
-    await eng.track_step(db_session, org.id, "time", session_id=sid)
-    data = await eng.funnel_breakdown(db_session, org.id, days=30)
-    assert data["steps"]["date"]["entered"] == 1
-    assert data["steps"]["date"]["completed"] == 1
-    assert data["steps"]["date"]["conversion"] == 1.0
-    assert data["steps"]["time"]["entered"] == 1
-    assert data["steps"]["time"]["conversion"] == 0.0
 
 
 # ── delivery dedupe ─────────────────────────────────────────────────

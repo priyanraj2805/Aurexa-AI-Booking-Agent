@@ -2061,37 +2061,6 @@ async def process_message_with_graph(
     if _greeting_action is not None:
         return _greeting_action
 
-        # ── Lead capture ──
-        # Most WhatsApp conversations never become a booking. Without a
-        # lead row that demand is silently lost — the customer asked, the
-        # AI answered, and nobody in the business ever saw it.
-        try:
-            from app.services import whatsapp_engagement as _wa_eng
-
-            _wa_ch = str(getattr(chat_session, "channel", "") or "").lower()
-            if _wa_ch in ("whatsapp", "whatsapp_cloud"):
-                _cd0 = (
-                    chat_session.collected_data
-                    if isinstance(chat_session.collected_data, dict)
-                    else {}
-                )
-                await _wa_eng.capture_lead(
-                    db,
-                    org.id,
-                    session_id=session_id,
-                    phone="".join(c for c in str(_cd0.get("phone") or "") if c.isdigit()),
-                    name=str(_cd0.get("name") or ""),
-                    email=str(_cd0.get("email") or ""),
-                    channel=_wa_ch,
-                    intent="book",
-                    context=dict(_cd0) or None,
-                )
-                await _wa_eng.track_step(
-                    db, org.id, "started", session_id=session_id, channel=_wa_ch
-                )
-        except Exception:
-            logger.warning("lead capture failed", exc_info=True)
-
     # Field refusal: "no" / "don't want to share X" aimed at the current
     # missing field gets a soft re-ask of the SAME field — never a jump
     # ahead, never interrogation for something else.
@@ -4703,12 +4672,11 @@ async def process_message_with_graph(
                 sent_confirmations.append(confirmation_event_key)
                 await crud_chat.update_chat_session(db, session_id, chat_session)
 
-            # ── WhatsApp: rich confirmation + lead conversion + funnel ──
+            # ── WhatsApp: rich confirmation ──
             # The email receipt carries date/time/meeting link; WhatsApp got
             # a bare "booking confirmed" line, so the customer had nothing to
             # show at the venue. Send a template receipt with the details.
             try:
-                from app.services import whatsapp_engagement as _wa_eng
                 from app.services import whatsapp_reminders as _wa_rem
 
                 _wa_channel = str(getattr(chat_session, "channel", "") or "").lower()
@@ -4728,13 +4696,6 @@ async def process_message_with_graph(
                         await _wa_rem.send_booking_confirmation(
                             db, booking_row, business_name=_biz
                         )
-                    await _wa_eng.mark_lead_converted(
-                        db, org.id, session_id, getattr(booking_row, "id", None)
-                    )
-                    await _wa_eng.track_step(
-                        db, org.id, "confirmed", session_id=session_id,
-                        channel=_wa_channel, outcome="completed",
-                    )
             except Exception:
                 logger.warning("whatsapp confirmation/nudge failed", exc_info=True)
 

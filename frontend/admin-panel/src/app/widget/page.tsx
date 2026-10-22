@@ -1,11 +1,20 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
+// Public demo tenant used when nobody is signed in. The previous value
+// (ds_wid_uDy9_...) no longer exists in the database, so /widget/config
+// answered 404, the widget could not initialise, and the page looked
+// dead to every visitor. The widget token is public by design (it ships
+// in every tenant's website HTML), so it is safe to embed here.
+const PUBLIC_DEMO_WIDGET_TOKEN = "ds_wid_NK3_YPtMXm2x-SJe6jEGmFywmm8Af93o";
+
 export default function WidgetPage() {
-  const [widgetToken, setWidgetToken] = useState("ds_wid_uDy9_VGnwG5YAr3-WUKNH_CKXROWh43j");
+  const [widgetToken, setWidgetToken] = useState(PUBLIC_DEMO_WIDGET_TOKEN);
   const [apiBase, setApiBase] = useState("");
   const [brandColor, setBrandColor] = useState("#ee5a2e");
+  const [widgetError, setWidgetError] = useState<string | null>(null);
+  const brandTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Fetch logged-in org's widget token — ensures /widget shows YOUR org's theme, not just demo org
   useEffect(() => {
@@ -38,7 +47,16 @@ export default function WidgetPage() {
     const loadBrand = async () => {
       try {
         const res = await fetch(`${base}/widget/config?widget_token=${encodeURIComponent(widgetToken)}`);
+        if (res.status === 404) {
+          // The token is not valid for any org. Stop polling (it was
+          // firing a 404 every 3 seconds) and say so instead of leaving a
+          // silently dead widget on the page.
+          setWidgetError("This widget token is not valid. Sign in to load your own organisation's token.");
+          if (brandTimer.current) { clearInterval(brandTimer.current); brandTimer.current = null; }
+          return;
+        }
         if (res.ok) {
+          setWidgetError(null);
           const cfg = await res.json();
           const color = cfg?.brand_color || cfg?.ui_brand_color || cfg?.brandColor;
           if (color && /^#[0-9A-Fa-f]{6}$/.test(color) && color.toLowerCase() !== brandColor.toLowerCase()) {
@@ -55,7 +73,11 @@ export default function WidgetPage() {
     };
     loadBrand();
     const interval = window.setInterval(loadBrand, 3000);
-    return () => window.clearInterval(interval);
+    brandTimer.current = interval;
+    return () => {
+      window.clearInterval(interval);
+      if (brandTimer.current === interval) brandTimer.current = null;
+    };
   }, [widgetToken, brandColor]);
 
   return (
@@ -116,6 +138,15 @@ export default function WidgetPage() {
 
       {/* Widget embed info */}
       <section id="widget" className="max-w-[1400px] mx-auto w-full px-6 pb-8">
+        {widgetError ? (
+          <div className="rounded-2xl border border-red-200 bg-red-50 p-6 mb-4">
+            <h3 className="font-bold text-red-800">Chat widget could not load</h3>
+            <p className="text-sm text-red-700 mt-1">{widgetError}</p>
+            <Link href="/dashboard/agent" className="inline-block mt-3 px-4 py-2 rounded-full bg-zinc-900 text-white text-sm font-semibold">
+              Open Agent Personalisation →
+            </Link>
+          </div>
+        ) : null}
         <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-6 flex flex-col md:flex-row items-center justify-between gap-4">
           <div>
             <h3 className="font-bold">Chat Widget Live</h3>
