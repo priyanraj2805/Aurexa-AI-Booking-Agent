@@ -1,0 +1,20 @@
+{
+  "name": "aurexa-wa-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aurexa WhatsApp gateway — one Baileys socket per organization, QR pairing, internal HTTP API for the FastAPI backend.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "6.17.16",
+    "express": "5.2.1",
+    "pino": "^10.3.1",
+    "qrcode": "1.5.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

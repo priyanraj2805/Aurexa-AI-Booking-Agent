@@ -28,6 +28,17 @@ dist/
 
 secrets/
 *.json
+# The *.json rule above is for secret/config JSON (credentials, service
+# accounts). Package manifests are CODE - without them the wa-gateway image
+# cannot be built and the CI deploy fails at the build step.
+!wa-gateway/package.json
+!wa-gateway/package-lock.json
+!frontend/admin-panel/package.json
+!frontend/admin-panel/package-lock.json
+!frontend/super-admin/package.json
+!frontend/super-admin/package-lock.json
+!frontend/chat-widget/package.json
+!frontend/chat-widget/package-lock.json
 
 # OS
 .DS_Store
