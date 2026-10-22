@@ -235,9 +235,17 @@ jobs:
           test -s "$BACKUP/code.tar.gz"
 
           # Take a database dump before deploying application changes.
+          #
+          # `</dev/null` is REQUIRED, not cosmetic. This whole remote script
+          # is fed to `bash -s` over STDIN, and `docker compose exec`
+          # forwards the parent's stdin into the container - so the command
+          # consumed the REST OF THE SCRIPT and everything after it (the
+          # rsync, the build, the deploy) was silently never executed. The
+          # run then exited 0 and the pipeline reported success while
+          # changing nothing.
           "${COMPOSE[@]}" exec -T postgres sh -lc \
             'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' \
-            > "$BACKUP/postgres.sql"
+            < /dev/null > "$BACKUP/postgres.sql"
 
           test -s "$BACKUP/postgres.sql"
 
@@ -302,13 +310,17 @@ jobs:
           "${COMPOSE[@]}" config -q
 
           # Build the application images before recreating services.
+          # </dev/null so a build can never eat the rest of this stdin-fed
+          # script (see the pg_dump note above).
           "${COMPOSE[@]}" build \
-            backend backend-super admin-panel super-admin wa-gateway
+            backend backend-super admin-panel super-admin wa-gateway \
+            < /dev/null
 
           # Recreate only application services; do not recreate PostgreSQL,
           # Redis, or Cloudflare tunnel containers in this step.
           "${COMPOSE[@]}" up -d --no-deps --force-recreate \
-            backend backend-super admin-panel super-admin wa-gateway gateway
+            backend backend-super admin-panel super-admin wa-gateway gateway \
+            < /dev/null
 
           # Wait up to 90 seconds for all target containers to run.
           all_running=false
