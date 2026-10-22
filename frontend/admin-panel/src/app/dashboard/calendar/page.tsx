@@ -39,6 +39,7 @@ interface CalendarEvent {
   unit_name?: string | null;
   provider_id?: string | null;
   provider_name?: string | null;
+  provider_role?: string | null;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────

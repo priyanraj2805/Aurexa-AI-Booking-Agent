@@ -732,8 +732,8 @@ export default function DepartmentsPage() {
                               <input
                                 value={editName}
                                 onChange={(e) => setEditName(e.target.value)}
-                                placeholder="Doctor name"
-                                aria-label="Doctor name"
+                                placeholder="Team member name"
+                                aria-label="Team member name"
                                 className="flex-1 min-w-[140px] px-3 py-2 bg-background border border-border rounded-lg text-sm outline-none focus:border-primary"
                               />
                               <input
@@ -741,7 +741,7 @@ export default function DepartmentsPage() {
                                 onChange={(e) => setEditEmail(e.target.value)}
                                 placeholder="Email for login"
                                 type="email"
-                                aria-label="Doctor email"
+                                aria-label="Team member email"
                                 className="flex-1 min-w-[140px] px-3 py-2 bg-background border border-border rounded-lg text-sm outline-none focus:border-primary"
                               />
                               <input
@@ -787,7 +787,7 @@ export default function DepartmentsPage() {
                               onChange={(e) => setDocAmount(e.target.value)}
                               placeholder="Fee in ₹, e.g. 500 (empty = dept fee)"
                               inputMode="decimal"
-                              aria-label="Doctor fee in rupees"
+                              aria-label="Team member fee in rupees"
                               className="flex-1 min-w-0 px-3 py-2 bg-background border border-border rounded-lg text-sm outline-none focus:border-primary"
                             />
                             <button onClick={() => saveDocFee(d)} disabled={feeSaving} className="px-3 py-2 rounded-lg bg-primary text-primary-foreground text-xs font-semibold whitespace-nowrap shrink-0 disabled:opacity-50">

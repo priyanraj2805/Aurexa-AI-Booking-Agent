@@ -1185,11 +1185,15 @@ class CalendarEventItem(BaseModel):
     meeting_link_status: Optional[str] = None
     meeting_link_url: Optional[str] = None
     meeting_link_provider: Optional[str] = None
-    # Org-mode: which department + doctor this booking belongs to
+    # Org-mode: which department + team member this booking belongs to.
+    # provider_role is the member's own role label ("Doctor", "Stylist",
+    # "Coach"...) - the tenant sets it, so it is right for every industry
+    # instead of a hardcoded word.
     unit_id: Optional[str] = None
     unit_name: Optional[str] = None
     provider_id: Optional[str] = None
     provider_name: Optional[str] = None
+    provider_role: Optional[str] = None
 
 
 @router.get("/recent-bookings", response_model=List[BookingItem])
@@ -4243,12 +4247,14 @@ async def get_calendar_events(
         _pids = {b.provider_id for b, _, _ in rows if b.provider_id}
         _uids = {b.unit_id for b, _, _ in rows if b.unit_id}
         _pmap = {}
+        _prolemap = {}
         _umap = {}
         if _pids:
             for _p in (
                 await db.execute(select(_PV).where(_PV.id.in_(_pids)))
             ).scalars().all():
                 _pmap[_p.id] = _p.full_name
+                _prolemap[_p.id] = getattr(_p, "role_label", None)
         if _uids:
             for _u in (
                 await db.execute(select(_SU).where(_SU.id.in_(_uids)))
@@ -4256,6 +4262,7 @@ async def get_calendar_events(
                 _umap[_u.id] = _u.name
     except Exception:
         _pmap = {}
+        _prolemap = {}
         _umap = {}
 
     items = []
@@ -4288,6 +4295,7 @@ async def get_calendar_events(
                 unit_name=_umap.get(booking.unit_id) if booking.unit_id else None,
                 provider_id=str(booking.provider_id) if booking.provider_id else None,
                 provider_name=_pmap.get(booking.provider_id) if booking.provider_id else None,
+                provider_role=_prolemap.get(booking.provider_id) if booking.provider_id else None,
             )
         )
     return items
@@ -4362,6 +4370,7 @@ async def get_upcoming_bookings(
                 _umap[_u.id] = _u.name
     except Exception:
         _pmap = {}
+        _prolemap = {}
         _umap = {}
 
     items = []
@@ -4393,6 +4402,7 @@ async def get_upcoming_bookings(
                 unit_name=_umap.get(booking.unit_id) if booking.unit_id else None,
                 provider_id=str(booking.provider_id) if booking.provider_id else None,
                 provider_name=_pmap.get(booking.provider_id) if booking.provider_id else None,
+                provider_role=_prolemap.get(booking.provider_id) if booking.provider_id else None,
             )
         )
     return items

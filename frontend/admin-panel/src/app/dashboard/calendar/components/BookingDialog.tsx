@@ -19,6 +19,7 @@ interface CalendarEvent {
   meeting_link_provider?: string | null;
   unit_name?: string | null;
   provider_name?: string | null;
+  provider_role?: string | null;
 }
 
 function fmtTime(iso: string): string {
@@ -168,11 +169,14 @@ export function BookingDialog({
             <div className="bg-secondary/30 rounded-xl p-4 border border-border/50">
               <div className="flex items-center gap-2 text-muted-foreground mb-1">
                 <User className="size-3.5" />
-                <span className="text-[10px] font-semibold uppercase tracking-wider">Doctor</span>
+                <span className="text-[10px] font-semibold uppercase tracking-wider">Team Member</span>
               </div>
               <div className="text-sm font-semibold">
                 {event.provider_name || "—"}
               </div>
+              {event.provider_role && (
+                <div className="text-[11px] text-muted-foreground mt-0.5">{event.provider_role}</div>
+              )}
             </div>
           </div>
 
