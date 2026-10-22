@@ -152,7 +152,6 @@ export function BookingDialog({
                   <div className="text-sm font-semibold">{event.meeting_type_snapshot === "ONLINE" ? "Online" : "Offline"}</div>
                   <div className="text-xs text-muted-foreground">
                     {event.meeting_type_snapshot === "ONLINE" ? (event.meeting_link_provider || "Meeting Provider") : "In-person"}
-                    {event.meeting_link_status ? ` • ${event.meeting_link_status}` : ""}
                   </div>
                 </div>
               </div>
@@ -164,6 +163,9 @@ export function BookingDialog({
             </div>
             {event.meeting_type_snapshot === "ONLINE" && event.meeting_link_status === "UNAVAILABLE" && (
               <p className="text-xs text-amber-600 dark:text-amber-400 px-1">Meeting link temporarily unavailable. Please retry.</p>
+            )}
+            {event.meeting_type_snapshot === "ONLINE" && event.meeting_link_status === "FAILED" && (
+              <p className="text-xs text-amber-600 dark:text-amber-400 px-1">The meeting link could not be created. Please add it manually or contact support.</p>
             )}
             {event.meeting_type_snapshot === "ONLINE" && event.meeting_link_url && (
               <p className="text-xs text-muted-foreground px-1 break-all">Link: <a href={event.meeting_link_url} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">{event.meeting_link_url}</a></p>

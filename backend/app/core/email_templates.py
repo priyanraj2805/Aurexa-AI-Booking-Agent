@@ -13,6 +13,24 @@ def _esc(value: str) -> str:
     return html.escape(str(value)) if value else ""
 
 
+# Meeting-link status codes are internal enum values. They must never reach
+# a customer or an admin as raw codes ("NOT_REQUIRED" told nobody anything);
+# show a plain-English label instead.
+_MEETING_STATUS_LABELS = {
+    "READY": "Link ready",
+    "UNAVAILABLE": "Link unavailable",
+    "FAILED": "Link could not be created",
+    "NOT_REQUIRED": "No meeting link needed",
+}
+
+
+def _meeting_status_label(status: str) -> str:
+    """Human label for a meeting_link_status value."""
+    return _MEETING_STATUS_LABELS.get(
+        str(status or "").strip().upper(), "Link pending"
+    )
+
+
 def _base(title: str, preheader: str, content: str, *, header_color: str = "#ef5d25", header_icon: str = "", footer: str = "") -> str:
     """Minimal base template. Everything inline for email client compat."""
     footer = footer or "DotStark AI Booking System"
@@ -232,7 +250,7 @@ def render_booking_confirmation_customer(details: dict) -> tuple[str, str]:
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
 <tr><td style="padding:16px;background-color:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;">
     <p style="margin:0 0 4px;font-size:12px;color:#166534;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
-    <p style="margin:0 0 8px;font-size:12px;color:#166534;">Meeting link status: <span class="status-badge status-badge--ready">READY</span><strong> READY</strong></p>
+    <p style="margin:0 0 8px;font-size:12px;color:#166534;">Meeting link status: <span class="status-badge status-badge--ready">Link ready</span></p>
     <a href="{_esc(meeting_url)}" style="display:inline-block;background-color:#10b981;color:#ffffff;text-decoration:none;padding:8px 16px;border-radius:6px;font-size:12px;font-weight:600;">Join Meeting</a>
 </td></tr>
 </table>
@@ -242,7 +260,7 @@ def render_booking_confirmation_customer(details: dict) -> tuple[str, str]:
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
 <tr><td style="padding:16px;background-color:#fef3c7;border:1px solid #fde68a;border-radius:10px;">
     <p style="margin:0 0 4px;font-size:12px;color:#92400e;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
-    <p style="margin:0 0 8px;font-size:12px;color:#92400e;">Meeting link status: <span class="status-badge status-badge--unavailable">UNAVAILABLE</span><strong> UNAVAILABLE</strong></p>
+    <p style="margin:0 0 8px;font-size:12px;color:#92400e;">Meeting link status: <span class="status-badge status-badge--unavailable">Link unavailable</span></p>
     <p style="margin:0;font-size:12px;color:#92400e;line-height:1.5;">Your meeting link is temporarily unavailable. Please retry shortly or contact support if this persists.</p>
 </td></tr>
 </table>
@@ -252,7 +270,7 @@ def render_booking_confirmation_customer(details: dict) -> tuple[str, str]:
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
 <tr><td style="padding:16px;background-color:#f4f4f5;border:1px solid #e5e5e5;border-radius:10px;">
     <p style="margin:0 0 4px;font-size:12px;color:#71717a;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
-    <p style="margin:0;font-size:12px;color:#71717a;">Meeting link status: {_esc(meeting_status)}</p>
+    <p style="margin:0;font-size:12px;color:#71717a;">Meeting link status: {_esc(_meeting_status_label(meeting_status))}</p>
 </td></tr>
 </table>
 """
@@ -365,7 +383,7 @@ def render_booking_confirmation_admin(details: dict, *, frontend_url: str = "") 
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:16px;">
 <tr><td style="padding:16px;background-color:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;">
     <p style="margin:0 0 4px;font-size:12px;color:#166534;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
-    <p style="margin:0 0 8px;font-size:12px;color:#166534;">Meeting link status: <span class="status-badge status-badge--ready">READY</span><strong> READY</strong></p>
+    <p style="margin:0 0 8px;font-size:12px;color:#166534;">Meeting link status: <span class="status-badge status-badge--ready">Link ready</span></p>
     <a href="{_esc(meeting_url)}" style="display:inline-block;background-color:#10b981;color:#ffffff;text-decoration:none;padding:8px 16px;border-radius:6px;font-size:12px;font-weight:600;">Join Meeting</a>
 </td></tr>
 </table>
@@ -375,7 +393,7 @@ def render_booking_confirmation_admin(details: dict, *, frontend_url: str = "") 
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:16px;">
 <tr><td style="padding:16px;background-color:#fef3c7;border:1px solid #fde68a;border-radius:10px;">
     <p style="margin:0 0 4px;font-size:12px;color:#92400e;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
-    <p style="margin:0 0 8px;font-size:12px;color:#92400e;">Meeting link status: <span class="status-badge status-badge--unavailable">UNAVAILABLE</span><strong> UNAVAILABLE</strong></p>
+    <p style="margin:0 0 8px;font-size:12px;color:#92400e;">Meeting link status: <span class="status-badge status-badge--unavailable">Link unavailable</span></p>
     <p style="margin:0;font-size:12px;color:#92400e;line-height:1.5;">Meeting link is temporarily unavailable. Please follow up with the customer and retry provider connection if needed.</p>
 </td></tr>
 </table>
@@ -385,7 +403,7 @@ def render_booking_confirmation_admin(details: dict, *, frontend_url: str = "") 
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:16px;">
 <tr><td style="padding:16px;background-color:#f4f4f5;border:1px solid #e5e5e5;border-radius:10px;">
     <p style="margin:0 0 4px;font-size:12px;color:#71717a;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
-    <p style="margin:0;font-size:12px;color:#71717a;">Meeting link status: {_esc(meeting_status)}</p>
+    <p style="margin:0;font-size:12px;color:#71717a;">Meeting link status: {_esc(_meeting_status_label(meeting_status))}</p>
 </td></tr>
 </table>
 """
@@ -450,7 +468,7 @@ def render_booking_cancellation(name: str, details: dict) -> tuple[str, str]:
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
 <tr><td style="padding:16px;background-color:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;">
     <p style="margin:0 0 4px;font-size:12px;color:#166534;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
-    <p style="margin:0 0 8px;font-size:12px;color:#166534;">Meeting link status: <span class="status-badge status-badge--ready">READY</span><strong> READY</strong></p>
+    <p style="margin:0 0 8px;font-size:12px;color:#166534;">Meeting link status: <span class="status-badge status-badge--ready">Link ready</span></p>
     <a href="{_esc(meeting_url)}" style="display:inline-block;background-color:#10b981;color:#ffffff;text-decoration:none;padding:8px 16px;border-radius:6px;font-size:12px;font-weight:600;">Join Meeting</a>
 </td></tr>
 </table>
@@ -460,7 +478,7 @@ def render_booking_cancellation(name: str, details: dict) -> tuple[str, str]:
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
 <tr><td style="padding:16px;background-color:#fef3c7;border:1px solid #fde68a;border-radius:10px;">
     <p style="margin:0 0 4px;font-size:12px;color:#92400e;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
-    <p style="margin:0 0 8px;font-size:12px;color:#92400e;">Meeting link status: <span class="status-badge status-badge--unavailable">UNAVAILABLE</span><strong> UNAVAILABLE</strong></p>
+    <p style="margin:0 0 8px;font-size:12px;color:#92400e;">Meeting link status: <span class="status-badge status-badge--unavailable">Link unavailable</span></p>
     <p style="margin:0;font-size:12px;color:#92400e;line-height:1.5;">Your meeting link is temporarily unavailable. Please retry shortly or contact support if this persists.</p>
 </td></tr>
 </table>
@@ -470,7 +488,7 @@ def render_booking_cancellation(name: str, details: dict) -> tuple[str, str]:
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:20px;">
 <tr><td style="padding:16px;background-color:#f4f4f5;border:1px solid #e5e5e5;border-radius:10px;">
     <p style="margin:0 0 4px;font-size:12px;color:#71717a;"><strong>Meeting:</strong> {_esc(meeting_provider)}</p>
-    <p style="margin:0;font-size:12px;color:#71717a;">Meeting link status: {_esc(meeting_status)}</p>
+    <p style="margin:0;font-size:12px;color:#71717a;">Meeting link status: {_esc(_meeting_status_label(meeting_status))}</p>
 </td></tr>
 </table>
 """
