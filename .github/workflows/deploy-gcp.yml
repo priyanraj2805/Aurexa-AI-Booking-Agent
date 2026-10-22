@@ -3,6 +3,9 @@ name: GCP Deployment - BookingChatBot
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - Aurexa-production
 
 permissions:
   contents: read
