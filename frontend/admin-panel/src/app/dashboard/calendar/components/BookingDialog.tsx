@@ -30,7 +30,19 @@ function fmtDateTime(iso: string): string {
   });
 }
 
+// Labels for the fields the calendar shows under "Additional Data".
+// The generic snake_case -> Title Case conversion produced awkward labels
+// ("Unit Name", "Provider Name") for what are really the department and the
+// team member.
+const FIELD_LABELS: Record<string, string> = {
+  unit_name: "Department",
+  provider_name: "Doctor",
+  organisation_name: "Organisation",
+};
+
 function formatFieldLabel(key: string): string {
+  const mapped = FIELD_LABELS[key];
+  if (mapped) return mapped;
   return key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
@@ -67,6 +79,12 @@ export function BookingDialog({
     "field_definitions",
     "field_snapshot",
     "slot_id",
+    // Engine internals that used to leak into "Additional Data".
+    "_mode", "_review_presented", "_repeat_count", "_repeat_nudged",
+    "_offtopic_cooldown_until", "_offtopic_strike_count", "active_directive_id",
+    "_last_reply_body", "pushName", "whatsapp_chat_jid", "meeting_type",
+    "unit_id", "provider_id", "_provider_unit",
+    "phone_raw_input", "phone_country_code",
   ]);
 
   const extraEntries = Object.entries(event.collected_data).filter(([k, v]) => {
@@ -238,8 +256,8 @@ export function BookingDialog({
               <div className="grid gap-2 sm:grid-cols-2">
                 {extraEntries.map(([key, val]) => (
                   <div key={key} className="p-4 rounded-xl bg-muted/20 border border-border/10 flex flex-col gap-1">
-                    <span className="text-[9px] font-semibold text-muted-foreground uppercase tracking-tighter">{formatFieldLabel(key)}</span>
-                    <span className="text-[13px] font-medium leading-normal italic text-foreground/80">
+                    <span className="text-[10px] font-medium text-muted-foreground">{formatFieldLabel(key)}</span>
+                    <span className="text-sm font-semibold leading-snug text-foreground">
                       {val === null ? "—" : String(val)}
                     </span>
                   </div>

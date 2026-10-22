@@ -21,7 +21,23 @@ def _parse_time(value: Optional[str]) -> Optional[time]:
         return None
 
 
-# Internal booking state keys that should never be shown in calendar "Additional Data"
+# ── Calendar "Additional Data" ──────────────────────────────────────────────
+# The chat session's state_data carries the whole engine state: raw UUIDs,
+# cooldown counters, the WhatsApp JID, the agent's last reply, timezone
+# plumbing. Almost none of it means anything to a clinic admin, and a
+# block-list kept leaking new internals (a raw unit id, a duplicate phone
+# number, an internal flag).
+#
+# So this is an ALLOW-list: the department, the team member and the
+# tenant's own custom booking fields - nothing else. A new internal field
+# can never reach the UI by accident.
+_CALENDAR_EXTRA_FIELDS = frozenset({"unit_name", "provider_name"})
+
+# The core booking fields are already shown in the dialog's own cards
+# (customer, email, phone, date, time), so they are not repeated here.
+_CORE_BOOKING_FIELDS = frozenset({"name", "email", "phone", "date", "time"})
+
+# Kept for backwards compatibility with anything that imports it.
 _INTERNAL_COLLECTED_KEYS = {
     "otp_code", "otp_hash", "_internal",
     "user_timezone", "locked_slot_id", "locked_slot_start_utc", "locked_slot_end_utc",
@@ -33,18 +49,43 @@ _INTERNAL_COLLECTED_KEYS = {
 _INTERNAL_KEY_SUBSTRINGS = ("checkpoint", "path_effects", "snapshot", "slot_id", "locked_slot")
 
 
-def _filter_collected_data(raw: dict) -> dict:
-    """Return only user-facing booking fields — hide internal state."""
+async def _calendar_extra_field_names(db: "AsyncSession", org_id: Any) -> set:
+    """Custom booking fields the tenant defined (e.g. "Organisation Name").
+
+    These are collected by the tenant on purpose, so the admin does want to
+    see them in the calendar dialog.
+    """
+    try:
+        res = await db.execute(
+            select(OrgConfig.field_definitions).where(OrgConfig.org_id == org_id)
+        )
+        raw = res.scalars().first()
+    except Exception:
+        return set()
+    names = set()
+    for fd in (raw or []):
+        if not isinstance(fd, dict):
+            continue
+        name = str(fd.get("name") or "").strip()
+        if name and name not in _CORE_BOOKING_FIELDS:
+            names.add(name)
+    return names
+
+
+def _filter_collected_data(raw: dict, allowed: Optional[set] = None) -> dict:
+    """Return only the user-facing booking fields for the calendar dialog.
+
+    Allow-list: the department, the team member and the tenant's own
+    custom fields. Everything else in the session state is engine
+    internals and stays on the server.
+    """
     if not isinstance(raw, dict):
         return {}
+    keep = set(_CALENDAR_EXTRA_FIELDS)
+    keep |= {str(k) for k in (allowed or set())}
     out: Dict[str, Any] = {}
     for k, v in raw.items():
-        norm = str(k).lower().replace(" ", "_")
-        if norm in _INTERNAL_COLLECTED_KEYS:
-            continue
-        if any(sub in norm for sub in _INTERNAL_KEY_SUBSTRINGS):
-            continue
-        if "timezone" in norm:  # hide timezone plumbing
+        if k not in keep:
             continue
         if v is None or v == "":
             continue
@@ -4215,8 +4256,12 @@ async def get_calendar_events(
         _umap = {}
 
     items = []
+    _extra_fields = await _calendar_extra_field_names(db, user.org_id)
     for booking, slot, session in rows:
-        collected = _filter_collected_data(session.state_data if session and session.state_data else {})
+        collected = _filter_collected_data(
+            session.state_data if session and session.state_data else {},
+            _extra_fields,
+        )
         # Normalize enums to plain strings for JSON
         _mls = booking.meeting_link_status
         _mls_val = _mls.value if _mls is not None and hasattr(_mls, "value") else (str(_mls) if _mls is not None else None)
@@ -4317,8 +4362,12 @@ async def get_upcoming_bookings(
         _umap = {}
 
     items = []
+    _extra_fields = await _calendar_extra_field_names(db, user.org_id)
     for booking, slot, session in rows:
-        collected = _filter_collected_data(session.state_data if session and session.state_data else {})
+        collected = _filter_collected_data(
+            session.state_data if session and session.state_data else {},
+            _extra_fields,
+        )
         _mls = booking.meeting_link_status
         _mls_val = _mls.value if _mls is not None and hasattr(_mls, "value") else (str(_mls) if _mls is not None else None)
         _mlp = booking.meeting_link_provider
