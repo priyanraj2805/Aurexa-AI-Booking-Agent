@@ -1,5 +1,5 @@
 
-name: Deploy BookingChatBot to GCP
+name: GCP Deployment - BookingChatBot
 
 on:
   workflow_dispatch:
@@ -12,16 +12,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: Deploy to dotstark-prod
+  verify-and-stage:
+    name: Verify SSH and stage release
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    env:
-      GCP_VM_HOST: ${{ secrets.GCP_VM_HOST }}
-      GCP_VM_USER: ${{ secrets.GCP_VM_USER }}
-      GCP_SSH_PRIVATE_KEY: ${{ secrets.GCP_SSH_PRIVATE_KEY }}
-      GCP_VM_KNOWN_HOSTS: ${{ secrets.GCP_VM_KNOWN_HOSTS }}
+    timeout-minutes: 15
 
     steps:
       - name: Checkout production branch
@@ -30,28 +24,44 @@ jobs:
           ref: Aurexa-production
           persist-credentials: false
 
-      - name: Configure SSH securely
+      - name: Configure SSH
+        env:
+          VM_HOST: ${{ secrets.GCP_VM_HOST }}
+          VM_USER: ${{ secrets.GCP_VM_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.GCP_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.GCP_VM_KNOWN_HOSTS }}
         shell: bash
         run: |
           set -euo pipefail
-          install -m 700 -d "$HOME/.ssh"
-          printf '%s\n' "$GCP_SSH_PRIVATE_KEY" > "$HOME/.ssh/deploy_key"
+
+          test -n "$VM_HOST"
+          test -n "$VM_USER"
+          test -n "$SSH_PRIVATE_KEY"
+          test -n "$SSH_KNOWN_HOSTS"
+
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+
           chmod 600 "$HOME/.ssh/deploy_key"
-          printf '%s\n' "$GCP_VM_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/known_hosts"
 
-          ssh-keygen -F "$GCP_VM_HOST" -f "$HOME/.ssh/known_hosts"
+          ssh-keygen -y -f "$HOME/.ssh/deploy_key" > /dev/null
+          ssh-keygen -F "$VM_HOST" -f "$HOME/.ssh/known_hosts" > /dev/null
 
           cat > "$HOME/.ssh/config" <<EOF
           Host gcp-production
-            HostName $GCP_VM_HOST
-            User $GCP_VM_USER
+            HostName $VM_HOST
+            User $VM_USER
             IdentityFile $HOME/.ssh/deploy_key
             IdentitiesOnly yes
             StrictHostKeyChecking yes
             UserKnownHostsFile $HOME/.ssh/known_hosts
             BatchMode yes
           EOF
+
           chmod 600 "$HOME/.ssh/config"
 
           ssh gcp-production \
@@ -61,100 +71,92 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          test -f backend/Dockerfile
+          test -f backend-super/Dockerfile
+          test -f frontend/admin-panel/Dockerfile
+          test -f frontend/super-admin/Dockerfile
+          test -f wa-gateway/Dockerfile
+          test -f gateway/nginx.conf
+
           tar -czf "$RUNNER_TEMP/release.tar.gz" \
-            --exclude='.git' \
-            --exclude='*/.git' \
-            --exclude='.env' \
-            --exclude='*/.env' \
-            --exclude='docker-compose.override.yml' \
+            --exclude='*/.env*' \
             --exclude='*/node_modules' \
             --exclude='node_modules' \
-            --exclude='.venv' \
+            --exclude='*/.git' \
+            --exclude='.git' \
             --exclude='*/.venv' \
-            --exclude='__pycache__' \
+            --exclude='.venv' \
             --exclude='*/__pycache__' \
-            -C "$GITHUB_WORKSPACE" .
-
-      - name: Upload release to staging
-        shell: bash
-        run: |
-          set -euo pipefail
-          RELEASE="/home/${GCP_VM_USER}/bookingchatbot-release-${GITHUB_SHA}"
-
-          ssh gcp-production \
-            "mkdir -p '$RELEASE'"
-
-          scp "$RUNNER_TEMP/release.tar.gz" \
-            "gcp-production:$RELEASE/source.tar.gz"
-
-          ssh gcp-production \
-            "mkdir -p '$RELEASE/source' &&
-             tar -xzf '$RELEASE/source.tar.gz' -C '$RELEASE/source'"
-
-      - name: Deploy application
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ssh gcp-production bash -s -- "$GITHUB_SHA" <<'REMOTE'
-          set -Eeuo pipefail
-
-          SHA="$1"
-          LIVE="/home/priyanshuraj/BookingChatBot"
-          RELEASE="/home/priyanshuraj/bookingchatbot-release-${SHA}/source"
-          BACKUP="/home/priyanshuraj/bookingchatbot-backups/${SHA}"
-
-          test -f "$LIVE/.env"
-          test -f "$LIVE/docker-compose.override.yml"
-          test -f "$RELEASE/docker-compose.yml"
-          test -f "$RELEASE/backend/Dockerfile"
-          test -f "$RELEASE/backend-super/Dockerfile"
-
-          mkdir -p "$BACKUP"
-
-          for path in \
-            docker-compose.yml \
+            --exclude='__pycache__' \
+            --exclude='*/.next' \
+            --exclude='.next' \
             backend \
             backend-super \
             frontend/admin-panel \
             frontend/super-admin \
             wa-gateway \
             gateway
-          do
-            if [ -e "$LIVE/$path" ]; then
-              mkdir -p "$BACKUP/$(dirname "$path")"
-              cp -a "$LIVE/$path" "$BACKUP/$path"
-            fi
-          done
 
-          # Keep production secrets and the existing Compose override.
-          # Do not delete files or database volumes.
-          cp -a "$RELEASE/." "$LIVE/"
+          tar -tzf "$RUNNER_TEMP/release.tar.gz"
 
-          cd "$LIVE"
+      - name: Upload source to isolated staging directory
+        env:
+          VM_USER: ${{ secrets.GCP_VM_USER }}
+          VM_HOST: ${{ secrets.GCP_VM_HOST }}
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          COMPOSE="sudo docker compose -f docker-compose.yml -f docker-compose.override.yml"
+          RELEASE_ID="$GITHUB_SHA"
+          REMOTE_DIR="/home/${VM_USER}/bookingchatbot-staging-${RELEASE_ID}"
 
-          $COMPOSE config -q
+          ssh gcp-production \
+            "mkdir -p '$REMOTE_DIR'"
 
-          $COMPOSE build \
-            backend backend-super admin-panel super-admin wa-gateway
+          scp "$RUNNER_TEMP/release.tar.gz" \
+            "gcp-production:$REMOTE_DIR/source.tar.gz"
 
-          $COMPOSE up -d --no-deps \
-            backend backend-super admin-panel super-admin wa-gateway
+          ssh gcp-production bash -s -- "$RELEASE_ID" <<'REMOTE'
+          set -euo pipefail
 
-          # Validate gateway configuration before reloading it.
-          if $COMPOSE ps --services | grep -qx gateway; then
-            if $COMPOSE exec -T gateway nginx -t; then
-              $COMPOSE exec -T gateway nginx -s reload
-            else
-              echo "Gateway configuration validation failed."
-              exit 1
-            fi
+          RELEASE_ID="$1"
+          REMOTE_DIR="/home/priyanshuraj/bookingchatbot-staging-${RELEASE_ID}"
+
+          mkdir -p "$REMOTE_DIR/source"
+          tar -xzf "$REMOTE_DIR/source.tar.gz" -C "$REMOTE_DIR/source"
+
+          test -f "$REMOTE_DIR/source/backend/Dockerfile"
+          test -f "$REMOTE_DIR/source/backend-super/Dockerfile"
+          test -f "$REMOTE_DIR/source/frontend/admin-panel/Dockerfile"
+          test -f "$REMOTE_DIR/source/frontend/super-admin/Dockerfile"
+          test -f "$REMOTE_DIR/source/wa-gateway/Dockerfile"
+          test -f "$REMOTE_DIR/source/gateway/nginx.conf"
+
+          if find "$REMOTE_DIR/source" -type f \
+            \( -name '.env' -o -name '.env.*' -o -name 'credentials.json' \) \
+            -print -quit | grep -q .; then
+            echo "Unexpected environment or credential file in staged source."
+            exit 1
           fi
 
-          sleep 10
-          $COMPOSE ps
-
-          echo "Deployment command sequence completed for $SHA"
+          echo "Source staged successfully. Production files were not changed."
           REMOTE
+
+      - name: Validate existing production Compose configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ssh gcp-production \
+            'sudo docker compose \
+              -f /home/priyanshuraj/BookingChatBot/docker-compose.yml \
+              -f /home/priyanshuraj/BookingChatBot/docker-compose.override.yml \
+              config -q'
+
+          echo "Existing production Compose configuration is valid."
+
+      - name: Report successful staging
+        run: |
+          echo "Staging and verification completed for commit $GITHUB_SHA"
+          echo "No production containers were rebuilt or restarted."
