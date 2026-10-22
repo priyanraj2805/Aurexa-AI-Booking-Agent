@@ -1,0 +1,160 @@
+
+name: Deploy BookingChatBot to GCP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bookingchatbot-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to dotstark-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      GCP_VM_HOST: ${{ secrets.GCP_VM_HOST }}
+      GCP_VM_USER: ${{ secrets.GCP_VM_USER }}
+      GCP_SSH_PRIVATE_KEY: ${{ secrets.GCP_SSH_PRIVATE_KEY }}
+      GCP_VM_KNOWN_HOSTS: ${{ secrets.GCP_VM_KNOWN_HOSTS }}
+
+    steps:
+      - name: Checkout production branch
+        uses: actions/checkout@v4
+        with:
+          ref: Aurexa-production
+          persist-credentials: false
+
+      - name: Configure SSH securely
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$GCP_SSH_PRIVATE_KEY" > "$HOME/.ssh/deploy_key"
+          chmod 600 "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$GCP_VM_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+          ssh-keygen -F "$GCP_VM_HOST" -f "$HOME/.ssh/known_hosts"
+
+          cat > "$HOME/.ssh/config" <<EOF
+          Host gcp-production
+            HostName $GCP_VM_HOST
+            User $GCP_VM_USER
+            IdentityFile $HOME/.ssh/deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            UserKnownHostsFile $HOME/.ssh/known_hosts
+            BatchMode yes
+          EOF
+          chmod 600 "$HOME/.ssh/config"
+
+          ssh gcp-production \
+            'sudo -n docker ps --format "{{.Names}}"'
+
+      - name: Package application source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf "$RUNNER_TEMP/release.tar.gz" \
+            --exclude='.git' \
+            --exclude='*/.git' \
+            --exclude='.env' \
+            --exclude='*/.env' \
+            --exclude='docker-compose.override.yml' \
+            --exclude='*/node_modules' \
+            --exclude='node_modules' \
+            --exclude='.venv' \
+            --exclude='*/.venv' \
+            --exclude='__pycache__' \
+            --exclude='*/__pycache__' \
+            -C "$GITHUB_WORKSPACE" .
+
+      - name: Upload release to staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE="/home/${GCP_VM_USER}/bookingchatbot-release-${GITHUB_SHA}"
+
+          ssh gcp-production \
+            "mkdir -p '$RELEASE'"
+
+          scp "$RUNNER_TEMP/release.tar.gz" \
+            "gcp-production:$RELEASE/source.tar.gz"
+
+          ssh gcp-production \
+            "mkdir -p '$RELEASE/source' &&
+             tar -xzf '$RELEASE/source.tar.gz' -C '$RELEASE/source'"
+
+      - name: Deploy application
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ssh gcp-production bash -s -- "$GITHUB_SHA" <<'REMOTE'
+          set -Eeuo pipefail
+
+          SHA="$1"
+          LIVE="/home/priyanshuraj/BookingChatBot"
+          RELEASE="/home/priyanshuraj/bookingchatbot-release-${SHA}/source"
+          BACKUP="/home/priyanshuraj/bookingchatbot-backups/${SHA}"
+
+          test -f "$LIVE/.env"
+          test -f "$LIVE/docker-compose.override.yml"
+          test -f "$RELEASE/docker-compose.yml"
+          test -f "$RELEASE/backend/Dockerfile"
+          test -f "$RELEASE/backend-super/Dockerfile"
+
+          mkdir -p "$BACKUP"
+
+          for path in \
+            docker-compose.yml \
+            backend \
+            backend-super \
+            frontend/admin-panel \
+            frontend/super-admin \
+            wa-gateway \
+            gateway
+          do
+            if [ -e "$LIVE/$path" ]; then
+              mkdir -p "$BACKUP/$(dirname "$path")"
+              cp -a "$LIVE/$path" "$BACKUP/$path"
+            fi
+          done
+
+          # Keep production secrets and the existing Compose override.
+          # Do not delete files or database volumes.
+          cp -a "$RELEASE/." "$LIVE/"
+
+          cd "$LIVE"
+
+          COMPOSE="sudo docker compose -f docker-compose.yml -f docker-compose.override.yml"
+
+          $COMPOSE config -q
+
+          $COMPOSE build \
+            backend backend-super admin-panel super-admin wa-gateway
+
+          $COMPOSE up -d --no-deps \
+            backend backend-super admin-panel super-admin wa-gateway
+
+          # Validate gateway configuration before reloading it.
+          if $COMPOSE ps --services | grep -qx gateway; then
+            if $COMPOSE exec -T gateway nginx -t; then
+              $COMPOSE exec -T gateway nginx -s reload
+            else
+              echo "Gateway configuration validation failed."
+              exit 1
+            fi
+          fi
+
+          sleep 10
+          $COMPOSE ps
+
+          echo "Deployment command sequence completed for $SHA"
+          REMOTE
