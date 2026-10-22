@@ -4357,12 +4357,14 @@ async def get_upcoming_bookings(
         _pids = {b.provider_id for b, _, _ in rows if b.provider_id}
         _uids = {b.unit_id for b, _, _ in rows if b.unit_id}
         _pmap: dict = {}
+        _prolemap: dict = {}
         _umap: dict = {}
         if _pids:
             for _p in (
                 await db.execute(select(_PV).where(_PV.id.in_(_pids)))
             ).scalars().all():
                 _pmap[_p.id] = _p.full_name
+                _prolemap[_p.id] = getattr(_p, "role_label", None)
         if _uids:
             for _u in (
                 await db.execute(select(_SU).where(_SU.id.in_(_uids)))
