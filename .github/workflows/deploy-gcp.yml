@@ -15,10 +15,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  verify-and-stage:
-    name: Verify SSH and stage release
+  deploy:
+    name: Verify, backup and deploy production
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
 
     steps:
       - name: Checkout production branch
@@ -51,8 +51,8 @@ jobs:
           chmod 600 "$HOME/.ssh/deploy_key"
           chmod 600 "$HOME/.ssh/known_hosts"
 
-          ssh-keygen -y -f "$HOME/.ssh/deploy_key" > /dev/null
-          ssh-keygen -F "$VM_HOST" -f "$HOME/.ssh/known_hosts" > /dev/null
+          ssh-keygen -y -f "$HOME/.ssh/deploy_key" >/dev/null
+          ssh-keygen -F "$VM_HOST" -f "$HOME/.ssh/known_hosts" >/dev/null
 
           cat > "$HOME/.ssh/config" <<EOF
           Host gcp-production
@@ -101,12 +101,11 @@ jobs:
             wa-gateway \
             gateway
 
-          tar -tzf "$RUNNER_TEMP/release.tar.gz"
+          tar -tzf "$RUNNER_TEMP/release.tar.gz" >/dev/null
 
-      - name: Upload source to isolated staging directory
+      - name: Upload and verify staged release
         env:
           VM_USER: ${{ secrets.GCP_VM_USER }}
-          VM_HOST: ${{ secrets.GCP_VM_HOST }}
         shell: bash
         run: |
           set -euo pipefail
@@ -120,11 +119,12 @@ jobs:
           scp "$RUNNER_TEMP/release.tar.gz" \
             "gcp-production:$REMOTE_DIR/source.tar.gz"
 
-          ssh gcp-production bash -s -- "$RELEASE_ID" <<'REMOTE'
+          ssh gcp-production bash -s -- "$RELEASE_ID" "$VM_USER" <<'REMOTE'
           set -euo pipefail
 
           RELEASE_ID="$1"
-          REMOTE_DIR="/home/priyanshuraj/bookingchatbot-staging-${RELEASE_ID}"
+          VM_USER="$2"
+          REMOTE_DIR="/home/${VM_USER}/bookingchatbot-staging-${RELEASE_ID}"
 
           mkdir -p "$REMOTE_DIR/source"
           tar -xzf "$REMOTE_DIR/source.tar.gz" -C "$REMOTE_DIR/source"
@@ -139,27 +139,223 @@ jobs:
           if find "$REMOTE_DIR/source" -type f \
             \( -name '.env' -o -name '.env.*' -o -name 'credentials.json' \) \
             -print -quit | grep -q .; then
-            echo "Unexpected environment or credential file in staged source."
+            echo "Unexpected environment or credentials file in release."
             exit 1
           fi
 
-          echo "Source staged successfully. Production files were not changed."
+          echo "Release staged and verified."
           REMOTE
 
-      - name: Validate existing production Compose configuration
+      - name: Validate production configuration and prerequisites
+        env:
+          VM_USER: ${{ secrets.GCP_VM_USER }}
         shell: bash
         run: |
           set -euo pipefail
 
-          ssh gcp-production \
-            'sudo docker compose \
-              -f /home/priyanshuraj/BookingChatBot/docker-compose.yml \
-              -f /home/priyanshuraj/BookingChatBot/docker-compose.override.yml \
-              config -q'
+          ssh gcp-production bash -s -- "$VM_USER" <<'REMOTE'
+          set -euo pipefail
 
-          echo "Existing production Compose configuration is valid."
+          ROOT="/home/priyanshuraj/BookingChatBot"
 
-      - name: Report successful staging
+          test -f "$ROOT/docker-compose.yml"
+          test -f "$ROOT/docker-compose.override.yml"
+          test -f "$ROOT/backend/.env.docker"
+          test -f "$ROOT/backend-super/.env.docker"
+
+          command -v rsync >/dev/null
+          command -v tar >/dev/null
+          command -v curl >/dev/null
+
+          sudo -n docker info >/dev/null
+
+          sudo docker compose \
+            -f "$ROOT/docker-compose.yml" \
+            -f "$ROOT/docker-compose.override.yml" \
+            config -q
+
+          echo "Production configuration and prerequisites validated."
+          REMOTE
+
+      - name: Backup production and deploy release
+        env:
+          VM_USER: ${{ secrets.GCP_VM_USER }}
+        shell: bash
         run: |
-          echo "Staging and verification completed for commit $GITHUB_SHA"
-          echo "No production containers were rebuilt or restarted."
+          set -euo pipefail
+
+          ssh gcp-production bash -s -- "$GITHUB_SHA" "$VM_USER" <<'REMOTE'
+          set -Eeuo pipefail
+          umask 077
+
+          RELEASE_ID="$1"
+          VM_USER="$2"
+
+          ROOT="/home/priyanshuraj/BookingChatBot"
+          STAGE="/home/${VM_USER}/bookingchatbot-staging-${RELEASE_ID}/source"
+          BACKUP="/home/${VM_USER}/bookingchatbot-backup-${RELEASE_ID}"
+          ROLLBACK="/home/${VM_USER}/bookingchatbot-rollback-${RELEASE_ID}"
+
+          COMPOSE=(
+            sudo docker compose
+            -f "$ROOT/docker-compose.yml"
+            -f "$ROOT/docker-compose.override.yml"
+          )
+
+          for path in \
+            "$STAGE/backend/Dockerfile" \
+            "$STAGE/backend-super/Dockerfile" \
+            "$STAGE/frontend/admin-panel/Dockerfile" \
+            "$STAGE/frontend/super-admin/Dockerfile" \
+            "$STAGE/wa-gateway/Dockerfile" \
+            "$STAGE/gateway/nginx.conf"
+          do
+            test -f "$path"
+          done
+
+          mkdir -p "$BACKUP" "$ROLLBACK"
+
+          # Save the current application code before changing it.
+          tar -czf "$BACKUP/code.tar.gz" \
+            -C "$ROOT" \
+            --exclude='backend/.env*' \
+            --exclude='backend-super/.env*' \
+            --exclude='*/node_modules' \
+            --exclude='*/.git' \
+            --exclude='*/.venv' \
+            --exclude='*/__pycache__' \
+            --exclude='*/.next' \
+            backend \
+            backend-super \
+            frontend/admin-panel \
+            frontend/super-admin \
+            wa-gateway \
+            gateway
+
+          test -s "$BACKUP/code.tar.gz"
+
+          # Take a database dump before deploying application changes.
+          "${COMPOSE[@]}" exec -T postgres sh -lc \
+            'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' \
+            > "$BACKUP/postgres.sql"
+
+          test -s "$BACKUP/postgres.sql"
+
+          # Prepare the previous application source for rollback.
+          tar -xzf "$BACKUP/code.tar.gz" -C "$ROLLBACK"
+
+          rollback() {
+            rc=$?
+            trap - ERR
+            echo "Deployment failed; attempting application rollback."
+
+            for dir in \
+              backend \
+              backend-super \
+              frontend/admin-panel \
+              frontend/super-admin \
+              wa-gateway \
+              gateway
+            do
+              if [ -d "$ROLLBACK/$dir" ]; then
+                rsync -a --delete \
+                  --exclude='.env*' \
+                  --exclude='node_modules/' \
+                  --exclude='.venv/' \
+                  --exclude='__pycache__/' \
+                  --exclude='.next/' \
+                  "$ROLLBACK/$dir/" "$ROOT/$dir/" || true
+              fi
+            done
+
+            "${COMPOSE[@]}" build \
+              backend backend-super admin-panel super-admin wa-gateway || true
+
+            "${COMPOSE[@]}" up -d --no-deps \
+              backend backend-super admin-panel super-admin wa-gateway gateway || true
+
+            echo "Rollback was attempted. Inspect logs and service health."
+            exit "$rc"
+          }
+
+          trap rollback ERR
+
+          # Update application source while preserving environment files
+          # and excluded runtime/build directories.
+          for dir in \
+            backend \
+            backend-super \
+            frontend/admin-panel \
+            frontend/super-admin \
+            wa-gateway \
+            gateway
+          do
+            rsync -a --delete \
+              --exclude='.env*' \
+              --exclude='node_modules/' \
+              --exclude='.venv/' \
+              --exclude='__pycache__/' \
+              --exclude='.next/' \
+              "$STAGE/$dir/" "$ROOT/$dir/"
+          done
+
+          "${COMPOSE[@]}" config -q
+
+          # Build the application images before recreating services.
+          "${COMPOSE[@]}" build \
+            backend backend-super admin-panel super-admin wa-gateway
+
+          # Recreate only application services; do not recreate PostgreSQL,
+          # Redis, or Cloudflare tunnel containers in this step.
+          "${COMPOSE[@]}" up -d --no-deps --force-recreate \
+            backend backend-super admin-panel super-admin wa-gateway gateway
+
+          # Wait up to 90 seconds for all target containers to run.
+          all_running=false
+
+          for attempt in $(seq 1 30); do
+            all_running=true
+
+            for service in \
+              backend backend-super admin-panel super-admin wa-gateway gateway
+            do
+              if ! "${COMPOSE[@]}" ps --status running --services \
+                | grep -Fxq "$service"; then
+                all_running=false
+                break
+              fi
+            done
+
+            if [ "$all_running" = true ]; then
+              break
+            fi
+
+            sleep 3
+          done
+
+          if [ "$all_running" != true ]; then
+            echo "One or more application services are not running."
+            "${COMPOSE[@]}" ps
+            false
+          fi
+
+          # Basic gateway smoke test. A 5xx response is a deployment failure.
+          status="$(curl --max-time 10 -sS -o /dev/null \
+            -w '%{http_code}' http://127.0.0.1:8080/)"
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 500 ]; then
+            echo "Gateway smoke test failed with HTTP $status."
+            false
+          fi
+
+          trap - ERR
+
+          echo "Application deployment completed for $RELEASE_ID."
+          echo "Code backup: $BACKUP/code.tar.gz"
+          echo "Database dump: $BACKUP/postgres.sql"
+          echo "The database dump was retained; no automatic DB restore was performed."
+          REMOTE
+
+      - name: Report successful deployment
+        run: |
+          echo "Deployment completed for commit $GITHUB_SHA"
