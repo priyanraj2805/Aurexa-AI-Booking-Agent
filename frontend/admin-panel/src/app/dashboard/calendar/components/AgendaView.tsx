@@ -64,7 +64,7 @@ export function AgendaView({
             <Clock className="size-5" />
           </div>
           <div className="min-w-0">
-            <h2 className="text-xl font-bold tracking-tight">Upcoming Agenda</h2>
+            <h2 className="text-xl font-bold tracking-tight">Upcoming Bookings</h2>
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-widest">
               Live schedule feed
             </p>
