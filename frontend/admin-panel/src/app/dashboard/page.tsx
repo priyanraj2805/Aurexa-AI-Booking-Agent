@@ -210,29 +210,29 @@ function StatCard({
       className="group relative overflow-hidden rounded-2xl border border-border bg-card p-5 transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40"
     >
       <div className="absolute inset-x-0 top-0 h-[3px] bg-gradient-to-r from-transparent via-primary/60 to-transparent opacity-0 transition-opacity group-hover:opacity-100" />
-      <div className="flex items-center gap-3">
-        <span className={`flex items-center justify-center size-11 rounded-xl shrink-0 ${chipClass}`}>
-          <Icon className="size-5" />
+      <div className="flex flex-wrap items-center gap-3 gap-y-1">
+        <span className={`flex items-center justify-center size-9 sm:size-11 rounded-xl shrink-0 ${chipClass}`}>
+          <Icon className="size-4 sm:size-5" />
         </span>
         <div className="flex-1 min-w-0 overflow-hidden">
-          <div className="text-[13px] font-medium text-muted-foreground">{title}</div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-[28px] font-bold tracking-tight leading-none tabular-nums">{shown}</span>
+          <div className="text-[13px] font-medium text-muted-foreground truncate">{title}</div>
+          <div className="flex flex-wrap items-baseline gap-1.5">
+            <span className="text-[26px] lg:text-[28px] font-bold tracking-tight leading-none tabular-nums whitespace-nowrap">{shown}</span>
             {trend !== null && trend !== 0 && (
               <span
                 className={`inline-flex items-center gap-0.5 text-[11px] font-semibold whitespace-nowrap ${
                   trend > 0 ? "text-green-500" : "text-red-500"
                 }`}
               >
-                {trend > 0 ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
+                {trend > 0 ? <TrendingUp className="size-3 shrink-0" /> : <TrendingDown className="size-3 shrink-0" />}
                 {trend > 0 ? "+" : ""}
                 {trend}%
               </span>
             )}
           </div>
-          {badge && <div className="text-[11px] text-amber-500 mt-0.5">{badge}</div>}
+          {badge && <div className="text-[11px] text-amber-500 mt-0.5 truncate">{badge}</div>}
         </div>
-        <Sparkline data={spark} color={sparkColor} />
+        <span className="hidden sm:inline-flex shrink-0"><Sparkline data={spark} color={sparkColor} /></span>
       </div>
     </Link>
   );
