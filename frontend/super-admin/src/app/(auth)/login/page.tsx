@@ -23,9 +23,9 @@ export default function LoginPage() {
     try {
       const data = await api.post<LoginResponse>("/auth/login", { email, password });
       if (data.mfa.required) {
-        router.push("/mfa");
+        router.replace("/mfa");
       } else {
-        router.push("/dashboard");
+        router.replace("/dashboard");
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");

@@ -175,6 +175,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         skipAuth: true,
       });
       // Full navigation so the code visibly lands in the URL bar.
+      // Replace the current (login) history entry with the landing page
+      // first, so pressing the browser Back button from the dashboard
+      // lands on the homepage instead of the sign-in page.
+      try {
+        window.history.replaceState({}, "", "/");
+      } catch {
+        // ignore — best-effort history hygiene
+      }
       window.location.href = `/auth/callback?code=${encodeURIComponent(data.code)}`;
     } catch (err) {
       throw err;
