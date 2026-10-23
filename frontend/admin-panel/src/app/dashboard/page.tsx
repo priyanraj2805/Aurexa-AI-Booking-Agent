@@ -17,7 +17,6 @@ import {
   TrendingUp,
   TrendingDown,
   Activity,
-  Clock,
   Target,
 } from "lucide-react";
 import Link from "next/link";
@@ -177,18 +176,6 @@ function MiniTrendArea({
           />
         </AreaChart>
       </ResponsiveContainer>
-    </div>
-  );
-}
-
-function StatMiniBar({ value, max, color }: { value: number; max: number; color: string }) {
-  const pct = max > 0 ? Math.min((value / max) * 100, 100) : 0;
-  return (
-    <div className="h-1.5 w-full bg-secondary rounded-full overflow-hidden">
-      <div
-        className="h-full rounded-full transition-all duration-500"
-        style={{ width: `${pct}%`, backgroundColor: color, minWidth: pct > 0 ? "4px" : "0" }}
-      />
     </div>
   );
 }
@@ -578,7 +565,7 @@ function ChannelPerformance({
       <CardHeader
         icon={MessageSquare}
         title="Channel Performance"
-        subtitle="Confirmed bookings — 7-day trend + lifetime mix"
+        subtitle="Confirmed bookings — 7-day trend + lifetime Bookings"
         iconClass="bg-blue-500/15 text-blue-500"
         action={
           <select
@@ -608,66 +595,68 @@ function ChannelPerformance({
         </div>
       ) : (
         <>
-          <div className="text-center pb-3">
-            <div className="text-4xl font-bold tracking-tight tabular-nums">{scopedTotal}</div>
-            <div className="text-xs text-muted-foreground mt-0.5">
+          {/* Headline: one number, left-aligned, so the card reads top-down */}
+          <div className="flex items-baseline gap-2">
+            <span className="text-3xl font-bold leading-none tracking-tight tabular-nums">
+              {scopedTotal}
+            </span>
+            <span className="text-xs text-muted-foreground">
               {scope === "all"
                 ? "confirmed bookings"
                 : `${scope === "web" ? "web" : "WhatsApp"} confirmed`}
-            </div>
+            </span>
           </div>
-          <MiniTrendArea
-            data={last7.map((d) => ({ date: d.date, count: d.count }))}
-            color={color}
-            tooltipBg={chartColors.tooltipBg}
-            tooltipBorder={chartColors.tooltipBorder}
-            tickColor={chartColors.tick}
-          />
-          <div className="mt-4 space-y-3">
+          <p className="mt-1 text-[11px] text-muted-foreground">Last 7 days</p>
+          <div className="mt-2">
+            <MiniTrendArea
+              data={last7.map((d) => ({ date: d.date, count: d.count }))}
+              color={color}
+              tooltipBg={chartColors.tooltipBg}
+              tooltipBorder={chartColors.tooltipBorder}
+              tickColor={chartColors.tick}
+            />
+          </div>
+          {/* Three compact readouts instead of rows-with-bars (bars were noise) */}
+          <div className="mt-4 grid grid-cols-3 gap-2">
             {[
-              { label: "Today", value: today, dot: color },
-              { label: "Avg per day", value: avg, dot: "#10b981" },
-              { label: "This week", value: weekTotal, dot: chartColors.blue },
-            ].map((row) => (
+              { label: "Today", value: today },
+              { label: "Avg / day", value: avg },
+              { label: "This week", value: weekTotal },
+            ].map((m) => (
               <div
-                key={row.label}
-                className="flex items-center justify-between gap-4 rounded-lg px-2 py-1 transition-colors hover:bg-secondary/30"
+                key={m.label}
+                className="rounded-lg border border-border bg-background/60 px-2 py-1.5 text-center"
               >
-                <div className="flex items-center gap-2">
-                  <span className="size-1.5 rounded-full" style={{ backgroundColor: row.dot }} />
-                  <span className="text-sm text-muted-foreground">{row.label}</span>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-right text-xl font-bold tabular-nums">{row.value}</div>
-                  <StatMiniBar value={row.value} max={maxVal} color={color} />
-                </div>
+                <div className="text-lg font-bold leading-tight tabular-nums">{m.value}</div>
+                <div className="text-[10px] text-muted-foreground">{m.label}</div>
               </div>
             ))}
           </div>
-          <div className="pt-4 mt-4 border-t border-border space-y-2">
+          {/* Lifetime mix: label, bar, count · % on one line */}
+          <div className="mt-4 pt-3 border-t border-border">
             <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-              <span>Lifetime mix</span>
+              <span>Lifetime Bookings</span>
               <span>{channelTotal} confirmed</span>
             </div>
-            {[
-              { label: "Web", value: web, color: chartColors.blue },
-              { label: "WhatsApp", value: wa, color: chartColors.green },
-            ].map((ch) => (
-              <div key={ch.label} className="space-y-1">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-muted-foreground">{ch.label}</span>
-                  <span className="tabular-nums font-semibold">
+            <div className="mt-2 space-y-2">
+              {[
+                { label: "Web", value: web, color: chartColors.blue },
+                { label: "WhatsApp", value: wa, color: chartColors.green },
+              ].map((ch) => (
+                <div key={ch.label} className="flex items-center gap-2">
+                  <span className="w-16 shrink-0 text-xs text-muted-foreground">{ch.label}</span>
+                  <div className="h-1.5 flex-1 rounded-full bg-secondary overflow-hidden">
+                    <div
+                      className="h-full rounded-full"
+                      style={{ width: `${share(ch.value)}%`, backgroundColor: ch.color }}
+                    />
+                  </div>
+                  <span className="w-20 shrink-0 text-right text-xs tabular-nums font-semibold">
                     {ch.value} · {share(ch.value)}%
                   </span>
                 </div>
-                <div className="h-1.5 w-full bg-secondary rounded-full overflow-hidden">
-                  <div
-                    className="h-full rounded-full"
-                    style={{ width: `${share(ch.value)}%`, backgroundColor: ch.color }}
-                  />
-                </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         </>
       )}
@@ -710,7 +699,6 @@ function ConversationFunnel({
       <CardHeader
         icon={Target}
         title="Conversation Funnel"
-        subtitle="Where chats end up"
         iconClass="bg-amber-500/15 text-amber-500"
       />
       {loading ? (
@@ -872,15 +860,7 @@ export default function DashboardPage() {
       };
 
   const bookingsTrend = trendPct(stats?.bookings_by_day);
-
-  // Appointment KPIs come from ONE source (the bookings table) so they
-  // reconcile: Upcoming + Completed + Cancelled + No-show = Appointments.
-  const attendance = stats?.appointments_by_attendance ?? {};
-  const apptTotal =
-    Object.values(attendance).reduce((s, v) => s + v, 0) || (stats?.total_bookings ?? 0);
-  const apptScheduled = attendance.SCHEDULED ?? 0;
-  const apptAttended = attendance.ATTENDED ?? 0;
-  const apptCancelled = attendance.CANCELLED ?? 0;
+  const cancelledTrend = trendPct(stats?.cancelled_by_day);
 
   const fullAreaData = (stats?.bookings_by_day ?? []).map((d, i) => ({
     date: d.date,
@@ -889,25 +869,6 @@ export default function DashboardPage() {
   }));
 
   const areaData = fullAreaData.slice(-range);
-
-  const chartScrollRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const el = chartScrollRef.current;
-    if (el) el.scrollLeft = el.scrollWidth;
-  }, [range, statsLoading]);
-
-  const barData = (stats?.channel_breakdown ?? []).map((c) => ({
-    name: c.channel,
-    count: c.count,
-  }));
-  const barColors = [
-    chartColors.indigo,
-    chartColors.blue,
-    chartColors.green,
-    chartColors.amber,
-    chartColors.violet,
-    chartColors.red,
-  ];
 
   const hasActivity =
     (stats?.total_bookings ?? 0) + (stats?.cancelled_sessions ?? 0) > 0;
@@ -1030,8 +991,8 @@ export default function DashboardPage() {
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           <StatCard
-            title="Appointments"
-            value={apptTotal}
+            title="Total Bookings"
+            value={stats?.total_bookings ?? 0}
             icon={CalendarCheck}
             chipClass={indigoIcon}
             href="/dashboard/bookings"
@@ -1041,34 +1002,35 @@ export default function DashboardPage() {
             badge={stats?.bookings_this_week ? `${stats.bookings_this_week} this week` : null}
           />
           <StatCard
-            title="Upcoming"
-            value={apptScheduled}
-            icon={Clock}
-            chipClass={activeIcon}
-            href="/dashboard/bookings"
-            spark={[]}
-            sparkColor={chartColors.blue}
-            trend={null}
-          />
-          <StatCard
-            title="Completed"
-            value={apptAttended}
+            title="Confirmed"
+            value={stats?.confirmed_sessions ?? 0}
             icon={CheckCircle2}
             chipClass={confirmedIcon}
-            href="/dashboard/bookings"
-            spark={[]}
+            href="/dashboard/bookings?status=CONFIRMED"
+            spark={(stats?.bookings_by_day ?? []).map((d) => d.count)}
             sparkColor={chartColors.green}
-            trend={null}
+            trend={bookingsTrend}
           />
           <StatCard
             title="Cancelled"
-            value={apptCancelled}
+            value={stats?.cancelled_sessions ?? 0}
             icon={CalendarX2}
             chipClass={cancelledIcon}
             href="/dashboard/bookings/cancelled"
-            spark={[]}
+            spark={(stats?.cancelled_by_day ?? []).map((d) => d.count)}
             sparkColor={chartColors.red}
+            trend={cancelledTrend}
+          />
+          <StatCard
+            title="Active Conversations"
+            value={stats?.active_sessions ?? 0}
+            icon={MessageSquare}
+            chipClass={activeIcon}
+            href="/dashboard/conversations"
+            spark={[]}
+            sparkColor={chartColors.blue}
             trend={null}
+            badge={stats?.has_schedule ? null : "Schedule needed"}
           />
         </div>
       )}
@@ -1076,7 +1038,7 @@ export default function DashboardPage() {
       {isOrg && <RevenueStrip />}
 
       {/* Activity overview + channel performance */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4 items-start">
         <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 lg:col-span-2 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
           <CardHeader
             icon={Activity}
@@ -1084,19 +1046,32 @@ export default function DashboardPage() {
             subtitle={`Bookings vs cancellations — ${range}-day window`}
             iconClass={indigoIcon}
             action={
-              <select
-                value={range}
-                onChange={(e) => {
-                  setRange(Number(e.target.value));
-                }}
-                className="rounded-md border border-border bg-background px-2 py-1 text-xs text-muted-foreground outline-none focus:border-primary"
-              >
-                {WINDOW_SIZES.map((d) => (
-                  <option key={d} value={d}>
-                    {d} days
-                  </option>
-                ))}
-              </select>
+              <div className="flex items-center gap-3">
+                <span className="hidden sm:flex items-center gap-3 text-[11px] text-muted-foreground">
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="size-2 rounded-full" style={{ backgroundColor: chartColors.indigo }} />
+                    Bookings
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="size-2 rounded-full" style={{ backgroundColor: chartColors.cancelled }} />
+                    Cancelled
+                  </span>
+                </span>
+                <select
+                  value={range}
+                  onChange={(e) => {
+                    setRange(Number(e.target.value));
+                  }}
+                  className="rounded-md border border-border bg-background px-2 py-1 text-xs text-muted-foreground outline-none focus:border-primary"
+                  aria-label="Chart range"
+                >
+                  {WINDOW_SIZES.map((d) => (
+                    <option key={d} value={d}>
+                      {d} days
+                    </option>
+                  ))}
+                </select>
+              </div>
             }
           />
           {statsLoading ? (
@@ -1113,14 +1088,7 @@ export default function DashboardPage() {
               <p className="text-muted-foreground text-sm">No booking activity yet.</p>
             </div>
           ) : (
-            <div
-              ref={chartScrollRef}
-              className="h-64 overflow-x-auto overflow-y-hidden scrollbar-thin"
-            >
-              <div
-                className="h-full"
-                style={{ width: `${(areaData.length / 7) * 100}%`, minWidth: "100%" }}
-              >
+            <div className="h-56">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={areaData} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
                   <defs>
@@ -1168,7 +1136,6 @@ export default function DashboardPage() {
                   />
                 </AreaChart>
               </ResponsiveContainer>
-              </div>
             </div>
           )}
         </div>
@@ -1183,7 +1150,7 @@ export default function DashboardPage() {
 
 
       {/* Row 2: Conversation funnel + Recent Appointments */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4 items-stretch">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4 items-start">
         <ConversationFunnel
           stats={stats}
           loading={statsLoading}

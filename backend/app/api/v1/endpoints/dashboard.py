@@ -507,11 +507,6 @@ class StatsResponse(BaseModel):
     channel_breakdown: List[ChannelCount] = []  # CONFIRMED sessions by channel
     web_bookings_by_day: List[DailyCount] = []  # Last 14 days of web bookings
     whatsapp_bookings_by_day: List[DailyCount] = []  # Last 14 days of WhatsApp bookings
-    # Appointments by attendance (SCHEDULED / ATTENDED / NO_SHOW / CANCELLED /
-    # RESCHEDULED) from the bookings table. These reconcile with each other -
-    # unlike total_bookings (bookings) vs confirmed/cancelled (chat sessions),
-    # which count different objects and must not be read as one sum.
-    appointments_by_attendance: Dict[str, int] = {}
     # Conversations by session status (ACTIVE / CONFIRMED / CANCELLED /
     # EXPIRED). Powers the funnel card so drop-off is visible.
     conversation_status: Dict[str, int] = {}
@@ -877,13 +872,7 @@ async def get_stats(
         .group_by("day")
     )
 
-    # Appointments by attendance status + conversations by session status.
-    # Both power the dashboard's reconciled KPI row and the funnel card.
-    attendance_rows = await db.execute(
-        select(Booking.attendance_status, sa_func.count())
-        .where(*_scoped(Booking))
-        .group_by(Booking.attendance_status)
-    )
+    # Conversations by session status - powers the dashboard's funnel card.
     session_status_rows = await db.execute(
         select(ChatSession.session_status, sa_func.count())
         .where(*_scoped(ChatSession))
@@ -916,10 +905,6 @@ async def get_stats(
         ],
         web_bookings_by_day=fill_series(web_booking_rows.all()),
         whatsapp_bookings_by_day=fill_series(whatsapp_booking_rows.all()),
-        appointments_by_attendance={
-            str(status or "SCHEDULED"): int(count)
-            for status, count in attendance_rows.all()
-        },
         conversation_status={
             str(status or "UNKNOWN"): int(count)
             for status, count in session_status_rows.all()
