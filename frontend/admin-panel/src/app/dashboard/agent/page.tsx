@@ -1118,7 +1118,8 @@ export default function AgentCorePage() {
           <div>
             <h3 className="text-base font-semibold">Quick Prompts</h3>
             <p className="text-[13px] text-muted-foreground">
-              Tappable suggestion buttons in chat, so visitors tap instead of typing. Max 8 — 3 to 4 best.
+              Tappable suggestion buttons in chat, so visitors tap instead of typing. 
+              Max 8 — 3 to 4 best.
             </p>
           </div>
           <button

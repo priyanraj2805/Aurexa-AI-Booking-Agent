@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
 import { AuthProvider } from "@/lib/auth-context";
+// @ts-expect-error Next.js handles CSS imports during bundling.
 import "./globals.css";
 
 const inter = Inter({

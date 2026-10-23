@@ -93,7 +93,7 @@ export function AnnouncementBell() {
   const loadItems = React.useCallback(async () => {
     setLoading(true);
     try {
-      const r = await api.get<{ items: BroadcastItem[] }>("/broadcasts");
+      const r = await api.get<{ items: BroadcastItem[]; unread_count?: number }>("/broadcasts");
       setItems(r.items);
       setUnread(r.unread_count ?? 0);
     } catch (err) {

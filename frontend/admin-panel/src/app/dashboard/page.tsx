@@ -694,7 +694,7 @@ function ConversationFunnel({
   const stages = [
     { label: "Confirmed", value: confirmed, color: "#10b981", hint: "reached a booking" },
     { label: "Expired", value: expired, color: "#f59e0b", hint: "went quiet" },
-    { label: "Cancelled", value: cancelled, color: "#ef4444", hint: "dropped off" },
+    { label: "Cancelled", value: cancelled, color: "#ef4444", hint: "Cancelled Bookings" },
     { label: "Active", value: active, color: "#3b82f6", hint: "in progress" },
   ];
 

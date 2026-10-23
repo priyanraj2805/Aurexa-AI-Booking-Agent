@@ -208,7 +208,7 @@ export default function BookingsPage() {
             <option value="">All Statuses</option>
             <option value="SCHEDULED">Scheduled</option>
             <option value="ATTENDED">Attended</option>
-            <option value="NO_SHOW">No-Show</option>
+            <option value="NO_SHOW">Not-Attended</option>
             <option value="CANCELLED">Cancelled</option>
             <option value="RESCHEDULED">Rescheduled</option>
           </select>
