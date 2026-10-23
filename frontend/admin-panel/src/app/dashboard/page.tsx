@@ -565,7 +565,7 @@ function ChannelPerformance({
       <CardHeader
         icon={MessageSquare}
         title="Channel Performance"
-        subtitle="Confirmed bookings — 7-day trend + lifetime Bookings"
+        subtitle="7-day trend + lifetime Bookings"
         iconClass="bg-blue-500/15 text-blue-500"
         action={
           <select
@@ -788,7 +788,7 @@ function CardHeader({
         </span>
         <div>
           <h3 className="text-sm font-semibold leading-tight">{title}</h3>
-          {subtitle && <p className="text-[11px] text-muted-foreground">{subtitle}</p>}
+          {subtitle && <p className="text-[11px] text-muted-foreground truncate">{subtitle}</p>}
         </div>
       </div>
       {action && <div className="flex items-center">{action}</div>}
