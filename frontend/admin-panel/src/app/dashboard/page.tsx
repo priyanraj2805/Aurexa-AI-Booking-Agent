@@ -561,7 +561,7 @@ function ChannelPerformance({
   const share = (n: number) => (channelTotal > 0 ? Math.round((n / channelTotal) * 100) : 0);
 
   return (
-    <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
+    <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
       <CardHeader
         icon={MessageSquare}
         title="Channel Performance"
@@ -581,15 +581,15 @@ function ChannelPerformance({
         }
       />
       {loading ? (
-        <div className="flex items-center justify-center text-muted-foreground text-sm h-48">
+        <div className="flex items-center justify-center text-muted-foreground text-sm flex-1 min-h-[12rem]">
           <Loader2 className="size-4 animate-spin" />
         </div>
       ) : error ? (
-        <div className="flex items-center gap-2 text-red-500 text-sm py-8">
+        <div className="flex items-center gap-2 text-red-500 text-sm flex-1">
           <AlertCircle className="size-4" /> {error}
         </div>
       ) : channelTotal === 0 ? (
-        <div className="text-center py-10">
+        <div className="flex-1 flex flex-col items-center justify-center py-10">
           <MessageSquare className="size-8 text-muted-foreground/40 mx-auto mb-2" />
           <p className="text-muted-foreground text-sm">No confirmed bookings yet.</p>
         </div>
@@ -632,6 +632,10 @@ function ChannelPerformance({
               </div>
             ))}
           </div>
+          {/* Fills leftover height when this card is the shorter one in the
+              row, so the lifetime block stays pinned to the card bottom
+              instead of a gap opening up beneath it. */}
+          <div className="flex-1" />
           {/* Lifetime mix: label, bar, count · % on one line */}
           <div className="mt-4 pt-3 border-t border-border">
             <div className="flex items-center justify-between text-[11px] text-muted-foreground">
@@ -702,15 +706,15 @@ function ConversationFunnel({
         iconClass="bg-amber-500/15 text-amber-500"
       />
       {loading ? (
-        <div className="flex items-center justify-center text-muted-foreground text-sm h-40">
+        <div className="flex items-center justify-center text-muted-foreground text-sm flex-1 min-h-[10rem]">
           <Loader2 className="size-4 animate-spin" />
         </div>
       ) : error ? (
-        <div className="flex items-center gap-2 text-red-500 text-sm py-8">
+        <div className="flex items-center gap-2 text-red-500 text-sm flex-1">
           <AlertCircle className="size-4" /> {error}
         </div>
       ) : total === 0 ? (
-        <div className="text-center py-10">
+        <div className="flex-1 flex flex-col items-center justify-center py-10">
           <Target className="size-8 text-muted-foreground/40 mx-auto mb-2" />
           <p className="text-muted-foreground text-sm">No conversations yet.</p>
         </div>
@@ -737,7 +741,10 @@ function ConversationFunnel({
                 )
             )}
           </div>
-          <div className="space-y-2 flex-1">
+          {/* Stages absorb the extra height (rows spread evenly) so the funnel
+              reaches the same bottom edge as Recent Appointments instead of
+              ending short with dead space above the footnote. */}
+          <div className="space-y-2 flex-1 flex flex-col justify-between">
             {stages.map((s) => (
               <div key={s.label} className="flex items-center gap-2 text-sm">
                 <span className="size-2 rounded-sm shrink-0" style={{ backgroundColor: s.color }} />
@@ -1038,8 +1045,8 @@ export default function DashboardPage() {
       {isOrg && <RevenueStrip />}
 
       {/* Activity overview + channel performance */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4 items-start">
-        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 lg:col-span-2 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
+        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col lg:col-span-2 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
           <CardHeader
             icon={Activity}
             title="Activity Overview"
@@ -1074,21 +1081,24 @@ export default function DashboardPage() {
               </div>
             }
           />
+          {/* Every state takes the remaining card height (min keeps the chart
+              readable) so the card bottoms line up with Channel Performance
+              without leaving dead space below the chart. */}
           {statsLoading ? (
-            <div className="flex items-center gap-2 text-muted-foreground text-sm h-56">
+            <div className="flex items-center gap-2 text-muted-foreground text-sm flex-1 min-h-[14rem]">
               <Loader2 className="size-4 animate-spin" /> Loading chart...
             </div>
           ) : statsError ? (
-            <div className="flex items-center gap-2 text-red-500 text-sm h-56">
+            <div className="flex items-center gap-2 text-red-500 text-sm flex-1 min-h-[14rem]">
               <AlertCircle className="size-4" /> {statsError}
             </div>
           ) : areaData.length === 0 || !hasActivity ? (
-            <div className="text-center py-16">
+            <div className="flex-1 flex flex-col items-center justify-center py-16">
               <Activity className="size-8 text-muted-foreground/40 mx-auto mb-2" />
               <p className="text-muted-foreground text-sm">No booking activity yet.</p>
             </div>
           ) : (
-            <div className="h-56">
+            <div className="flex-1 min-h-[14rem]">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={areaData} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
                   <defs>
@@ -1150,7 +1160,7 @@ export default function DashboardPage() {
 
 
       {/* Row 2: Conversation funnel + Recent Appointments */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
         <ConversationFunnel
           stats={stats}
           loading={statsLoading}
