@@ -128,7 +128,6 @@ export function BookingDialog({
                 <Badge className="bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 border-emerald-500/20 px-2 py-0 h-5 text-[10px] font-semibold uppercase tracking-wider">
                   Confirmed
                 </Badge>
-                <span className="text-[10px] text-muted-foreground font-semibold tracking-widest opacity-50">#{event.id.slice(-8)}</span>
               </div>
               <h2 className="text-xl sm:text-2xl font-bold tracking-tight leading-tight">{event.customer_name}</h2>
             </div>
