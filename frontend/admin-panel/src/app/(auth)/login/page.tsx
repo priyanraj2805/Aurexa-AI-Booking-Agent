@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import Link from "next/link";
 import { Loader2, Eye, EyeOff } from "lucide-react";
@@ -12,7 +13,8 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [registered, setRegistered] = useState(false);
-  const { login } = useAuth();
+  const { login, user, isLoading: authLoading } = useAuth();
+  const router = useRouter();
 
   useEffect(() => {
     if (new URLSearchParams(window.location.search).get("registered") === "1") {
@@ -20,6 +22,14 @@ export default function LoginPage() {
       window.history.replaceState({}, "", "/login");
     }
   }, []);
+
+  // A signed-in visitor has no business on the sign-in form. This is what
+  // makes browser Back work from the dashboard: the login history entry sits
+  // behind it, so rather than re-showing the form we forward to the homepage,
+  // where they can start again or re-enter the dashboard.
+  useEffect(() => {
+    if (!authLoading && user) router.replace("/");
+  }, [authLoading, user, router]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -41,6 +51,21 @@ export default function LoginPage() {
       setIsLoading(false);
     }
   };
+
+  // While the session check runs (or a redirect is in flight) show a spinner,
+  // never the sign-in form - otherwise a signed-in visitor pressing Back from
+  // the dashboard would still see the form flash first.
+  if (authLoading || user) {
+    return (
+      <div
+        role="status"
+        aria-label="Checking session"
+        className="flex items-center justify-center py-10"
+      >
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
 
   return (
     <div className="w-full max-w-[420px]">

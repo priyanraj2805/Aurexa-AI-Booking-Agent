@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useAuth } from "@/lib/auth-context";
 import {
   MessageSquare,
   Calendar,
@@ -49,6 +50,12 @@ const features = [
 ];
 
 export default function LandingPage() {
+  // Signed-in visitors don't need the sign-in form again: browser Back from
+  // the dashboard lands here, so "Sign In" forwards to the dashboard instead
+  // of bouncing off /login. Signed-out visitors get the normal sign-in page.
+  const { user } = useAuth();
+  const signInHref = user ? "/dashboard" : "/login";
+  const signInLabel = user ? "Dashboard" : "Sign In";
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white overflow-x-hidden" style={{ scrollPaddingTop: "50px" }}>
       {/* Animated Background */}
@@ -88,10 +95,10 @@ export default function LandingPage() {
         </nav>
         <div className="flex items-center gap-3">
           <Link
-            href="/login"
+            href={signInHref}
             className="px-4 py-2 text-sm font-medium text-zinc-300 hover:text-white transition-colors"
           >
-            Sign In
+            {signInLabel}
           </Link>
           <Link
             href="/register"
@@ -149,11 +156,11 @@ export default function LandingPage() {
                 <ArrowRight className="w-4 h-4" />
               </Link>
               <Link
-                href="/login"
+                href={signInHref}
                 className="inline-flex items-center gap-2 px-6 py-3 border border-zinc-700 hover:border-zinc-600 text-zinc-300 font-medium rounded-lg transition-colors"
               >
                 <MessageSquare className="w-4 h-4" />
-                Sign In
+                {signInLabel}
               </Link>
             </div>
           </div>
@@ -286,10 +293,10 @@ export default function LandingPage() {
               <ArrowRight className="w-5 h-5" />
             </Link>
             <Link
-              href="/login"
+              href={signInHref}
               className="inline-flex items-center justify-center gap-2 px-8 py-4 border border-zinc-700 hover:border-zinc-600 text-zinc-300 font-medium rounded-lg transition-colors"
             >
-              Sign In
+              {signInLabel}
             </Link>
           </div>
         </div>
