@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { api, uploadFile } from "@/lib/api";
-import { PaymentsConnectCard } from "@/components/payments-connect-card";
+
 
 export default function SettingsPage() {
   const { user, updateProfile, refresh } = useAuth();
@@ -262,8 +262,7 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      {/* ── Payments ── */}
-      <PaymentsConnectCard />
+      {/* Cashfree removed — already lives in payments/integrations */}
     </div>
   );
 }
