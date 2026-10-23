@@ -17,7 +17,8 @@ import {
   TrendingUp,
   TrendingDown,
   Activity,
-  BarChart3,
+  Clock,
+  Target,
 } from "lucide-react";
 import Link from "next/link";
 import { useTheme } from "next-themes";
@@ -43,9 +44,6 @@ import {
   Tooltip,
   XAxis,
   YAxis,
-  PieChart,
-  Pie,
-  Cell,
 } from "recharts";
 import {
   useStats,
@@ -524,85 +522,251 @@ function RevenueStrip() {
 }
 
 
-function DonutChart({
-  booked,
-  cancelled,
+type ChannelScope = "all" | "web" | "whatsapp";
+
+/**
+ * One card for everything channel-related: lifetime mix (web vs WhatsApp),
+ * a 7-day trend, and today/avg/week for the selected channel. This replaces
+ * three separate cards that each repeated the same numbers.
+ */
+function ChannelPerformance({
+  stats,
+  loading,
+  error,
+  chartColors,
 }: {
-  booked: number;
-  cancelled: number;
+  stats: Stats | null | undefined;
+  loading: boolean;
+  error: string | null;
+  chartColors: {
+    blue: string;
+    green: string;
+    indigo: string;
+    tick: string;
+    tooltipBg: string;
+    tooltipBorder: string;
+  };
 }) {
-  const total = booked + cancelled;
-  if (total === 0) return null;
+  const [scope, setScope] = useState<ChannelScope>("all");
 
-  const bookedPct = Math.round((booked / total) * 100);
-  const cancelledPct = 100 - bookedPct;
+  const web = stats?.channel_breakdown?.find((c) => c.channel === "web")?.count ?? 0;
+  const wa = stats?.channel_breakdown?.find((c) => c.channel === "whatsapp")?.count ?? 0;
+  const channelTotal = web + wa;
 
-  const data = [
-    { name: "Bookings", value: booked },
-    { name: "Cancelled", value: cancelled },
+  const series =
+    scope === "all"
+      ? (stats?.web_bookings_by_day ?? []).map((d, i) => ({
+          date: d.date,
+          count: d.count + (stats?.whatsapp_bookings_by_day?.[i]?.count ?? 0),
+        }))
+      : scope === "web"
+        ? stats?.web_bookings_by_day ?? []
+        : stats?.whatsapp_bookings_by_day ?? [];
+
+  const last7 = series.slice(-7);
+  const today = last7.length ? last7[last7.length - 1].count : 0;
+  const weekTotal = last7.reduce((s, d) => s + d.count, 0);
+  const avg = Math.round(weekTotal / 7);
+  const maxVal = Math.max(...last7.map((d) => d.count), 1);
+  const scopedTotal = scope === "all" ? channelTotal : scope === "web" ? web : wa;
+  const color =
+    scope === "web" ? chartColors.blue : scope === "whatsapp" ? chartColors.green : chartColors.indigo;
+  const share = (n: number) => (channelTotal > 0 ? Math.round((n / channelTotal) * 100) : 0);
+
+  return (
+    <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
+      <CardHeader
+        icon={MessageSquare}
+        title="Channel Performance"
+        subtitle="Confirmed bookings — 7-day trend + lifetime mix"
+        iconClass="bg-blue-500/15 text-blue-500"
+        action={
+          <select
+            value={scope}
+            onChange={(e) => setScope(e.target.value as ChannelScope)}
+            className="rounded-md border border-border bg-background px-2 py-1 text-xs text-muted-foreground outline-none focus:border-primary"
+            aria-label="Channel"
+          >
+            <option value="all">All channels</option>
+            <option value="web">Web</option>
+            <option value="whatsapp">WhatsApp</option>
+          </select>
+        }
+      />
+      {loading ? (
+        <div className="flex items-center justify-center text-muted-foreground text-sm h-48">
+          <Loader2 className="size-4 animate-spin" />
+        </div>
+      ) : error ? (
+        <div className="flex items-center gap-2 text-red-500 text-sm py-8">
+          <AlertCircle className="size-4" /> {error}
+        </div>
+      ) : channelTotal === 0 ? (
+        <div className="text-center py-10">
+          <MessageSquare className="size-8 text-muted-foreground/40 mx-auto mb-2" />
+          <p className="text-muted-foreground text-sm">No confirmed bookings yet.</p>
+        </div>
+      ) : (
+        <>
+          <div className="text-center pb-3">
+            <div className="text-4xl font-bold tracking-tight tabular-nums">{scopedTotal}</div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              {scope === "all"
+                ? "confirmed bookings"
+                : `${scope === "web" ? "web" : "WhatsApp"} confirmed`}
+            </div>
+          </div>
+          <MiniTrendArea
+            data={last7.map((d) => ({ date: d.date, count: d.count }))}
+            color={color}
+            tooltipBg={chartColors.tooltipBg}
+            tooltipBorder={chartColors.tooltipBorder}
+            tickColor={chartColors.tick}
+          />
+          <div className="mt-4 space-y-3">
+            {[
+              { label: "Today", value: today, dot: color },
+              { label: "Avg per day", value: avg, dot: "#10b981" },
+              { label: "This week", value: weekTotal, dot: chartColors.blue },
+            ].map((row) => (
+              <div
+                key={row.label}
+                className="flex items-center justify-between gap-4 rounded-lg px-2 py-1 transition-colors hover:bg-secondary/30"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="size-1.5 rounded-full" style={{ backgroundColor: row.dot }} />
+                  <span className="text-sm text-muted-foreground">{row.label}</span>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-right text-xl font-bold tabular-nums">{row.value}</div>
+                  <StatMiniBar value={row.value} max={maxVal} color={color} />
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="pt-4 mt-4 border-t border-border space-y-2">
+            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+              <span>Lifetime mix</span>
+              <span>{channelTotal} confirmed</span>
+            </div>
+            {[
+              { label: "Web", value: web, color: chartColors.blue },
+              { label: "WhatsApp", value: wa, color: chartColors.green },
+            ].map((ch) => (
+              <div key={ch.label} className="space-y-1">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-muted-foreground">{ch.label}</span>
+                  <span className="tabular-nums font-semibold">
+                    {ch.value} · {share(ch.value)}%
+                  </span>
+                </div>
+                <div className="h-1.5 w-full bg-secondary rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full"
+                    style={{ width: `${share(ch.value)}%`, backgroundColor: ch.color }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Conversations by where they end up. Active / Confirmed / Cancelled /
+ * Expired already existed in the database but the dashboard only ever showed
+ * the positives — this makes the drop-off (mostly expired chats) visible.
+ */
+function ConversationFunnel({
+  stats,
+  loading,
+  error,
+}: {
+  stats: Stats | null | undefined;
+  loading: boolean;
+  error: string | null;
+}) {
+  const counts = stats?.conversation_status ?? {};
+  const active = counts.ACTIVE ?? 0;
+  const confirmed = counts.CONFIRMED ?? 0;
+  const cancelled = counts.CANCELLED ?? 0;
+  const expired = counts.EXPIRED ?? 0;
+  const total = active + confirmed + cancelled + expired;
+  const closed = confirmed + cancelled + expired;
+  const conversion = closed > 0 ? Math.round((confirmed / closed) * 100) : 0;
+
+  const stages = [
+    { label: "Confirmed", value: confirmed, color: "#10b981", hint: "reached a booking" },
+    { label: "Expired", value: expired, color: "#f59e0b", hint: "went quiet" },
+    { label: "Cancelled", value: cancelled, color: "#ef4444", hint: "dropped off" },
+    { label: "Active", value: active, color: "#3b82f6", hint: "in progress" },
   ];
 
   return (
-    <div className="flex flex-col items-center">
-      <div className="relative h-48 w-48">
-        <ResponsiveContainer width="100%" height="100%">
-          <PieChart>
-            <Pie
-              data={data}
-              cx="50%"
-              cy="50%"
-              innerRadius={50}
-              outerRadius={70}
-              paddingAngle={3}
-              dataKey="value"
-              strokeWidth={0}
-              startAngle={90}
-              endAngle={-270}
-              animationBegin={0}
-              animationDuration={1800}
-              animationEasing="ease-out"
-            >
-              {data.map((_, i) => (
-                <Cell
-                  key={i}
-                  fill={i === 0 ? "var(--i500)" : "var(--s600)"}
-                  style={{ outline: "none" }}
-                />
-              ))}
-            </Pie>
-          </PieChart>
-        </ResponsiveContainer>
-        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-          <span className="text-3xl font-bold tracking-tight tabular-nums">{total}</span>
-          <span className="text-[11px] text-muted-foreground">total</span>
+    <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
+      <CardHeader
+        icon={Target}
+        title="Conversation Funnel"
+        subtitle="Where chats end up"
+        iconClass="bg-amber-500/15 text-amber-500"
+      />
+      {loading ? (
+        <div className="flex items-center justify-center text-muted-foreground text-sm h-40">
+          <Loader2 className="size-4 animate-spin" />
         </div>
-      </div>
-      <div className="mt-4 flex w-full flex-col gap-2 text-xs text-muted-foreground">
-        <Link
-          href="/dashboard/bookings?status=CONFIRMED"
-          className="group flex items-center gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-secondary/50"
-        >
-          <span className="inline-block h-2.5 w-2.5 rounded-sm bg-[var(--i500)]" />
-          <span className="flex-1 font-medium">Bookings</span>
-          <span className="font-semibold text-foreground">{booked}</span>
-          <span className="w-10 text-right text-muted-foreground">{bookedPct}%</span>
-        </Link>
-        <div className="h-1.5 w-full bg-secondary rounded-full overflow-hidden">
-          <div className="h-full rounded-full bg-[var(--i500)]" style={{ width: `${bookedPct}%` }} />
+      ) : error ? (
+        <div className="flex items-center gap-2 text-red-500 text-sm py-8">
+          <AlertCircle className="size-4" /> {error}
         </div>
-        <Link
-          href="/dashboard/bookings/cancelled"
-          className="group flex items-center gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-secondary/50"
-        >
-          <span className="inline-block h-2.5 w-2.5 rounded-sm bg-[var(--s600)]" />
-          <span className="flex-1 font-medium">Cancelled</span>
-          <span className="font-semibold text-foreground">{cancelled}</span>
-          <span className="w-10 text-right text-muted-foreground">{cancelledPct}%</span>
-        </Link>
-        <div className="h-1.5 w-full bg-secondary rounded-full overflow-hidden">
-          <div className="h-full rounded-full bg-[var(--s600)]" style={{ width: `${cancelledPct}%` }} />
+      ) : total === 0 ? (
+        <div className="text-center py-10">
+          <Target className="size-8 text-muted-foreground/40 mx-auto mb-2" />
+          <p className="text-muted-foreground text-sm">No conversations yet.</p>
         </div>
-      </div>
+      ) : (
+        <>
+          <div className="flex items-end justify-between mb-3">
+            <div>
+              <div className="text-3xl font-bold tracking-tight tabular-nums">{conversion}%</div>
+              <div className="text-[11px] text-muted-foreground">chats that became a booking</div>
+            </div>
+            <div className="text-right">
+              <div className="text-lg font-semibold tabular-nums">{total}</div>
+              <div className="text-[11px] text-muted-foreground">conversations</div>
+            </div>
+          </div>
+          <div className="flex h-2.5 rounded-full overflow-hidden bg-secondary mb-4">
+            {stages.map(
+              (s) =>
+                s.value > 0 && (
+                  <div
+                    key={s.label}
+                    style={{ width: `${(s.value / total) * 100}%`, backgroundColor: s.color }}
+                  />
+                )
+            )}
+          </div>
+          <div className="space-y-2 flex-1">
+            {stages.map((s) => (
+              <div key={s.label} className="flex items-center gap-2 text-sm">
+                <span className="size-2 rounded-sm shrink-0" style={{ backgroundColor: s.color }} />
+                <span className="font-medium">{s.label}</span>
+                <span className="text-[11px] text-muted-foreground truncate">{s.hint}</span>
+                <span className="ml-auto tabular-nums font-semibold">{s.value}</span>
+                <span className="w-9 text-right text-[11px] text-muted-foreground">
+                  {total ? Math.round((s.value / total) * 100) : 0}%
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="mt-3 pt-3 border-t border-border text-[11px] text-muted-foreground">
+            Conversion counts closed chats only — active conversations are excluded.
+          </p>
+        </>
+      )}
     </div>
   );
 }
@@ -666,83 +830,12 @@ function nameTone(name: string): "primary" | "red" {
   return hash % 2 === 0 ? "primary" : "red";
 }
 
-const SUPPORTED_CHANNELS = ["web", "whatsapp"];
-
-function ChannelBreakdown({
-  data,
-  colors,
-}: {
-  data: { name: string; count: number }[];
-  colors: string[];
-}) {
-  const merged = SUPPORTED_CHANNELS.map((ch) => ({
-    name: ch,
-    count: data.find((d) => d.name === ch)?.count ?? 0,
-  })).sort((a, b) => b.count - a.count);
-
-  const total = merged.reduce((s, d) => s + d.count, 0);
-  if (total === 0) return null;
-
-  const channelIcons: Record<string, string> = {
-    web: "🌐",
-    whatsapp: "💬",
-  };
-
-  return (
-    <div className="flex flex-col h-full">
-      <div className="text-center pb-4">
-        <div className="text-4xl font-bold tracking-tight">{total}</div>
-        <div className="text-xs text-muted-foreground mt-0.5">total confirmed</div>
-      </div>
-      <div className="flex-1 space-y-4">
-        {merged.map((d, i) => {
-          const pct = total > 0 ? (d.count / total) * 100 : 0;
-          const color = colors[i % colors.length];
-          return (
-            <div key={d.name} className="space-y-2">
-              <div className="flex items-center justify-between text-sm">
-                <div className="flex items-center gap-2.5">
-                  <span className="text-base">{channelIcons[d.name] || "📊"}</span>
-                  <span className="font-medium capitalize">{d.name}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-secondary text-[10px] font-semibold">
-                    {Math.round(pct)}%
-                  </span>
-                  <span className="font-semibold text-foreground">{d.count}</span>
-                </div>
-              </div>
-              <div className="h-2.5 bg-secondary rounded-full overflow-hidden">
-                <div
-                  className="h-full rounded-full transition-all duration-700 ease-out"
-                  style={{
-                    width: `${pct}%`,
-                    backgroundColor: color,
-                    minWidth: pct > 0 ? "12px" : "0px",
-                  }}
-                />
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <div className="pt-4 mt-auto border-t border-border">
-        <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-          <span>{merged.length} channels</span>
-          <span>Most: <span className="font-medium text-foreground capitalize">{merged[0]?.name || "—"}</span></span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export default function DashboardPage() {
   const { resolvedTheme } = useTheme();
   const { user, isDoctor } = useAuth();
   const isOrg = (user as unknown as { org_type?: string } | null)?.org_type === "organization";
   const dark = resolvedTheme !== "light";
   const [range, setRange] = useState(7);
-  const [channelStatsChannel, setChannelStatsChannel] = useState<"web" | "whatsapp">("whatsapp");
   const MAX_FETCH_DAYS = 30;
   const { data: stats, loading: statsLoading, error: statsError } = useStats(MAX_FETCH_DAYS);
   const { data: bookings, loading: bookingsLoading, error: bookingsError } = useRecentBookings(10);
@@ -779,7 +872,15 @@ export default function DashboardPage() {
       };
 
   const bookingsTrend = trendPct(stats?.bookings_by_day);
-  const cancelledTrend = trendPct(stats?.cancelled_by_day);
+
+  // Appointment KPIs come from ONE source (the bookings table) so they
+  // reconcile: Upcoming + Completed + Cancelled + No-show = Appointments.
+  const attendance = stats?.appointments_by_attendance ?? {};
+  const apptTotal =
+    Object.values(attendance).reduce((s, v) => s + v, 0) || (stats?.total_bookings ?? 0);
+  const apptScheduled = attendance.SCHEDULED ?? 0;
+  const apptAttended = attendance.ATTENDED ?? 0;
+  const apptCancelled = attendance.CANCELLED ?? 0;
 
   const fullAreaData = (stats?.bookings_by_day ?? []).map((d, i) => ({
     date: d.date,
@@ -823,7 +924,6 @@ export default function DashboardPage() {
     labelStyle: { color: chartColors.tick, marginBottom: "4px" },
   };
 
-  const cardIcon = "bg-primary/10 text-primary";
   const confirmedIcon = "bg-green-500/15 text-green-500";
   const cancelledIcon = "bg-red-500/15 text-red-500";
   const activeIcon = "bg-blue-500/15 text-blue-500";
@@ -930,8 +1030,8 @@ export default function DashboardPage() {
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           <StatCard
-            title="Total Bookings"
-            value={stats?.total_bookings ?? 0}
+            title="Appointments"
+            value={apptTotal}
             icon={CalendarCheck}
             chipClass={indigoIcon}
             href="/dashboard/bookings"
@@ -941,42 +1041,41 @@ export default function DashboardPage() {
             badge={stats?.bookings_this_week ? `${stats.bookings_this_week} this week` : null}
           />
           <StatCard
-            title="Confirmed"
-            value={stats?.confirmed_sessions ?? 0}
-            icon={CheckCircle2}
-            chipClass={confirmedIcon}
-            href="/dashboard/bookings?status=CONFIRMED"
-            spark={(stats?.bookings_by_day ?? []).map((d) => d.count)}
-            sparkColor={chartColors.green}
-            trend={bookingsTrend}
-          />
-          <StatCard
-            title="Cancelled"
-            value={stats?.cancelled_sessions ?? 0}
-            icon={CalendarX2}
-            chipClass={cancelledIcon}
-            href="/dashboard/bookings/cancelled"
-            spark={(stats?.cancelled_by_day ?? []).map((d) => d.count)}
-            sparkColor={chartColors.red}
-            trend={cancelledTrend}
-          />
-          <StatCard
-            title="Active Conversations"
-            value={stats?.active_sessions ?? 0}
-            icon={MessageSquare}
+            title="Upcoming"
+            value={apptScheduled}
+            icon={Clock}
             chipClass={activeIcon}
-            href="/dashboard/conversations"
+            href="/dashboard/bookings"
             spark={[]}
             sparkColor={chartColors.blue}
             trend={null}
-            badge={stats?.has_schedule ? null : "Schedule needed"}
+          />
+          <StatCard
+            title="Completed"
+            value={apptAttended}
+            icon={CheckCircle2}
+            chipClass={confirmedIcon}
+            href="/dashboard/bookings"
+            spark={[]}
+            sparkColor={chartColors.green}
+            trend={null}
+          />
+          <StatCard
+            title="Cancelled"
+            value={apptCancelled}
+            icon={CalendarX2}
+            chipClass={cancelledIcon}
+            href="/dashboard/bookings/cancelled"
+            spark={[]}
+            sparkColor={chartColors.red}
+            trend={null}
           />
         </div>
       )}
 
       {isOrg && <RevenueStrip />}
 
-      {/* Area chart + donut */}
+      {/* Activity overview + channel performance */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
         <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 lg:col-span-2 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
           <CardHeader
@@ -1074,255 +1173,22 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* Bookings vs Cancelled */}
-        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
-          <CardHeader
-            icon={CalendarX2}
-            title="Bookings vs Cancelled"
-            subtitle="Lifetime split"
-            iconClass={cardIcon}
-          />
-          {statsLoading ? (
-            <div className="flex items-center justify-center text-muted-foreground text-sm h-48">
-              <Loader2 className="size-4 animate-spin" />
-            </div>
-          ) : statsError ? (
-            <div className="flex items-center gap-2 text-red-500 text-sm py-8">
-              <AlertCircle className="size-4" /> {statsError}
-            </div>
-          ) : hasActivity ? (
-            <DonutChart booked={stats?.total_bookings ?? 0} cancelled={stats?.cancelled_sessions ?? 0} />
-          ) : (
-            <div className="text-center py-12">
-              <CalendarX2 className="size-8 text-muted-foreground/40 mx-auto mb-2" />
-              <p className="text-muted-foreground text-sm">No booking activity yet.</p>
-            </div>
-          )}
-        </div>
+        <ChannelPerformance
+          stats={stats}
+          loading={statsLoading}
+          error={statsError}
+          chartColors={chartColors}
+        />
       </div>
 
 
-      {/* Row 1: Bookings by Channel + WhatsApp Stats */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
-        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
-          <CardHeader
-            icon={BarChart3}
-            title="Bookings by Channel"
-            subtitle="Confirmed sessions"
-            iconClass={activeIcon}
-          />
-          {statsLoading ? (
-            <div className="flex items-center justify-center text-muted-foreground text-sm h-56">
-              <Loader2 className="size-4 animate-spin" />
-            </div>
-          ) : statsError ? (
-            <div className="flex items-center gap-2 text-red-500 text-sm py-8">
-              <AlertCircle className="size-4" /> {statsError}
-            </div>
-          ) : barData.length === 0 ? (
-            <div className="text-center py-12">
-              <BarChart3 className="size-8 text-muted-foreground/40 mx-auto mb-2" />
-              <p className="text-muted-foreground text-sm">No channel data yet.</p>
-            </div>
-          ) : (
-            <ChannelBreakdown data={barData} colors={barColors} />
-          )}
-        </div>
-        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
-          {(() => {
-            const channelMap = {
-              web: { label: "Web", data: stats?.web_bookings_by_day, color: chartColors.blue, iconBg: "bg-blue-500/15 text-blue-500", empty: "No web bookings yet." },
-              whatsapp: { label: "WhatsApp", data: stats?.whatsapp_bookings_by_day, color: chartColors.green, iconBg: "bg-green-500/15 text-green-500", empty: "No WhatsApp activity yet." },
-            } as const;
-            const cfg = channelMap[channelStatsChannel];
-            const series = cfg.data?.slice(-7) ?? [];
-            const today = series.length ? series[series.length - 1].count : 0;
-            const weekTotal = cfg.data ? cfg.data.slice(-7).reduce((s, d) => s + d.count, 0) : 0;
-            const avg = cfg.data ? Math.round(weekTotal / 7) : 0;
-            const maxVal = Math.max(...(series.map((d) => d.count) ?? [0]), 1);
-            return (
-              <>
-                <CardHeader
-                  icon={MessageSquare}
-                  title={`${cfg.label} Stats`}
-                  subtitle="Last 7 days performance"
-                  iconClass={cfg.iconBg}
-                  action={
-                    <select
-                      value={channelStatsChannel}
-                      onChange={(e) => setChannelStatsChannel(e.target.value as "web" | "whatsapp")}
-                      className="rounded-md border border-border bg-background px-2 py-1 text-xs text-muted-foreground outline-none focus:border-primary"
-                    >
-                      <option value="web">Web</option>
-                      <option value="whatsapp">WhatsApp</option>
-                    </select>
-                  }
-                />
-                {statsLoading ? (
-                  <div className="flex items-center justify-center text-muted-foreground text-sm h-48">
-                    <Loader2 className="size-4 animate-spin" />
-                  </div>
-                ) : statsError ? (
-                  <div className="flex items-center gap-2 text-red-500 text-sm py-8">
-                    <AlertCircle className="size-4" /> {statsError}
-                  </div>
-                ) : hasActivity ? (
-                  <>
-                    <MiniTrendArea
-                      data={series.map((d) => ({ date: d.date, count: d.count }))}
-                      color={cfg.color}
-                      tooltipBg={chartColors.tooltipBg}
-                      tooltipBorder={chartColors.tooltipBorder}
-                      tickColor={chartColors.tick}
-                    />
-                    <div className="mt-4 space-y-3">
-                      <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
-                        <div className="flex items-center gap-2">
-                          <span className="size-1.5 rounded-full" style={{ backgroundColor: cfg.color }} />
-                          <span className="text-sm text-muted-foreground">Bookings today</span>
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-baseline justify-end gap-2">
-                            <span className="text-xl font-bold">{today}</span>
-                          </div>
-                          <StatMiniBar value={today} max={maxVal} color={cfg.color} />
-                        </div>
-                      </div>
-                      <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
-                        <div className="flex items-center gap-2">
-                          <span className="size-1.5 rounded-full bg-emerald-500" />
-                          <span className="text-sm text-muted-foreground">Avg per day</span>
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-baseline justify-end gap-2">
-                            <span className="text-xl font-bold">{avg}</span>
-                          </div>
-                          <StatMiniBar value={avg} max={maxVal} color={cfg.color} />
-                        </div>
-                      </div>
-                      <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
-                        <div className="flex items-center gap-2">
-                          <span className="size-1.5 rounded-full bg-teal-500" />
-                          <span className="text-sm text-muted-foreground">{cfg.label} this week</span>
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-baseline justify-end gap-2">
-                            <span className="text-xl font-bold">{weekTotal}</span>
-                          </div>
-                          <StatMiniBar value={weekTotal} max={maxVal} color={cfg.color} />
-                        </div>
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  <div className="text-center py-10">
-                    <MessageSquare className="size-8 text-muted-foreground/40 mx-auto mb-2" />
-                    <p className="text-muted-foreground text-sm">{cfg.empty}</p>
-                  </div>
-                )}
-              </>
-            );
-          })()}
-        </div>
-      </div>
-
-      {/* Row 2: Quick Stats + Recent Appointments */}
+      {/* Row 2: Conversation funnel + Recent Appointments */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4 items-stretch">
-        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
-          <CardHeader
-            icon={TrendingUp}
-            title="Quick Stats"
-            subtitle="Last 7 days performance"
-            iconClass={confirmedIcon}
-          />
-          <div className="flex-1 flex flex-col justify-center">
-          {statsLoading ? (
-            <div className="flex items-center justify-center text-muted-foreground text-sm h-48">
-              <Loader2 className="size-4 animate-spin" />
-            </div>
-          ) : statsError ? (
-            <div className="flex items-center gap-2 text-red-500 text-sm py-8">
-              <AlertCircle className="size-4" /> {statsError}
-            </div>
-          ) : hasActivity ? (
-            <>
-              <MiniTrendArea
-                data={stats?.bookings_by_day?.slice(-7).map((d) => ({
-                  date: d.date,
-                  count: d.count,
-                })) ?? []}
-                color={chartColors.indigo}
-                tooltipBg={chartColors.tooltipBg}
-                tooltipBorder={chartColors.tooltipBorder}
-                tickColor={chartColors.tick}
-              />
-              <div className="mt-4 space-y-3">
-                <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
-                  <div className="flex items-center gap-2">
-                    <span className="size-1.5 rounded-full bg-indigo-500" />
-                    <span className="text-sm text-muted-foreground">Bookings today</span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline justify-end gap-2">
-                      <span className="text-xl font-bold">
-                        {stats?.bookings_by_day?.[stats.bookings_by_day.length - 1]?.count ?? 0}
-                      </span>
-                    </div>
-                    <StatMiniBar
-                      value={stats?.bookings_by_day?.[stats.bookings_by_day.length - 1]?.count ?? 0}
-                      max={Math.max(...(stats?.bookings_by_day?.slice(-7).map((d) => d.count) ?? [0]))}
-                      color={chartColors.indigo}
-                    />
-                  </div>
-                </div>
-                <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
-                  <div className="flex items-center gap-2">
-                    <span className="size-1.5 rounded-full bg-green-500" />
-                    <span className="text-sm text-muted-foreground">Avg per day</span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline justify-end gap-2">
-                      <span className="text-xl font-bold">
-                        {stats?.bookings_by_day
-                          ? Math.round(stats.bookings_by_day.slice(-7).reduce((s, d) => s + d.count, 0) / 7)
-                          : 0}
-                      </span>
-                    </div>
-                    <StatMiniBar
-                      value={stats?.bookings_by_day ? Math.round(stats.bookings_by_day.slice(-7).reduce((s, d) => s + d.count, 0) / 7) : 0}
-                      max={Math.max(...(stats?.bookings_by_day?.slice(-7).map((d) => d.count) ?? [0]))}
-                      color={chartColors.indigo}
-                    />
-                  </div>
-                </div>
-                <div className="flex items-center justify-between gap-4 rounded-lg px-2 py-1.5 hover:bg-secondary/30 transition-colors">
-                  <div className="flex items-center gap-2">
-                    <span className="size-1.5 rounded-full bg-blue-500" />
-                    <span className="text-sm text-muted-foreground">This week</span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline justify-end gap-2">
-                      <span className="text-xl font-bold">
-                        {stats?.bookings_this_week ?? 0}
-                      </span>
-                    </div>
-                    <StatMiniBar
-                      value={stats?.bookings_this_week ?? 0}
-                      max={Math.max(...(stats?.bookings_by_day?.slice(-7).map((d) => d.count) ?? [0]))}
-                      color={chartColors.blue}
-                    />
-                  </div>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="text-center py-10">
-              <TrendingUp className="size-8 text-muted-foreground/40 mx-auto mb-2" />
-              <p className="text-muted-foreground text-sm">No booking activity yet.</p>
-            </div>
-          )}
-          </div>
-        </div>
+        <ConversationFunnel
+          stats={stats}
+          loading={statsLoading}
+          error={statsError}
+        />
         <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
           <div className="flex items-center justify-between mb-4">
             <CardHeader

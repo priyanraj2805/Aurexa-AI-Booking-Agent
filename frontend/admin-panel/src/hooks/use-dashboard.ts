@@ -99,8 +99,13 @@ export interface Stats {
   reliability_link: string;
   bookings_by_day: DailyCount[];
   cancelled_by_day: DailyCount[];
+  web_bookings_by_day?: DailyCount[];
   whatsapp_bookings_by_day?: DailyCount[];
   channel_breakdown: ChannelCount[];
+  /** Appointments by attendance: SCHEDULED | ATTENDED | NO_SHOW | CANCELLED | RESCHEDULED. */
+  appointments_by_attendance?: Record<string, number>;
+  /** Conversations by session status: ACTIVE | CONFIRMED | CANCELLED | EXPIRED. */
+  conversation_status?: Record<string, number>;
 }
 
 export interface BookingItem {
