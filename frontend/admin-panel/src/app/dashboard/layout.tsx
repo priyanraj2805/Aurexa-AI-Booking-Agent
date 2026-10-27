@@ -163,9 +163,9 @@ export default function DashboardLayout({
   return (
     <SidebarProvider defaultOpen={sidebarOpen}>
       <AppSidebar />
-      <ImpersonationBanner />
       <Toaster position="bottom-right" theme="system" />
       <SidebarInset className="bg-background">
+        <ImpersonationBanner />
         {/* Top Bar — matches template: h-64px, border-bottom, breadcrumbs left, status+button right */}
         <header className="flex h-16 shrink-0 items-center justify-between border-b border-border px-4 sm:px-6 md:px-8 bg-background sticky top-0 z-30">
           <div className="flex items-center gap-2 min-w-0">

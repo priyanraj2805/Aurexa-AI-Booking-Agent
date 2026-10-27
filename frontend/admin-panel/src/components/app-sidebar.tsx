@@ -16,10 +16,6 @@ import {
   Sun,
   Moon,
   Palette,
-  Image as ImageIcon,
-  Upload,
-  Trash2,
-  Link as LinkIcon,
   Building2,
   Users,
 } from "lucide-react";
@@ -59,8 +55,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/lib/auth-context";
 import { useTheme } from "next-themes";
-import { uploadFile } from "@/lib/api";
-import { toast } from "sonner";
 
 const navApp = [
   { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
@@ -89,7 +83,8 @@ function displayName(user: { full_name?: string | null; email?: string | null } 
 }
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
-  const { user, logout, refresh, isDoctor, scope } = useAuth();
+  const { user, logout, isDoctor, scope } = useAuth();
+  const { theme, setTheme } = useTheme();
   // Linked member's departments for the badge (e.g. Cardiology +2).
   const scopeDeptNames = scope?.provider_unit_names?.length
     ? scope.provider_unit_names
@@ -97,76 +92,13 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const deptBadge = scopeDeptNames.length > 1
     ? `${scopeDeptNames[0]} +${scopeDeptNames.length - 1}`
     : scopeDeptNames[0] || "";
-  const { theme, setTheme } = useTheme();
   const pathname = usePathname();
   const router = useRouter();
   const { isMobile, setOpenMobile, openMobile } = useSidebar();
   const [confirmLogout, setConfirmLogout] = React.useState(false);
-  const avatarInputRef = React.useRef<HTMLInputElement>(null);
-  const [avatarUploading, setAvatarUploading] = React.useState(false);
 
   const openLogoutDialog = () => {
     setConfirmLogout(true);
-  };
-
-  const handleAvatarFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      toast.error("Please select an image file");
-      return;
-    }
-    if (file.size > 2 * 1024 * 1024) {
-      toast.error("Image must be under 2MB");
-      return;
-    }
-    setAvatarUploading(true);
-    try {
-      await uploadFile("/account/avatar", file);
-      toast.success("Avatar updated");
-      await refresh();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Upload failed");
-    } finally {
-      setAvatarUploading(false);
-      if (avatarInputRef.current) avatarInputRef.current.value = "";
-    }
-  };
-
-  const handleAvatarRemove = async () => {
-    setAvatarUploading(true);
-    try {
-      const { api } = await import("@/lib/api");
-      await api.del("/account/avatar");
-      toast.success("Avatar removed");
-      await refresh();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to remove");
-    } finally {
-      setAvatarUploading(false);
-    }
-  };
-
-  const handleAvatarUrl = async () => {
-    const url = window.prompt("Paste image URL (https://...)");
-    if (!url) return;
-    try {
-      new URL(url);
-    } catch {
-      toast.error("Invalid URL");
-      return;
-    }
-    setAvatarUploading(true);
-    try {
-      const { api } = await import("@/lib/api");
-      await api.put("/account/avatar-url", { avatar_url: url.trim() });
-      toast.success("Avatar URL saved");
-      await refresh();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to save URL");
-    } finally {
-      setAvatarUploading(false);
-    }
   };
 
   const isActive = (url: string) => {
@@ -436,7 +368,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               </span>
             </div>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" side="top" className="w-52">
+          <DropdownMenuContent align="start" side="top" className="w-52 max-w-[calc(100vw-1rem)]">
             <DropdownMenuGroup>
               <DropdownMenuLabel className="font-normal">
                 <span className="block truncate text-sm font-semibold text-foreground">
@@ -457,36 +389,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 Settings
               </DropdownMenuItem>
             )}
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger className="cursor-pointer">
-                <ImageIcon className="size-4" />
-                Avatar
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent>
-                <DropdownMenuItem
-                  onClick={() => avatarInputRef.current?.click()}
-                  className="cursor-pointer"
-                  disabled={avatarUploading}
-                >
-                  <Upload className="size-4" />
-                  Upload image
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={handleAvatarUrl} className="cursor-pointer" disabled={avatarUploading}>
-                  <LinkIcon className="size-4" />
-                  Via URL
-                </DropdownMenuItem>
-                {user?.avatar_url && (
-                  <DropdownMenuItem
-                    onClick={handleAvatarRemove}
-                    className="cursor-pointer text-destructive focus:text-destructive"
-                    disabled={avatarUploading}
-                  >
-                    <Trash2 className="size-4" />
-                    Remove
-                  </DropdownMenuItem>
-                )}
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
             {(user?.permissions || []).includes("billing.view") && (
               <DropdownMenuItem
                 render={<Link href="/dashboard/billing" />}
@@ -536,13 +438,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-        <input
-          ref={avatarInputRef}
-          type="file"
-          accept="image/png,image/jpeg,image/webp,image/svg+xml"
-          className="hidden"
-          onChange={handleAvatarFile}
-        />
       </SidebarFooter>
 
       <SidebarRail />

@@ -1,12 +1,12 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Loader2, AlertCircle, CalendarCheck, ExternalLink, X, Video, Building2, Link2, Radio } from "lucide-react";
+import { Loader2, AlertCircle, CalendarCheck, ExternalLink, X, Video, Building2, Link2, Radio, SlidersHorizontal, ChevronDown } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useBookings } from "@/hooks/use-dashboard";
 import { Pagination } from "@/components/pagination";
-import { SearchInput, DateFilter } from "@/components/filter-bar";
+import { SearchInput, DateFilter, FilterSelect } from "@/components/filter-bar";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
 
@@ -86,6 +86,7 @@ function MeetingModeBadge({ booking }: { booking: { meeting_type_snapshot?: stri
 export default function BookingsPage() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [status, setStatus] = useState<string>("");
@@ -168,8 +169,8 @@ export default function BookingsPage() {
   return (
     <>
       <style>{`@keyframes highlight { 0% { background-color: hsl(var(--primary) / 0.25); transform: scale(1.01); } 50% { background-color: hsl(var(--primary) / 0.15); } 100% { background-color: transparent; transform: scale(1); } }`}</style>
-      <div className="flex items-end justify-between mb-2">
-        <div>
+      <div className="mb-3 flex flex-col items-start gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="min-w-0">
           <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">
             Bookings
             {status && (
@@ -184,70 +185,94 @@ export default function BookingsPage() {
         </div>
         <Link
           href="/dashboard/bookings/cancelled"
-          className="inline-flex items-center gap-1.5 text-xs font-medium text-red-500 hover:text-red-400 transition-colors"
+          className="inline-flex shrink-0 items-center gap-1.5 text-xs font-medium text-red-500 hover:text-red-400 transition-colors"
         >
           View cancelled bookings <ExternalLink className="size-3.5" />
         </Link>
       </div>
 
       <div className="bg-card border border-border rounded-xl p-4 sm:p-6">
-        <div className="flex flex-wrap items-center gap-3 mb-4">
-          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Search name, email, phone…" className="w-full sm:w-72" />
+        <div className="mb-4 flex min-w-0 items-center gap-2">
+          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Search bookings…" className="min-w-0 flex-1 xl:hidden" />
+          <button
+            type="button"
+            onClick={() => setFiltersOpen((open) => !open)}
+            aria-expanded={filtersOpen}
+            className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-md border px-3 text-sm transition-colors xl:hidden ${
+              filtersOpen || fromDate || toDate || status || attendanceStatus || meetingModeFilter || unitFilter || providerFilter
+                ? "border-primary/40 bg-primary/5 text-primary"
+                : "border-border bg-background text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <SlidersHorizontal className="size-4" />
+            <span>Filters</span>
+            <ChevronDown className={`size-4 transition-transform ${filtersOpen ? "rotate-180" : ""}`} />
+          </button>
+        </div>
+        <div className={`mb-4 min-w-0 grid-cols-1 gap-3 min-[360px]:grid-cols-2 xl:flex xl:flex-wrap xl:items-center ${filtersOpen ? "grid" : "hidden xl:flex"}`}>
+          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Search bookings…" className="hidden w-56 shrink-0 xl:block" />
           <DateFilter
             label="Date range"
             fromDate={fromDate}
             toDate={toDate}
             onFromChange={(v) => { setFromDate(v); setPage(1); }}
             onToChange={(v) => { setToDate(v); setPage(1); }}
+            className="min-w-0 min-[360px]:col-span-2 xl:col-span-1"
           />
-          <select
+          <FilterSelect
             value={attendanceStatus}
-            onChange={(e) => { setAttendanceStatus(e.target.value); setPage(1); }}
-            className="h-9 rounded-md border border-border bg-background px-3 text-xs"
-          >
-            <option value="">All Statuses</option>
-            <option value="SCHEDULED">Scheduled</option>
-            <option value="ATTENDED">Attended</option>
-            <option value="NO_SHOW">Not-Attended</option>
-            <option value="CANCELLED">Cancelled</option>
-            <option value="RESCHEDULED">Rescheduled</option>
-          </select>
-          <select
+            onChange={(value) => { setAttendanceStatus(value); setPage(1); }}
+            options={[
+              { value: "", label: "All Statuses" },
+              { value: "SCHEDULED", label: "Scheduled" },
+              { value: "ATTENDED", label: "Attended" },
+              { value: "NO_SHOW", label: "Not-Attended" },
+              { value: "CANCELLED", label: "Cancelled" },
+              { value: "RESCHEDULED", label: "Rescheduled" },
+            ]}
+          />
+          <FilterSelect
             value={meetingModeFilter}
-            onChange={(e) => { setMeetingModeFilter(e.target.value); setPage(1); }}
-            className="h-9 rounded-md border border-border bg-background px-3 text-xs"
-          >
-            <option value="">All Modes</option>
-            <option value="ONLINE">Online</option>
-            <option value="OFFLINE">Offline</option>
-          </select>
+            onChange={(value) => { setMeetingModeFilter(value); setPage(1); }}
+            options={[
+              { value: "", label: "All Modes" },
+              { value: "ONLINE", label: "Online" },
+              { value: "OFFLINE", label: "Offline" },
+            ]}
+          />
           {!!filterUnits.length && (
-            <select
+            <FilterSelect
               value={unitFilter}
-              onChange={(e) => { setUnitFilter(e.target.value); setPage(1); }}
-              className="h-9 rounded-md border border-border bg-background px-3 text-xs"
-            >
-              <option value="">All departments</option>
-              {filterUnits.map((u) => (
-                <option key={u.id} value={u.id}>{u.name}</option>
-              ))}
-            </select>
+              onChange={(value) => { setUnitFilter(value); setPage(1); }}
+              options={[
+                { value: "", label: "All departments" },
+                ...filterUnits.map((u) => ({ value: u.id, label: u.name })),
+              ]}
+            />
           )}
           {!!filterProviders.length && (
-            <select
+            <FilterSelect
               value={providerFilter}
-              onChange={(e) => { setProviderFilter(e.target.value); setPage(1); }}
-              className="h-9 rounded-md border border-border bg-background px-3 text-xs"
-            >
-              <option value="">All members</option>
-              {visibleProviders.map((p) => (
-                <option key={p.id} value={p.id}>{p.full_name}</option>
-              ))}
-            </select>
+              onChange={(value) => { setProviderFilter(value); setPage(1); }}
+              options={[
+                { value: "", label: "All members" },
+                ...visibleProviders.map((p) => ({ value: p.id, label: p.full_name })),
+              ]}
+            />
           )}
-          {(status || attendanceStatus || meetingModeFilter || unitFilter || providerFilter) && (
+          {(search || fromDate || toDate || status || attendanceStatus || meetingModeFilter || unitFilter || providerFilter) && (
             <button
-              onClick={() => { setStatus(""); setAttendanceStatus(""); setMeetingModeFilter(""); setUnitFilter(""); setProviderFilter(""); setPage(1); }}
+              onClick={() => {
+                setSearch("");
+                setFromDate("");
+                setToDate("");
+                setStatus("");
+                setAttendanceStatus("");
+                setMeetingModeFilter("");
+                setUnitFilter("");
+                setProviderFilter("");
+                setPage(1);
+              }}
               className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
             >
               Clear filters <X className="size-3.5" />
@@ -277,7 +302,7 @@ export default function BookingsPage() {
           <>
             <div className="w-full overflow-x-auto">
               {/* Mobile card view */}
-              <div className="md:hidden space-y-3">
+              <div className="xl:hidden space-y-3">
                 {data.items.map((b) => (
                   <div
                     key={b.id}
@@ -288,7 +313,7 @@ export default function BookingsPage() {
                         : "border-border"
                     }`}
                   >
-                    <div className="flex items-center justify-center size-8 rounded-full bg-[#27272a] text-xs font-semibold shrink-0">
+                    <div className="flex items-center justify-center size-8 rounded-full bg-muted text-muted-foreground text-xs font-semibold shrink-0">
                       {getInitials(b.customer_name)}
                     </div>
                     <div className="flex-1 min-w-0 space-y-1">
@@ -326,7 +351,6 @@ export default function BookingsPage() {
                           <option value="RESCHEDULED">Rescheduled</option>
                         </select>
                         {b.meeting_type_snapshot === "ONLINE" && b.attendance_status === "SCHEDULED" && <span className="text-[10px] text-muted-foreground">• Join</span>}
-                        {b.meeting_type_snapshot === "OFFLINE" && b.attendance_status === "SCHEDULED" && <span className="text-[10px] text-muted-foreground">• Mark after</span>}
                       </div>
                       <div className="text-[11px] text-muted-foreground">
                         Booked: {formatDateTime(b.created_at)}
@@ -336,7 +360,7 @@ export default function BookingsPage() {
                 ))}
               </div>
               {/* Desktop table view */}
-              <table className="hidden md:table w-full border-collapse">
+              <table className="hidden xl:table w-full border-collapse">
                 <thead>
                   <tr>
                     <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Client</th>
@@ -359,7 +383,7 @@ export default function BookingsPage() {
                     >
                       <td className="px-4 py-4 text-[13px] border-b border-border">
                         <div className="flex items-center gap-3">
-                          <div className="flex items-center justify-center size-8 rounded-full bg-[#27272a] text-xs font-semibold">
+                          <div className="flex items-center justify-center size-8 rounded-full bg-muted text-muted-foreground text-xs font-semibold">
                             {getInitials(b.customer_name)}
                           </div>
                           <div>
@@ -398,7 +422,6 @@ export default function BookingsPage() {
                           <option value="RESCHEDULED">Rescheduled</option>
                         </select>
                         {b.meeting_type_snapshot === "ONLINE" && b.attendance_status === "SCHEDULED" && <div className="text-[10px] text-muted-foreground mt-1">Join to mark</div>}
-                        {b.meeting_type_snapshot === "OFFLINE" && b.attendance_status === "SCHEDULED" && <div className="text-[10px] text-muted-foreground mt-1">Mark after</div>}
                       </td>
                       <td className="px-4 py-4 text-[13px] border-b border-border">{formatDateTime(b.created_at)}</td>
                       <td className="px-4 py-4 border-b border-border">

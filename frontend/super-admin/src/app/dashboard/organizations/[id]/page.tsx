@@ -769,12 +769,12 @@ export default function OrgDetailPage({
         </Modal>
       )}
 
-      <div className="mt-4 flex gap-1 border-b border-slate-800">
+      <div className="mt-4 flex gap-1 overflow-x-auto border-b border-slate-800">
         {TABS.map((t) => (
           <button
             key={t}
             onClick={() => switchTab(t)}
-            className={`rounded-t-md px-4 py-2 text-sm font-medium ${
+            className={`shrink-0 rounded-t-md px-4 py-2 text-sm font-medium ${
               tab === t
                 ? "border border-b-0 border-slate-800 bg-slate-900 text-slate-100"
                 : "text-slate-400 hover:text-slate-200"
@@ -793,7 +793,7 @@ export default function OrgDetailPage({
 
       {tab === "Overview" && (
         <div className="mt-4">
-          <div className="grid grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
             {[
               ["Users", org.user_count],
               ["Bookings", org.booking_count],

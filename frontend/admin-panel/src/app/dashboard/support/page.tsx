@@ -165,7 +165,7 @@ export default function SupportPage() {
       </div>
 
       {/* ── New request ── */}
-      <section className="rounded-xl border border-border bg-card p-6 shadow-sm">
+      <section className="rounded-xl border border-border bg-card p-4 shadow-sm sm:p-6">
         <div className="flex items-center gap-2">
           <LifeBuoy className="size-5 text-primary" />
           <h2 className="text-base font-semibold">Contact support</h2>
@@ -203,7 +203,7 @@ export default function SupportPage() {
               <select
                 value={priority}
                 onChange={(e) => setPriority(e.target.value)}
-                className="h-10 rounded-md border border-input bg-background px-3 text-sm outline-none"
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none sm:w-auto"
               >
                 <option value="low">Low</option>
                 <option value="normal">Normal</option>
@@ -214,7 +214,7 @@ export default function SupportPage() {
             <button
               onClick={submitTicket}
               disabled={submitting}
-              className="inline-flex h-10 items-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:opacity-50"
+              className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:opacity-50 sm:w-auto"
             >
               {submitting ? (
                 <Loader2 className="size-4 animate-spin" />
@@ -228,7 +228,7 @@ export default function SupportPage() {
       </section>
 
       {/* ── Ticket history ── */}
-      <section className="rounded-xl border border-border bg-card p-6 shadow-sm">
+      <section className="rounded-xl border border-border bg-card p-4 shadow-sm sm:p-6">
         <div className="flex items-center gap-2">
           <Inbox className="size-5 text-primary" />
           <h2 className="text-base font-semibold">Your requests</h2>
@@ -247,7 +247,7 @@ export default function SupportPage() {
               setPage(1);
             }}
             placeholder="Search subject, detail…"
-            className="w-64"
+            className="w-full sm:w-64"
           />
           <CheckboxFilter
             label="Status"

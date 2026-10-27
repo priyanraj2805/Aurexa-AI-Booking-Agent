@@ -82,10 +82,10 @@ export default function StaffPage() {
         <button className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold whitespace-nowrap">Invite</button>
       </form>
       {lastLink && (
-        <div className="grid gap-1 bg-card border border-border rounded-lg px-3 py-2 -mt-3">
+        <div className="grid min-w-0 max-w-full gap-1 overflow-hidden bg-card border border-border rounded-lg px-3 py-2 -mt-3">
           <p className="text-[11px] text-muted-foreground">Login link — they click it, set a password, then sign in:</p>
-          <div className="flex items-center gap-2">
-            <code className="flex-1 min-w-0 truncate text-xs">{lastLink}</code>
+          <div className="flex min-w-0 items-start gap-2">
+            <code className="block min-w-0 flex-1 break-all text-xs">{lastLink}</code>
             <button
               type="button"
               onClick={async () => {

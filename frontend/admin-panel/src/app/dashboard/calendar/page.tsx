@@ -226,8 +226,13 @@ export default function CalendarPage() {
     try {
       const today = new Date();
       const localToday = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+      // Same department/member filters the Monthly Grid sends — keeps the
+      // Agenda (Upcoming Bookings) view in sync with the filter dropdowns.
+      const extra =
+        (unitFilter ? `&unit_id=${encodeURIComponent(unitFilter)}` : "") +
+        (providerFilter ? `&provider_id=${encodeURIComponent(providerFilter)}` : "");
       const data = await api.get<CalendarEvent[]>(
-        `/dashboard/upcoming-bookings?limit=${pageSize}&offset=${newOffset}&from_date=${localToday}`
+        `/dashboard/upcoming-bookings?limit=${pageSize}&offset=${newOffset}&from_date=${localToday}${extra}`
       );
       if (newOffset === 0) {
         setAgendaItems(data || []);
@@ -241,8 +246,8 @@ export default function CalendarPage() {
     } finally {
       setAgendaLoading(false);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unitFilter, providerFilter]);
 
   useEffect(() => {
     fetchCalendarEvents();
@@ -415,7 +420,7 @@ export default function CalendarPage() {
                         key={cellStr}
                         onClick={() => handleDayClick(day, dayEvents)}
                         className={[
-                          "group relative aspect-square sm:aspect-auto sm:min-h-[110px] p-1.5 sm:p-3 cursor-pointer border-r border-b dark:border-white/10 border-black/10 transition-all duration-300",
+                          "group relative aspect-square min-h-11 sm:aspect-auto sm:min-h-[110px] p-1.5 sm:p-3 cursor-pointer border-r border-b dark:border-white/10 border-black/10 transition-all duration-300",
                           "hover:bg-primary/[0.03] hover:z-10",
                           isToday ? "bg-primary/[0.04] z-10" : "bg-card",
                           isWeekend ? "bg-rose-500/[0.08]" : "",

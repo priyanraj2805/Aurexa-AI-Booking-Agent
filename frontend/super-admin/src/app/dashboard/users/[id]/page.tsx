@@ -183,7 +183,7 @@ export default function UserDetailPage({
         />
       )}
 
-      <div className="mt-6 grid grid-cols-4 gap-4">
+      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
         {[
           ["Bookings", user.booking_count],
           ["Conversations", user.conversation_count],

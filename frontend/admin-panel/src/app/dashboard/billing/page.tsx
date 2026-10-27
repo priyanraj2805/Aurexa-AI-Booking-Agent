@@ -237,7 +237,7 @@ export default function BillingPage() {
       </div>
 
       {daysUntilExpiry !== null && data?.plan && data.plan.monthly_price_cents > 0 && (
-        <div className="flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
+        <div className="flex flex-col items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 sm:flex-row">
           <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-amber-500/20 text-amber-600">
             <CreditCard className="size-4" />
           </div>
@@ -251,7 +251,7 @@ export default function BillingPage() {
           </div>
           <Button
             size="sm"
-            className="shrink-0 bg-amber-600 hover:bg-amber-700 text-white"
+            className="w-full shrink-0 bg-amber-600 text-white hover:bg-amber-700 sm:w-auto"
             onClick={() => {
               const el = document.getElementById("plans-grid");
               el?.scrollIntoView({ behavior: "smooth" });
@@ -265,7 +265,7 @@ export default function BillingPage() {
       {loading ? (
         <div className="space-y-6">
           <Skeleton className="h-32 w-full" />
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
             <Skeleton className="h-72 w-full" />
             <Skeleton className="h-72 w-full" />
             <Skeleton className="h-72 w-full" />
@@ -284,11 +284,11 @@ export default function BillingPage() {
         <>
           {/* ── Current plan summary ── */}
           <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <CardHeader className="flex flex-col items-start justify-between gap-3 space-y-0 sm:flex-row sm:items-center">
               <div className="space-y-1">
                 <CardTitle className="flex items-center gap-2">
-                  <Sparkles className="size-5 text-primary" />
-                  {data.plan ? data.plan.name : "No plan assigned"}
+                  <Sparkles className="size-5 shrink-0 text-primary" />
+                  <span className="break-words">{data.plan ? data.plan.name : "No plan assigned"}</span>
                 </CardTitle>
                 <CardDescription>
                   {data.plan
@@ -345,21 +345,21 @@ export default function BillingPage() {
                 </p>
                 {data.subscription ? (
                   <dl className="space-y-2">
-                    <div className="flex justify-between">
+                    <div className="flex justify-between gap-3">
                       <dt className="text-muted-foreground">Billing cycle</dt>
-                      <dd className="font-medium capitalize">{data.subscription.status}</dd>
+                      <dd className="break-words text-right font-medium capitalize">{data.subscription.status}</dd>
                     </div>
-                    <div className="flex justify-between">
+                    <div className="flex justify-between gap-3">
                       <dt className="text-muted-foreground">Renews</dt>
-                      <dd className="font-medium">
+                      <dd className="text-right font-medium">
                         {data.subscription.current_period_end
                           ? new Date(data.subscription.current_period_end).toLocaleDateString()
                           : "—"}
                       </dd>
                     </div>
-                    <div className="flex justify-between">
+                    <div className="flex justify-between gap-3">
                       <dt className="text-muted-foreground">Organization</dt>
-                      <dd className="font-medium">{user?.org_name || "—"}</dd>
+                      <dd className="break-words text-right font-medium">{user?.org_name || "—"}</dd>
                     </div>
                   </dl>
                 ) : (
@@ -377,19 +377,19 @@ export default function BillingPage() {
             <p className="mb-4 text-sm text-muted-foreground">
               Upgrade or downgrade anytime. Changes apply immediately.
             </p>
-            <div className="grid gap-4 md:grid-cols-3">
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {data.catalog.map((plan) => {
                 const isCurrent = plan.id === currentPlanId;
                 return (
                   <Card
                     key={plan.id}
-                    className={`flex flex-col ${isCurrent ? "border-primary/50 ring-1 ring-primary/30" : ""}`}
+                    className={`flex min-w-0 flex-col ${isCurrent ? "border-primary/50 ring-1 ring-primary/30" : ""}`}
                   >
                     <CardHeader>
-                      <div className="flex items-center justify-between">
-                        <CardTitle className="text-lg">{plan.name}</CardTitle>
+                      <div className="flex items-start justify-between gap-2">
+                        <CardTitle className="min-w-0 break-words text-lg">{plan.name}</CardTitle>
                         {isCurrent && (
-                          <Badge className="bg-primary text-primary-foreground">Current</Badge>
+                          <Badge className="shrink-0 bg-primary text-primary-foreground">Current</Badge>
                         )}
                       </div>
                       <div className="flex items-baseline gap-1">
@@ -428,7 +428,7 @@ export default function BillingPage() {
 
       {/* ── Confirmation dialog ── */}
       <AlertDialog open={confirming} onOpenChange={setConfirming}>
-        <AlertDialogContent>
+        <AlertDialogContent className="w-[calc(100%-2rem)] max-w-lg">
           <AlertDialogHeader>
             <AlertDialogTitle>
               Switch to the {selectedPlan?.name} plan?

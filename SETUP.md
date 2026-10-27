@@ -86,20 +86,24 @@ cd C:\Projects\booking_agent
 
 The project requires some configuration files containing passwords and API keys. Because these are secrets, they are **not** committed to version control. Instead, we use `.example` templates.
 
-If you don't already have them, you need to create two environment files by copying the examples.
+If you don't already have them, create the three local environment files by copying the examples.
 
 **Run these commands to copy the templates:**
 ```powershell
 # Windows
-Copy-Item .env.example -Destination .env
-Copy-Item backend\.env.docker.example -Destination backend\.env.docker
+if (-not (Test-Path .env)) { Copy-Item .env.example -Destination .env }
+if (-not (Test-Path backend\.env.docker)) { Copy-Item backend\.env.docker.example -Destination backend\.env.docker }
+if (-not (Test-Path backend-super\.env.docker)) { Copy-Item backend-super\.env.docker.example -Destination backend-super\.env.docker }
 
 # Mac/Linux (WSL)
-cp .env.example .env
-cp backend/.env.docker.example backend/.env.docker
+[ -f .env ] || cp .env.example .env
+[ -f backend/.env.docker ] || cp backend/.env.docker.example backend/.env.docker
+[ -f backend-super/.env.docker ] || cp backend-super/.env.docker.example backend-super/.env.docker
 ```
 
-> ⚠️ **Important:** Open `backend/.env.docker` in any text editor and fill in your actual API keys (e.g., `LLM_API_KEY`, etc.) before continuing, or the backend won't start correctly.
+> ⚠️ **Important:** Configure all three local environment files before starting the stack. Fill in required values using the environment-variable reference and your approved secret store. Do not commit these files.
+>
+> Set the root `WA_GATEWAY_SERVICE_KEY` to the same value configured for the tenant API in `backend/.env.docker`.
 ---
 
 ## 🟢 Section 3 — Run The Project
@@ -134,7 +138,7 @@ Docker will now:
 1. **Download base images** (Python, Node.js, PostgreSQL) — ~2 minutes, only on first run
 2. **Build the backend** — installs Python packages (~1 minute)
 3. **Build the admin panel** — installs Node packages and compiles Next.js (~2 minutes)
-4. **Start all services** — database, cache, backend API, admin panel
+4. **Start all services** — database, cache, tenant and Super Admin APIs/UIs, gateway, and WhatsApp gateway
 5. **Create public URLs** via Cloudflare Tunnel — watch for these lines in the terminal:
 
 ```

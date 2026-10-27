@@ -25,6 +25,7 @@ interface DayRow {
 export function DoctorHoursEditor({ provider, onSaved }: { provider: Provider; onSaved: () => void }) {
   const [tab, setTab] = useState<"weekly" | "exceptions" | "preview">("weekly");
   const [days, setDays] = useState<DayRow[]>([]);
+  const [breakOpenDays, setBreakOpenDays] = useState<number[]>([]);
   const [tz, setTz] = useState(provider.timezone || "");
   const [dur, setDur] = useState(provider.slot_duration_minutes ? String(provider.slot_duration_minutes) : "");
   const [horizon, setHorizon] = useState(provider.booking_window_days ? String(provider.booking_window_days) : "");
@@ -36,20 +37,24 @@ export function DoctorHoursEditor({ provider, onSaved }: { provider: Provider; o
       setLoading(true);
       try {
         const rows = await orgApi.providerSchedule(provider.id);
-        setDays(
-          [0, 1, 2, 3, 4, 5, 6].map((dow) => {
-            const hit = rows.find((d) => d.day_of_week === dow);
-            return hit
-              ? {
-                  day_of_week: dow,
-                  is_active: hit.is_active,
-                  open_time: hit.open_time,
-                  close_time: hit.close_time,
-                  break_start: hit.break_start,
-                  break_end: hit.break_end,
-                }
-              : { day_of_week: dow, is_active: false, open_time: null, close_time: null, break_start: null, break_end: null };
-          })
+        const schedule = [0, 1, 2, 3, 4, 5, 6].map((dow) => {
+          const hit = rows.find((d) => d.day_of_week === dow);
+          return hit
+            ? {
+                day_of_week: dow,
+                is_active: hit.is_active,
+                open_time: hit.open_time,
+                close_time: hit.close_time,
+                break_start: hit.break_start,
+                break_end: hit.break_end,
+              }
+            : { day_of_week: dow, is_active: false, open_time: null, close_time: null, break_start: null, break_end: null };
+        });
+        setDays(schedule);
+        setBreakOpenDays(
+          schedule
+            .filter((day) => day.break_start || day.break_end)
+            .map((day) => day.day_of_week)
         );
       } catch (e) {
         toast.error(e instanceof Error ? e.message : "Failed to load hours");
@@ -112,52 +117,55 @@ export function DoctorHoursEditor({ provider, onSaved }: { provider: Provider; o
 
       {tab === "weekly" && (
         <div className="space-y-4">
-          {/* Global settings */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1.5">Slot Duration</label>
-              <select
-                value={dur}
-                onChange={(e) => setDur(e.target.value)}
-                className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
-              >
-                <option value="">Organization default</option>
-                {DURATIONS.map((d) => (
-                  <option key={d} value={d}>{d} min</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1.5">Booking Horizon</label>
-              <div className="flex items-center gap-2">
-                <input
-                  type="number"
-                  min={1}
-                  max={366}
-                  value={horizon}
-                  placeholder="Default"
-                  onChange={(e) => setHorizon(e.target.value)}
+          <details className="rounded-lg border border-border bg-background px-3 py-2">
+            <summary className="cursor-pointer text-sm font-medium">Advanced scheduling settings</summary>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-3">
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1.5">Slot duration</label>
+                <select
+                  value={dur}
+                  onChange={(e) => setDur(e.target.value)}
                   className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
-                />
-                <span className="text-xs text-muted-foreground whitespace-nowrap">days</span>
+                >
+                  <option value="">Organization default</option>
+                  {DURATIONS.map((d) => (
+                    <option key={d} value={d}>{d} min</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1.5">Booking horizon</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={1}
+                    max={366}
+                    value={horizon}
+                    placeholder="Default"
+                    onChange={(e) => setHorizon(e.target.value)}
+                    className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                  />
+                  <span className="text-xs text-muted-foreground whitespace-nowrap">days</span>
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1.5">Timezone</label>
+                <TimezonePicker value={tz} onChange={setTz} />
               </div>
             </div>
-            <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1.5">Timezone</label>
-              <TimezonePicker value={tz} onChange={setTz} />
-            </div>
-          </div>
+          </details>
 
-          {/* Day rows mirror Business Hours */}
           <div className="border border-border rounded-xl overflow-hidden">
             <div className="px-4 py-3 border-b border-border">
-              <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Weekly Hours</h3>
+              <h3 className="text-sm font-semibold">Weekly availability</h3>
+              <p className="mt-1 text-xs text-muted-foreground">Choose the days and times this member is available.</p>
             </div>
             <div className="divide-y divide-border">
               {days.map((day, idx) => (
-                <div key={day.day_of_week} className={`px-4 py-3 flex flex-col gap-3 transition-colors ${day.is_active ? "" : "opacity-50"}`}>
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-3">
+                <div key={day.day_of_week} className={`grid min-w-0 gap-3 px-3 py-3 sm:px-4 sm:grid-cols-[8rem_minmax(0,1fr)] sm:items-center transition-colors ${day.is_active ? "" : "opacity-60"}`}>
+                  <div className="flex min-w-0 items-center gap-3">
                     <button
+                      type="button"
                       aria-label={day.is_active ? `Deactivate ${DAY_NAMES[day.day_of_week]}` : `Activate ${DAY_NAMES[day.day_of_week]}`}
                       onClick={() => updateDay(idx, "is_active", !day.is_active)}
                       className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none ${
@@ -166,39 +174,51 @@ export function DoctorHoursEditor({ provider, onSaved }: { provider: Provider; o
                     >
                       <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${day.is_active ? "translate-x-4" : "translate-x-0"}`} />
                     </button>
-                    <span className="w-20 shrink-0 truncate text-sm font-medium">{DAY_NAMES[day.day_of_week]}</span>
-                    {day.is_active && (
-                      <>
-                        <div className="grid min-w-[168px] flex-1 grid-cols-[1fr_auto_1fr] items-center gap-2">
-                          <TimeSelect value={day.open_time ?? ""} onChange={(v) => updateDay(idx, "open_time", v)} label="Open" />
-                          <span className="text-center text-sm text-muted-foreground">–</span>
-                          <TimeSelect value={day.close_time ?? ""} onChange={(v) => updateDay(idx, "close_time", v)} label="Close" />
-                        </div>
-                        <div className="flex min-w-[210px] flex-1 flex-wrap items-center gap-2">
-                          <span className="shrink-0 text-xs text-muted-foreground">Break:</span>
-                          <div className="min-w-[96px] flex-1">
-                            <TimeSelect value={day.break_start ?? ""} onChange={(v) => updateDay(idx, "break_start", v || null)} label="Start" placeholder="—" />
-                          </div>
-                          <span className="shrink-0 text-xs text-muted-foreground">–</span>
-                          <div className="min-w-[96px] flex-1">
-                            <TimeSelect value={day.break_end ?? ""} onChange={(v) => updateDay(idx, "break_end", v || null)} label="End" placeholder="—" />
-                          </div>
-                        </div>
-                      </>
-                    )}
+                    <span className="truncate text-sm font-medium">{DAY_NAMES[day.day_of_week]}</span>
                   </div>
-                  {!day.is_active && <span className="text-xs text-muted-foreground italic">Closed</span>}
+                  {day.is_active ? (
+                    <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
+                        <TimeSelect value={day.open_time ?? ""} onChange={(v) => updateDay(idx, "open_time", v)} label="Open" />
+                        <span className="text-sm text-muted-foreground shrink-0">–</span>
+                        <TimeSelect value={day.close_time ?? ""} onChange={(v) => updateDay(idx, "close_time", v)} label="Close" />
+                      </div>
+                      <button
+                        type="button"
+                        aria-expanded={breakOpenDays.includes(day.day_of_week)}
+                        onClick={() => setBreakOpenDays((current) =>
+                          current.includes(day.day_of_week)
+                            ? current.filter((dow) => dow !== day.day_of_week)
+                            : [...current, day.day_of_week]
+                        )}
+                        className="justify-self-start text-xs font-medium text-primary hover:underline sm:justify-self-end"
+                      >
+                        {breakOpenDays.includes(day.day_of_week) ? "Hide break" : day.break_start || day.break_end ? "Edit break" : "Add break"}
+                      </button>
+                      {breakOpenDays.includes(day.day_of_week) && (
+                        <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 sm:col-span-2 sm:max-w-md">
+                          <span className="text-xs text-muted-foreground">Break</span>
+                          <TimeSelect value={day.break_start ?? ""} onChange={(v) => updateDay(idx, "break_start", v || null)} label="Break start" placeholder="Start" />
+                          <span className="text-xs text-muted-foreground">–</span>
+                          <TimeSelect value={day.break_end ?? ""} onChange={(v) => updateDay(idx, "break_end", v || null)} label="Break end" placeholder="End" />
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">Closed</span>
+                  )}
                 </div>
               ))}
             </div>
           </div>
 
           <button
+            type="button"
             onClick={saveWeekly}
             disabled={saving}
             className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"
           >
-            {saving ? "Saving…" : "Save Schedule"}
+            {saving ? "Saving…" : "Save hours"}
           </button>
         </div>
       )}
@@ -353,9 +373,9 @@ function DoctorPreview({ providerId }: { providerId: string }) {
         </div>
         <div>
           <label className="block text-xs font-medium text-muted-foreground mb-1.5">Days to show</label>
-          <select value={days} onChange={(e) => setDays(Number(e.target.value))} className="bg-secondary border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary">
+          <select value={days} onChange={(e) => setDays(Number(e.target.value))} className="w-[70px] bg-secondary border border-border rounded-sm px-1 py-0.5 text-[9px] focus:outline-none focus:ring-1 focus:ring-primary">
             {[7, 14, 28].map((d) => (
-              <option key={d} value={d}>{d} days</option>
+              <option key={d} value={d}>{d}d</option>
             ))}
           </select>
         </div>

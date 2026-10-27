@@ -1,151 +1,79 @@
-# Environment Variables
+# Environment and Secrets Reference
 
-> Complete reference for all configuration options
+This guide covers where the current Compose stack gets configuration and how to manage it safely. The example files in the repository are the source of truth for the full variable list; application settings are defined in each service's configuration module.
 
-This document lists all environment variables used by the application.
+## Local configuration files
 
----
+| Runtime file | Copy from | Used by |
+|---|---|---|
+| `.env` | `.env.example` | Docker Compose interpolation, PostgreSQL initialization, and internal WhatsApp gateway key |
+| `backend/.env.docker` | `backend/.env.docker.example` | Tenant FastAPI application |
+| `backend-super/.env.docker` | `backend-super/.env.docker.example` | Super Admin FastAPI application |
 
-## 1. Database Configuration
+Create each file only if it does not already exist. Keep all runtime values local or in the approved secret manager; do not commit them.
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `POSTGRES_USER` | Yes | `postgres` | Database username |
-| `POSTGRES_PASSWORD` | Yes | — | Database password |
-| `POSTGRES_SERVER` | Yes | `localhost` | Database host |
-| `POSTGRES_PORT` | Yes | `5432` | Database port |
-| `POSTGRES_DB` | Yes | `booking_agent` | Database name |
+## Compose-level variables
 
-**Connection String Format:**
-```
-postgresql+asyncpg://user:password@host:port/dbname
-```
+The root `.env.example` supplies the database values used to initialize the PostgreSQL container:
 
----
+| Variable | Purpose |
+|---|---|
+| `POSTGRES_USER` | Initial PostgreSQL administrator username |
+| `POSTGRES_PASSWORD` | Initial PostgreSQL administrator password |
+| `POSTGRES_DB` | Initial database name |
+| `WA_GATEWAY_SERVICE_KEY` | Shared secret used by the tenant API and internal WhatsApp gateway |
+| `CLOUDFLARE_TUNNEL_TOKEN_BACKEND`, `CLOUDFLARE_TUNNEL_TOKEN_ADMIN` | Template values for optional named-tunnel setup; the current Compose commands use temporary quick tunnels by default |
 
-## 2. Authentication & Security
+Set `WA_GATEWAY_SERVICE_KEY` to the same locally generated value in the root `.env` and `backend/.env.docker`. Do not reuse a real production key for development. The example file leaves secrets blank intentionally.
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `JWT_SECRET_KEY` | Yes | — | Secret key for JWT signing (64+ chars) |
-| `JWT_ALGORITHM` | No | `HS256` | JWT algorithm |
-| `JWT_EXPIRATION_MINUTES` | No | `10080` | Token expiry (7 days) |
-| `DEBUG` | No | `false` | Enable debug mode |
+## Tenant API settings
 
-**Generate JWT Secret:**
-```bash
-python -c "import secrets; print(secrets.token_urlsafe(64))"
-```
+The tenant API reads its configuration through `backend/app/core/config.py`. Use `backend/.env.docker.example` as the authoritative key list. It includes settings for:
 
----
+- PostgreSQL connection and pool behavior
+- JWT/authentication and application security
+- LLM provider/model selection
+- SMTP and email delivery
+- frontend/public API URLs and widget configuration
+- calendar providers and OAuth callbacks
+- WhatsApp gateway, QR, and optional Meta Cloud API behavior
+- Razorpay/Cashfree and other optional payment features
+- feature flags, observability, and background/runtime limits
 
-## 3. LLM Configuration
+Only configure integrations that are intended to be enabled in the environment. Keep callback URLs, trusted origins, and public API URLs consistent with the deployed domain and reverse-proxy topology.
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `LLM_API_KEY` | Yes | — | Groq API key |
-| `LLM_BASE_URL` | No | Groq URL | API endpoint |
-| `LLM_MODEL` | No | See below | Model to use |
+## Super Admin API settings
 
-**Default Model:**
-```
-moonshotai/kimi-k2-instruct-0905
-```
+The Super Admin API reads settings through `backend-super/app/core/config.py`; use `backend-super/.env.docker.example` as its authoritative key list. It has a separate platform database connection and a distinct read-only tenant-data database connection, plus its own authentication, security, bridge, and telemetry settings.
 
----
+Do not point the read-only tenant connection at a writable role. Do not copy the tenant API's JWT secret into the Super Admin service; keep the two trust domains separate.
 
-## 4. Email (SMTP)
+## Frontend and gateway configuration
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `SMTP_HOST` | No | — | SMTP server hostname |
-| `SMTP_PORT` | No | `587` | SMTP port |
-| `SMTP_USER` | No | — | SMTP username |
-| `SMTP_PASSWORD` | No | — | SMTP password |
-| `EMAILS_FROM_EMAIL` | No | — | Sender email address |
-| `EMAILS_FROM_NAME` | No | `DotStark` | Sender name |
+Docker Compose sets the server-side `INTERNAL_API_URL` for each Next.js app:
 
----
+- Tenant dashboard → `http://backend:8005`
+- Super Admin UI → `http://backend-super:8006`
 
-## 5. Application Settings
+These are internal Compose network URLs. The tenant Nginx gateway and the external browser use different public-facing URLs; do not replace the internal addresses with `localhost` inside containers.
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `PROJECT_NAME` | No | DotStark AI Booking | Project name |
-| `API_V1_STR` | No | `/api/v1` | API prefix |
+## Generate local secrets
 
----
+Generate a different random secret for each environment and service. For example, with Python installed:
 
-## 6. Example .env File
-
-```bash
-# Database
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=my_secure_password
-POSTGRES_SERVER=localhost
-POSTGRES_PORT=5432
-POSTGRES_DB=booking_agent
-
-# Security
-JWT_SECRET_KEY=aVeryLongRandomStringGeneratedByPythonSecretsModule
-DEBUG=false
-
-# LLM
-LLM_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxx
-LLM_BASE_URL=https://api.groq.com/openai/v1/chat/completions
-LLM_MODEL=moonshotai/kimi-k2-instruct-0905
-
-# Email
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=your-email@gmail.com
-SMTP_PASSWORD=your-app-password
-EMAILS_FROM_EMAIL=bookings@yourdomain.com
-
-# App
-PROJECT_NAME=DotStark AI Booking
-API_V1_STR=/api/v1
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
----
+Use the resulting value for a secret setting such as a JWT or service-to-service key, according to that setting's requirements. Store production credentials only in the approved secret manager. Never paste secrets into source code, docs, screenshots, issue trackers, or logs.
 
-## 7. Development vs Production
+## Production and rotation checklist
 
-### Development (.env)
+- Replace all example/blank values before startup; verify the target environment's required settings.
+- Rotate credentials that have ever been checked into source, copied into docs, or shared outside the approved secret store.
+- Use separate keys for tenant API, Super Admin API, gateway authentication, and provider integrations.
+- Configure HTTPS, stable OAuth callback URLs, allowed frontend origins, and the intended public API base.
+- Review bootstrap initialization in `backend/init_db.py`; fixed bootstrap account/API-key setup must not be treated as production identity provisioning.
+- Back up and protect database credentials, Cloudflare credentials, WhatsApp auth state, and database dumps as sensitive data.
 
-```bash
-DEBUG=true
-POSTGRES_SERVER=localhost
-JWT_SECRET_KEY=dev-secret-key
-```
-
-### Production (.env)
-
-```bash
-DEBUG=false
-POSTGRES_SERVER=prod-db.xxxx.us-east-1.rds.amazonaws.com
-JWT_SECRET_KEY=<64-char-random-string-from-python-secrets>
-```
-
----
-
-## 8. Required Variables Summary
-
-| Environment | Required Variables |
-|-------------|-------------------|
-| Development | `POSTGRES_*`, `JWT_SECRET_KEY`, `LLM_API_KEY` |
-| Production | All variables |
-
----
-
-## 9. Related Documents
-
-| Document | What It Covers |
-|----------|----------------|
-| [Quick Start](../getting-started/quickstart.md) | Basic setup |
-| [Production Deployment](../deployment/production.md) | Production config |
-| [Troubleshooting](troubleshooting.md) | Common issues |
-
----
-
-*Reference document — No need to read sequentially.*
+For service startup and deployment context, see the [developer handover](../DEVELOPER_HANDOVER.md) and [local setup guide](../../SETUP.md).

@@ -143,7 +143,9 @@ def _build_config_response(org: Organization, config: Optional[OrgConfig]) -> di
         "border_radius": int(raw_theme.get("border_radius") or 16),
         "font_family": str(raw_theme.get("font_family") or "Inter, system-ui, sans-serif"),
         "dark_mode": bool(raw_theme.get("dark_mode", True)),
-        "show_branding": bool(raw_theme.get("show_branding", True)),
+        # Branding is always shown (product decision 2025-10): the widget
+        # never hides the powered-by strip, any stored flag is ignored.
+        "show_branding": True,
         "launcher_shape": str(raw_theme.get("launcher_shape") or "round"),
     }
     if ui_theme["position"] not in ("bottom-right", "bottom-left", "center"):

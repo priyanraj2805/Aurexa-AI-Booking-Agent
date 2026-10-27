@@ -16,11 +16,13 @@ export default function DepartmentsPage() {
   const { isDoctor } = useAuth();
   const [units, setUnits] = useState<Unit[]>([]);
   const [name, setName] = useState("");
+  const [createUnitOpen, setCreateUnitOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState("");
   const [doctors, setDoctors] = useState<Provider[]>([]);
   const [allDoctors, setAllDoctors] = useState<Provider[]>([]);
   const [addId, setAddId] = useState("");
+  const [addMemberOpen, setAddMemberOpen] = useState(false);
   const [docSearch, setDocSearch] = useState("");
   const [newDocName, setNewDocName] = useState("");
   const [newDocEmail, setNewDocEmail] = useState("");
@@ -59,6 +61,15 @@ export default function DepartmentsPage() {
   const [docAmount, setDocAmount] = useState("");
   const [docFeeId, setDocFeeId] = useState("");
   const [feeSaving, setFeeSaving] = useState(false);
+
+  const closeMemberPanels = () => {
+    setHoursOpenId("");
+    setFeeOpenId("");
+    setEditOpenId("");
+    setInviteForId("");
+    setInviteToken("");
+    setInviteLink("");
+  };
 
   const loadUnits = async (keepSelection = true) => {
     try {
@@ -128,6 +139,7 @@ export default function DepartmentsPage() {
       setFeeOpenId("");
       return;
     }
+    closeMemberPanels();
     setFeeOpenId(p.id);
     setDocFeeId("");
     try {
@@ -138,7 +150,7 @@ export default function DepartmentsPage() {
       setDocFeeId(mine?.id || "");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to load fee");
-      setFeeOpenId("");
+      setFeeOpenId((current) => current === p.id ? "" : current);
     }
   };
 
@@ -174,8 +186,9 @@ export default function DepartmentsPage() {
     if (selectedId) {
       setDocSearch("");
       setAddId("");
+      setAddMemberOpen(false);
       setDocPage(1);
-      setHoursOpenId("");
+      closeMemberPanels();
       setNewDocOpen(false);
       setNewDocName("");
       setNewDocEmail("");
@@ -204,6 +217,7 @@ export default function DepartmentsPage() {
     try {
       const u = await orgApi.createUnit({ name: name.trim() });
       setName("");
+      setCreateUnitOpen(false);
       toast.success("Department added");
       await loadUnits(false);
       setSelectedId(u.id);
@@ -213,7 +227,7 @@ export default function DepartmentsPage() {
   };
 
   const remove = async (id: string) => {
-    if (!confirm("Delete this department? Team members stay, only the department is removed.")) return;
+    if (!confirm("Delete this department?")) return;
     try {
       await orgApi.deleteUnit(id);
       toast.success("Deleted");
@@ -249,6 +263,7 @@ export default function DepartmentsPage() {
       await orgApi.assign(selectedId, addId);
       toast.success("Member added to department");
       setAddId("");
+      setAddMemberOpen(false);
       await loadDoctors(selectedId);
       await loadUnits(true);
     } catch (e) {
@@ -315,6 +330,12 @@ export default function DepartmentsPage() {
   };
 
   const removeDoctor = async (pid: string) => {
+    closeMemberPanels();
+    const member = doctors.find((doctor) => doctor.id === pid);
+    const memberName = member?.full_name || "this team member";
+    const departmentName = selected?.name || "this department";
+    if (!confirm(`Remove ${memberName} from ${departmentName}?`)) return;
+
     try {
       await orgApi.unassign(selectedId, pid);
       toast.success("Removed from department");
@@ -330,12 +351,11 @@ export default function DepartmentsPage() {
       setEditOpenId("");
       return;
     }
+    closeMemberPanels();
     setEditOpenId(p.id);
     setEditName(p.full_name);
     setEditEmail(p.email || "");
     setEditPhone(p.phone || "");
-    setInviteForId("");
-    setInviteToken("");
   };
 
   const saveEditDoc = async (p: Provider) => {
@@ -377,11 +397,14 @@ export default function DepartmentsPage() {
       setInviteLink("");
       return;
     }
+    closeMemberPanels();
+    setInviteForId(p.id);
+    setInviteToken("");
+    setInviteLink("");
     setInviteBusy(true);
     try {
       const inv = await orgApi.invite({ email, role_code: "staff", provider_id: p.id });
       const link = inv.invite_link || inv.invite_token || "";
-      setInviteForId(p.id);
       setInviteToken(inv.invite_token || "");
       setInviteLink(link);
       if (link) {
@@ -396,6 +419,7 @@ export default function DepartmentsPage() {
       );
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Invite failed");
+      setInviteForId((current) => current === p.id ? "" : current);
     } finally {
       setInviteBusy(false);
     }
@@ -406,6 +430,7 @@ export default function DepartmentsPage() {
       setHoursOpenId("");
       return;
     }
+    closeMemberPanels();
     setHoursTick((t) => t + 1);
     setHoursOpenId(p.id);
   };
@@ -444,17 +469,38 @@ export default function DepartmentsPage() {
 
       {!units.length && !search ? (
         <div className="border border-border rounded-xl p-4 bg-card grid gap-3 content-start">
-          <p className="text-sm text-muted-foreground">No departments yet. Add Cardiology below to start.</p>
-          <form onSubmit={create} className="flex flex-col sm:flex-row gap-2">
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="New department name…"
-              aria-label="New department name"
-              className="flex-1 px-3 py-2 bg-background border border-border rounded-lg text-sm outline-none focus:border-primary"
-            />
-            <button className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold whitespace-nowrap">Add</button>
-          </form>
+          <p className="text-sm text-muted-foreground">No departments yet. Add one to get started.</p>
+          {createUnitOpen ? (
+            <form onSubmit={create} className="flex flex-col gap-2 sm:flex-row">
+              <input
+                autoFocus
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="New department name…"
+                aria-label="New department name"
+                className="min-w-0 flex-1 px-3 py-2 bg-background border border-border rounded-lg text-sm outline-none focus:border-primary"
+              />
+              <button type="submit" className="shrink-0 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground">Add</button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCreateUnitOpen(false);
+                  setName("");
+                }}
+                className="shrink-0 rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-muted"
+              >
+                Cancel
+              </button>
+            </form>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setCreateUnitOpen(true)}
+              className="justify-self-start rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground"
+            >
+              Add department
+            </button>
+          )}
         </div>
       ) : (
         <>
@@ -469,31 +515,70 @@ export default function DepartmentsPage() {
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-stretch">
           {/* Left: departments outer card with inner cards — like doctors panel */}
           <div className="border border-border rounded-xl p-3 sm:p-4 bg-card flex flex-col gap-3 h-full min-h-0 xl:min-h-[560px] min-w-0 overflow-hidden">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <h2 className="font-semibold">All departments</h2>
-              <span className="text-[11px] px-2 py-0.5 rounded-full bg-secondary whitespace-nowrap">
-                {filtered.length} total
-              </span>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-[11px] px-2 py-0.5 rounded-full bg-secondary whitespace-nowrap">
+                  {filtered.length} total
+                </span>
+                {selected && (
+                  <button
+                    onClick={() => remove(selected.id)}
+                    aria-label={`Delete ${selected.name} department`}
+                    title={`Delete ${selected.name} department`}
+                    className="text-xs text-destructive hover:underline whitespace-nowrap"
+                  >
+                    Delete department
+                  </button>
+                )}
+              </div>
             </div>
-            {/* Search + add in one row, inside the card */}
-            <div className="flex flex-col min-[560px]:flex-row gap-2">
+            {/* Keep department creation hidden until requested. */}
+            <div className="flex min-w-0 flex-wrap items-start gap-2">
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search departments…"
                 aria-label="Search departments"
-                className="flex-1 min-w-0 px-3 py-2 bg-background border border-border rounded-lg text-sm outline-none focus:border-primary"
+                className="min-w-0 flex-1 basis-40 px-3 py-2 bg-background border border-border rounded-lg text-sm outline-none focus:border-primary"
               />
-              <form onSubmit={create} className="flex flex-1 min-w-0 gap-2">
-                <input
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="New department name…"
-                  aria-label="New department name"
-                  className="flex-1 min-w-0 px-3 py-2 bg-background border border-border rounded-lg text-sm outline-none focus:border-primary"
-                />
-                <button className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold whitespace-nowrap shrink-0">Add</button>
-              </form>
+              {!createUnitOpen && (
+                <button
+                  type="button"
+                  onClick={() => setCreateUnitOpen(true)}
+                  className="shrink-0 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground"
+                >
+                  Add department
+                </button>
+              )}
+              {createUnitOpen ? (
+                <form onSubmit={create} className="flex w-full min-w-0 flex-wrap gap-2">
+                  <input
+                    autoFocus
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="New department name…"
+                    aria-label="New department name"
+                    className="min-w-0 flex-1 basis-40 px-3 py-2 bg-background border border-border rounded-lg text-sm outline-none focus:border-primary"
+                  />
+                  <button
+                    type="submit"
+                    className="shrink-0 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground"
+                  >
+                    Add
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCreateUnitOpen(false);
+                      setName("");
+                    }}
+                    className="shrink-0 rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-muted"
+                  >
+                    Cancel
+                  </button>
+                </form>
+              ) : null}
             </div>
             <div className="grid gap-3 content-start flex-1 min-h-0 max-h-[320px] md:max-h-[420px] overflow-y-auto custom-scrollbar pr-1">
               {unitSlice.map((u) => (
@@ -565,25 +650,29 @@ export default function DepartmentsPage() {
                   <h2 className="font-semibold truncate min-w-0">{selected.name} — team</h2>
                     <div className="flex items-center gap-2 shrink-0">
                     <button
-                      onClick={() => setNewDocOpen((v) => !v)}
-                      className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-primary/40 text-primary hover:bg-primary/10 whitespace-nowrap"
-                    >
-                      {newDocOpen ? "Close" : "New member"}
-                    </button>
-                    <button
-                      onClick={() => setFeeOpenDept((v) => !v)}
+                      onClick={() => {
+                        closeMemberPanels();
+                        setFeeOpenDept((v) => !v);
+                      }}
                       className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-border hover:bg-accent whitespace-nowrap"
                     >
                       {feeOpenDept ? "Close" : `Fee${deptFees.find((f) => !f.provider_id) ? `: ₹${paiseToRs(deptFees.find((f) => !f.provider_id)?.amount_paise)}` : ""}`}
                     </button>
-                    <button onClick={() => remove(selected.id)} className="text-xs text-destructive hover:underline whitespace-nowrap">
-                      Delete
-                    </button>
                   </div>
                 </div>
-                {/* Inline new-doctor form (no redirect) — name + email/phone + auto invite */}
+                {/* Inline form for creating and assigning a new team member. */}
                 {newDocOpen && (
                   <form onSubmit={createAndAddDoctor} className="grid gap-2 border border-primary/30 bg-primary/5 rounded-lg p-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-medium">Create a new team member</p>
+                      <button
+                        type="button"
+                        onClick={() => setNewDocOpen(false)}
+                        className="text-xs text-muted-foreground hover:text-foreground"
+                      >
+                        Back
+                      </button>
+                    </div>
                     <div className="flex flex-wrap gap-2">
                       <input
                         value={newDocName}
@@ -620,10 +709,10 @@ export default function DepartmentsPage() {
                       </button>
                     </div>
                     {(newDocLink || newDocInvite) && (
-                      <div className="grid gap-1.5 bg-background border border-border rounded-lg px-3 py-2">
+                      <div className="grid min-w-0 max-w-full gap-1.5 overflow-hidden bg-background border border-border rounded-lg px-3 py-2">
                         <p className="text-[11px] text-muted-foreground">Login link — send it to the doctor (email already sent when configured):</p>
-                        <div className="flex items-center gap-2">
-                          <code className="flex-1 min-w-0 truncate text-xs">{newDocLink || newDocInvite}</code>
+                        <div className="flex min-w-0 items-start gap-2">
+                          <code className="block min-w-0 flex-1 break-all text-xs">{newDocLink || newDocInvite}</code>
                           <button
                             type="button"
                             onClick={async () => {
@@ -643,29 +732,62 @@ export default function DepartmentsPage() {
                     )}
                   </form>
                 )}
-                {/* Search + add in one row */}
-                <div className="flex flex-col min-[560px]:flex-row gap-2">
+                {/* One add action reveals options for existing or new team members. */}
+                <div className="flex min-w-0 flex-wrap items-start gap-2">
                   <input
                     value={docSearch}
                     onChange={(e) => setDocSearch(e.target.value)}
                     placeholder="Search team…"
                     aria-label="Search team in department"
-                    className="flex-1 min-w-0 px-3 py-2 bg-background border border-border rounded-lg text-sm outline-none focus:border-primary"
+                    className="min-w-0 flex-1 basis-40 px-3 py-2 bg-background border border-border rounded-lg text-sm outline-none focus:border-primary"
                   />
-                  {!!addable.length && (
-                    <>
-                      <div className="hidden min-[560px]:block w-px bg-border" aria-hidden />
-                      <select value={addId} onChange={(e) => setAddId(e.target.value)} aria-label="Add team member" className="flex-1 min-w-0 px-3 py-2 bg-background border border-border rounded-lg text-sm truncate">
-                        <option value="">Add existing member…</option>
-                        {addable.map((d) => (
-                          <option key={d.id} value={d.id}>{d.full_name}</option>
-                        ))}
-                      </select>
-                    <button onClick={addDoctor} disabled={!addId} className="px-3 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50 whitespace-nowrap">
-                      Add
+                  {!addMemberOpen && !newDocOpen && (
+                    <button
+                      type="button"
+                      onClick={() => setAddMemberOpen(true)}
+                      className="shrink-0 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground"
+                    >
+                      Add member
                     </button>
-                  </>
-                )}
+                  )}
+                  {addMemberOpen && (
+                    <div className="flex w-full min-w-0 flex-wrap gap-2">
+                      {!!addable.length && (
+                        <>
+                          <select value={addId} onChange={(e) => setAddId(e.target.value)} aria-label="Add team member" className="min-w-0 flex-1 basis-40 px-3 py-2 bg-background border border-border rounded-lg text-sm truncate">
+                            <option value="">Select existing member…</option>
+                            {addable.map((d) => (
+                              <option key={d.id} value={d.id}>{d.full_name}</option>
+                            ))}
+                          </select>
+                          <button onClick={addDoctor} disabled={!addId} className="shrink-0 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-50">
+                            Add
+                          </button>
+                        </>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAddMemberOpen(false);
+                          setAddId("");
+                          setNewDocOpen(true);
+                        }}
+                        className="shrink-0 rounded-lg border border-primary/40 px-4 py-2 text-sm font-medium text-primary hover:bg-primary/10"
+                      >
+                        Create new member
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAddMemberOpen(false);
+                          setAddId("");
+                        }}
+                        className="shrink-0 rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-muted"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
               </div>
               {/* Department fee editor */}
               {feeOpenDept && (
@@ -759,10 +881,10 @@ export default function DepartmentsPage() {
                           </div>
                         )}
                         {inviteForId === d.id && (inviteLink || inviteToken) && (
-                          <div className="mt-2 grid gap-1 bg-background border border-border rounded-lg px-3 py-2">
+                          <div className="mt-2 grid min-w-0 max-w-full gap-1 overflow-hidden bg-background border border-border rounded-lg px-3 py-2">
                             <p className="text-[11px] text-muted-foreground">Login link — send it to them:</p>
-                            <div className="flex items-center gap-2">
-                              <code className="flex-1 min-w-0 truncate text-xs">{inviteLink || inviteToken}</code>
+                            <div className="flex min-w-0 items-start gap-2">
+                              <code className="block min-w-0 flex-1 break-all text-xs">{inviteLink || inviteToken}</code>
                               <button
                                 type="button"
                                 onClick={async () => {

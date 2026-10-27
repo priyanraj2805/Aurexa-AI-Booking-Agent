@@ -2,6 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Search, X, ChevronDown, ChevronUp, Calendar, ArrowUpDown } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+} from "@/components/ui/select";
 
 type SearchInputProps = {
   value: string;
@@ -37,18 +43,18 @@ export function SearchInput({
 
   return (
     <div className={`relative ${className}`}>
-      <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-500" />
+      <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
       <input
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         placeholder={placeholder}
-        className="w-full rounded-md border border-slate-700 bg-slate-900 py-2 pl-9 pr-8 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-indigo-500"
+        className="w-full min-w-0 rounded-md border border-input bg-background py-2 pl-9 pr-8 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-primary"
       />
       {draft && (
         <button
           onClick={() => setDraft("")}
           aria-label="Clear search"
-          className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-500 hover:text-slate-200"
+          className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
         >
           <X className="size-4" />
         </button>
@@ -58,6 +64,44 @@ export function SearchInput({
 }
 
 type CheckboxOption = { value: string; label: string };
+
+type FilterSelectProps = {
+  value: string;
+  onChange: (value: string) => void;
+  options: CheckboxOption[];
+  className?: string;
+};
+
+export function FilterSelect({ value, onChange, options, className }: FilterSelectProps) {
+  const selectedOption = options.find((option) => option.value === value) ?? options[0];
+
+  return (
+    <Select
+      value={value || "__all__"}
+      onValueChange={(next) => onChange(!next || next === "__all__" ? "" : next)}
+    >
+      <SelectTrigger className={`h-9 w-full min-w-0 rounded-md px-3 text-xs xl:w-auto ${className ?? ""}`}>
+        <span className="min-w-0 flex-1 truncate text-left">
+          {selectedOption?.label ?? "Select an option"}
+        </span>
+      </SelectTrigger>
+      <SelectContent
+        align="start"
+        className="max-h-[min(23rem,var(--available-height))] max-w-[calc(100vw-2rem)]"
+      >
+        {options.map((option) => (
+          <SelectItem
+            key={option.value || "__all__"}
+            value={option.value || "__all__"}
+            className="h-8"
+          >
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
 
 type CheckboxFilterProps = {
   label: string;
@@ -88,41 +132,41 @@ export function CheckboxFilter({ label, options, selected, onChange, className }
   const displayLabel = selectedCount > 0 ? `${label} (${selectedCount})` : label;
 
   return (
-    <div ref={rootRef} className={`relative ${className}`}>
+    <div ref={rootRef} className={`relative min-w-0 ${className}`}>
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-300 hover:bg-slate-900 focus:outline-none focus:border-indigo-500"
+        className="flex w-full min-w-0 items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground hover:bg-accent focus:outline-none focus:border-primary xl:w-full"
       >
         <span>{displayLabel}</span>
         {open ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
       </button>
       {open && (
-        <div className="absolute z-10 mt-1 w-56 rounded-md border border-slate-700 bg-slate-950 shadow-lg">
+        <div className="absolute z-10 mt-1 w-56 rounded-md border border-border bg-popover text-popover-foreground shadow-lg">
           {options.map((opt) => {
             const checked = selected.includes(opt.value);
             return (
               <label
                 key={opt.value}
                 className={`flex cursor-pointer items-center gap-2 px-3 py-2 text-sm ${
-                  checked ? "bg-indigo-950/60 text-indigo-200" : "text-slate-300 hover:bg-slate-900"
+                  checked ? "bg-primary/10 text-primary" : "text-foreground hover:bg-accent"
                 }`}
               >
                 <input
                   type="checkbox"
                   checked={checked}
                   onChange={() => toggle(opt.value)}
-                  className="size-3.5 accent-indigo-500"
+                  className="size-3.5 accent-primary"
                 />
                 {opt.label}
               </label>
             );
           })}
           {selected.length > 0 && (
-            <div className="border-t border-slate-700 px-3 py-2">
+            <div className="border-t border-border px-3 py-2">
               <button
                 onClick={() => onChange([])}
-                className="w-full text-left text-xs text-slate-400 hover:text-slate-200"
+                className="w-full text-left text-xs text-muted-foreground hover:text-foreground"
               >
                 Clear all
               </button>
@@ -218,7 +262,7 @@ function DateField({
   };
 
   return (
-    <div className="relative">
+    <div className="relative min-w-0 flex-1 sm:flex-none">
       <input
         ref={inputRef}
         type="text"
@@ -237,7 +281,7 @@ function DateField({
           setText(masked);
         }}
         onBlur={() => commit(inputRef.current?.value ?? text)}
-        className={`w-36 rounded-md border border-border bg-background px-2 py-1.5 text-sm outline-none placeholder:text-muted-foreground focus:border-primary ${
+        className={`w-full rounded-md border border-border bg-background px-2 py-2 pr-8 text-xs outline-none placeholder:text-muted-foreground focus:border-primary sm:w-36 sm:py-1.5 sm:text-sm xl:w-32 ${
           invalid ? "border-destructive focus:border-destructive" : ""
         }`}
       />
@@ -288,23 +332,32 @@ export function DateFilter({ label, fromDate, toDate, onFromChange, onToChange, 
   };
 
   return (
-    <div className={`relative ${className}`}>
-      <label className="flex items-center gap-2">
+    <div className={`relative w-full min-w-0 sm:w-auto xl:flex xl:items-center xl:gap-2 ${className}`}>
+      <div className="mb-2 flex items-center justify-between gap-2 sm:mb-0 xl:shrink-0">
         <span className="text-sm text-muted-foreground">{displayLabel}</span>
-        <div className="flex items-center gap-2">
+        {hasFilter && (
+          <button
+            type="button"
+            onClick={clear}
+            aria-label="Clear date range"
+            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          >
+            <X className="size-3.5" />
+            <span className="sm:hidden">Clear</span>
+          </button>
+        )}
+      </div>
+      <div className="grid min-w-0 grid-cols-1 gap-2 sm:flex sm:w-auto sm:items-center sm:gap-2 xl:gap-1.5">
+        <div className="grid min-w-0 grid-cols-[40px_minmax(0,1fr)] items-center gap-2 sm:block">
+          <span className="text-xs text-muted-foreground sm:hidden">From</span>
           <DateField value={fromDate} onChange={onFromChange} invalid={invalidFrom || inverted} />
-          <span className="text-muted-foreground">–</span>
-          <DateField value={toDate} onChange={onToChange} invalid={invalidTo || inverted} />
-          {hasFilter && (
-            <button
-              onClick={clear}
-              className="text-muted-foreground hover:text-foreground"
-            >
-              <X className="size-4" />
-            </button>
-          )}
         </div>
-      </label>
+        <span className="hidden text-muted-foreground sm:inline">–</span>
+        <div className="grid min-w-0 grid-cols-[40px_minmax(0,1fr)] items-center gap-2 sm:block">
+          <span className="text-xs text-muted-foreground sm:hidden">To</span>
+          <DateField value={toDate} onChange={onToChange} invalid={invalidTo || inverted} />
+        </div>
+      </div>
       {invalid && <p className="mt-1 text-xs text-destructive">{hint}</p>}
     </div>
   );
@@ -314,7 +367,8 @@ type SortableThProps = {
   column: string;
   sortBy: string;
   sortOrder: "asc" | "desc";
-  onSort: (column: string, order: "asc" | "desc") => void;
+  /** `null` = third click on an already-flipped column: reset to the table's default sort. */
+  onSort: (column: string, order: "asc" | "desc" | null) => void;
   defaultOrder?: "asc" | "desc";
   className?: string;
   children: React.ReactNode;
@@ -330,22 +384,35 @@ export function SortableTh({
   children,
 }: SortableThProps) {
   const active = sortBy === column;
-  const nextOrder: "asc" | "desc" = active
-    ? sortOrder === "desc"
-      ? "asc"
-      : "desc"
-    : defaultOrder;
+  const flipOrder: "asc" | "desc" = sortOrder === "desc" ? "asc" : "desc";
+  const label = String(children).toLowerCase().trim();
+  const handleClick = () => {
+    if (!active) {
+      // First click: sort this column in its natural/default direction.
+      onSort(column, defaultOrder);
+    } else if (sortOrder === defaultOrder) {
+      // Second click: flip the direction.
+      onSort(column, flipOrder);
+    } else {
+      // Third click: undo the sort entirely — back to table default.
+      onSort(column, null);
+    }
+  };
   return (
     <th className={`px-4 py-3 ${className}`}>
       <button
         type="button"
-        onClick={() => onSort(column, nextOrder)}
+        onClick={handleClick}
         className={`flex items-center gap-1 transition-colors ${
           active
             ? "text-primary"
             : "text-muted-foreground hover:text-foreground"
         }`}
-        title={`Sort by ${String(children).toLowerCase()}`}
+        title={
+          active && sortOrder !== defaultOrder
+            ? `Sorted by ${label} — click to reset`
+            : `Sort by ${label}`
+        }
       >
         <span>{children}</span>
         {active &&
@@ -371,7 +438,7 @@ export function SortSelect({ value, onChange, options, className }: SortSelectPr
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className={`rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-300 outline-none focus:border-indigo-500 ${className}`}
+      className={`rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:border-primary ${className}`}
     >
       {options.map((opt) => (
         <option key={opt.value} value={opt.value}>
@@ -392,7 +459,7 @@ export function SortOrder({ value, onChange, className }: SortOrderProps) {
   return (
     <button
       onClick={() => onChange(value === "asc" ? "desc" : "asc")}
-      className={`rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-300 outline-none focus:border-indigo-500 ${className}`}
+      className={`rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:border-primary ${className}`}
       title="Toggle sort order"
     >
       {value === "asc" ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}

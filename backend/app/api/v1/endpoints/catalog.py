@@ -970,6 +970,31 @@ async def preview_provider_schedule(
     from app.engine.slot_engine import compute_slot_inventory
 
     provider = await _get_provider(db, user.org_id, provider_id)
+    # Resolve effective business timezone (org schedule → doctor override) for local-time slot display
+    from zoneinfo import ZoneInfo as _ZI
+
+    _tz_str = "UTC"
+    try:
+        _sched = (
+            await db.execute(
+                select(BusinessSchedule).where(BusinessSchedule.org_id == user.org_id)
+            )
+        ).scalars().first()
+        _tz_str = (getattr(_sched, "timezone", None) or "UTC").strip() if _sched is not None else "UTC"
+    except Exception:
+        _tz_str = "UTC"
+    if provider is not None and getattr(provider, "timezone", None):
+        try:
+            from app.core.org_mode import effective_timezone as _eff_tz
+
+            _tz_str = _eff_tz(provider, _tz_str)
+        except Exception:
+            pass
+    try:
+        _local_zone = _ZI((_tz_str or "UTC").strip())
+    except Exception:
+        _local_zone = _ZI("UTC")
+
     try:
         start = _date.fromisoformat(date) if date else _dt.now().date()
     except ValueError:
@@ -986,7 +1011,7 @@ async def preview_provider_schedule(
                 "status": status,
                 "available_times": sorted(
                     {
-                        item["start_utc"].strftime("%I:%M %p").lstrip("0")
+                        item["start_utc"].astimezone(_local_zone).strftime("%I:%M %p").lstrip("0")
                         for item in (inv or [])
                         if item.get("available")
                     }

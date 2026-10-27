@@ -2,11 +2,11 @@
 
 import { useState, useEffect } from "react";
 import { useSearchParams } from "next/navigation";
-import { Loader2, AlertCircle, CalendarX2, ArrowLeft } from "lucide-react";
+import { Loader2, AlertCircle, CalendarX2, ArrowLeft, SlidersHorizontal, ChevronDown, X } from "lucide-react";
 import Link from "next/link";
 import { useCancelledBookings } from "@/hooks/use-dashboard";
 import { Pagination } from "@/components/pagination";
-import { SearchInput, DateFilter } from "@/components/filter-bar";
+import { SearchInput, DateFilter, FilterSelect } from "@/components/filter-bar";
 
 function formatDateTime(iso: string | null): string {
   if (!iso) return "—";
@@ -32,6 +32,7 @@ function getInitials(name: string): string {
 export default function CancelledBookingsPage() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [unitFilter, setUnitFilter] = useState("");
@@ -91,8 +92,8 @@ export default function CancelledBookingsPage() {
   return (
     <>
       <style>{`@keyframes highlight { 0% { background-color: hsl(var(--primary) / 0.25); transform: scale(1.01); } 50% { background-color: hsl(var(--primary) / 0.15); } 100% { background-color: transparent; transform: scale(1); } }`}</style>
-      <div className="flex items-end justify-between mb-2">
-        <div>
+      <div className="mb-3 flex flex-col items-start gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="min-w-0">
           <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">
             Cancelled Bookings
           </h1>
@@ -102,45 +103,75 @@ export default function CancelledBookingsPage() {
         </div>
         <Link
           href="/dashboard/bookings"
-          className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+          className="inline-flex shrink-0 items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
         >
           <ArrowLeft className="size-3.5" /> All bookings
         </Link>
       </div>
 
       <div className="bg-card border border-border rounded-xl p-4 sm:p-6">
-        <div className="flex flex-wrap items-center gap-3 mb-4">
-          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Search name, email or phone…" className="w-full sm:w-72" />
+        <div className="mb-4 flex min-w-0 items-center gap-2">
+          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Search bookings…" className="min-w-0 flex-1 xl:hidden" />
+          <button
+            type="button"
+            onClick={() => setFiltersOpen((open) => !open)}
+            aria-expanded={filtersOpen}
+            className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-md border px-3 text-sm transition-colors xl:hidden ${
+              filtersOpen || fromDate || toDate || unitFilter || providerFilter
+                ? "border-primary/40 bg-primary/5 text-primary"
+                : "border-border bg-background text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <SlidersHorizontal className="size-4" />
+            <span>Filters</span>
+            <ChevronDown className={`size-4 transition-transform ${filtersOpen ? "rotate-180" : ""}`} />
+          </button>
+        </div>
+        <div className={`mb-4 min-w-0 grid-cols-1 gap-3 min-[360px]:grid-cols-2 xl:flex xl:flex-wrap xl:items-center ${filtersOpen ? "grid" : "hidden xl:flex"}`}>
+          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Search bookings…" className="hidden w-56 shrink-0 xl:block" />
           <DateFilter
             label="Cancelled on"
             fromDate={fromDate}
             toDate={toDate}
             onFromChange={(v) => { setFromDate(v); setPage(1); }}
             onToChange={(v) => { setToDate(v); setPage(1); }}
+            className="min-w-0 min-[360px]:col-span-2 xl:col-span-1"
           />
           {!!filterUnits.length && (
-            <select
+            <FilterSelect
               value={unitFilter}
-              onChange={(e) => { setUnitFilter(e.target.value); setPage(1); }}
-              className="h-9 rounded-md border border-border bg-background px-3 text-xs"
-            >
-              <option value="">All departments</option>
-              {filterUnits.map((u) => (
-                <option key={u.id} value={u.id}>{u.name}</option>
-              ))}
-            </select>
+              onChange={(value) => { setUnitFilter(value); setPage(1); }}
+              options={[
+                { value: "", label: "All departments" },
+                ...filterUnits.map((u) => ({ value: u.id, label: u.name })),
+              ]}
+            />
           )}
           {!!filterProviders.length && (
-            <select
+            <FilterSelect
               value={providerFilter}
-              onChange={(e) => { setProviderFilter(e.target.value); setPage(1); }}
-              className="h-9 rounded-md border border-border bg-background px-3 text-xs"
+              onChange={(value) => { setProviderFilter(value); setPage(1); }}
+              options={[
+                { value: "", label: "All members" },
+                ...visibleProviders.map((p) => ({ value: p.id, label: p.full_name })),
+              ]}
+            />
+          )}
+          {(search || fromDate || toDate || unitFilter || providerFilter) && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearch("");
+                setFromDate("");
+                setToDate("");
+                setUnitFilter("");
+                setProviderFilter("");
+                setPage(1);
+              }}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
             >
-              <option value="">All members</option>
-              {visibleProviders.map((p) => (
-                <option key={p.id} value={p.id}>{p.full_name}</option>
-              ))}
-            </select>
+              Clear filters <X className="size-3.5" />
+            </button>
           )}
         </div>
 
@@ -157,7 +188,7 @@ export default function CancelledBookingsPage() {
             <CalendarX2 className="size-10 text-muted-foreground/40 mx-auto mb-3" />
             <p className="text-muted-foreground text-sm">No cancelled bookings found.</p>
             <p className="text-muted-foreground/60 text-xs mt-1">
-              {search || fromDate || toDate
+              {search || fromDate || toDate || unitFilter || providerFilter
                 ? "Try clearing the search or date filters."
                 : "Cancelled bookings will show up here."}
             </p>
@@ -166,7 +197,7 @@ export default function CancelledBookingsPage() {
           <>
             <div className="w-full overflow-x-auto">
               {/* Mobile card view */}
-              <div className="md:hidden space-y-3">
+              <div className="xl:hidden space-y-3">
                 {data.items.map((b) => (
                   <div
                     key={b.id}
@@ -205,7 +236,7 @@ export default function CancelledBookingsPage() {
                 ))}
               </div>
               {/* Desktop table view */}
-              <table className="hidden md:table w-full border-collapse">
+              <table className="hidden xl:table w-full border-collapse">
                 <thead>
                       <tr>
                         <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">Client</th>

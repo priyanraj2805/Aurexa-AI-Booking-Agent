@@ -1733,3 +1733,55 @@ class TestBookingCancellation:
             payload.get("meeting_link_url") == "https://meet.example.com/admin-cancel"
         )
         assert payload.get("meeting_link_provider") == "GOOGLE_MEET"
+
+
+@pytest.mark.parametrize("search_term", ["Cardiology", "Ritu Nair"])
+async def test_cancelled_bookings_search_matches_department_and_member(
+    search_term: str,
+    registered_user,
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    from app.models.service_unit import Provider, ServiceUnit
+
+    org_id = uuid.UUID(registered_user["user"]["org_id"])
+    unit = ServiceUnit(org_id=org_id, name="Cardiology", is_active=True)
+    provider = Provider(org_id=org_id, full_name="Ritu Nair", is_active=True)
+    db_session.add_all([unit, provider])
+    await db_session.flush()
+
+    matching_session = ChatSession(
+        org_id=org_id,
+        session_status="CANCELLED",
+        state_data={
+            "name": "Booking Client",
+            "email": "booking-client@example.com",
+            "date": "2026-10-30",
+        },
+        unit_id=unit.id,
+        provider_id=provider.id,
+    )
+    other_session = ChatSession(
+        org_id=org_id,
+        session_status="CANCELLED",
+        state_data={
+            "name": "Another Client",
+            "email": "another-client@example.com",
+            "date": "2026-10-31",
+        },
+    )
+    db_session.add_all([matching_session, other_session])
+    await db_session.commit()
+
+    response = await client.get(
+        "/api/v1/dashboard/bookings/cancelled",
+        params={"search": search_term},
+        headers=registered_user["headers"],
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["id"] == str(matching_session.id)
+    assert body["items"][0]["unit_name"] == "Cardiology"
+    assert body["items"][0]["provider_name"] == "Ritu Nair"

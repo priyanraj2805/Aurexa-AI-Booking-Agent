@@ -708,7 +708,9 @@
       const position = theme.position || "bottom-right";
       const radius = Math.max(0, Math.min(28, Number(theme.border_radius ?? 16) || 16));
       const darkMode = theme.dark_mode !== false;
-      const showBranding = theme.show_branding !== false;
+      // Branding is ALWAYS shown (product decision 2025-10): the powered-by
+      // strip is not configurable anymore, so any stored show_branding flag
+      // is intentionally ignored.
       // Position: host is fixed bottom/right by default CSS.
       if (position === "bottom-left") {
         this.style.setProperty("right", "auto");
@@ -745,12 +747,6 @@
         this.style.setProperty("--bg-primary", "#ffffff");
         this.style.setProperty("--bg-secondary", "#f4f4f5");
         this.style.setProperty("--border", "#e4e4e7");
-      }
-      if (!showBranding) {
-        try {
-          const el = this.shadowRoot && this.shadowRoot.querySelector(".powered-by");
-          if (el) el.style.display = "none";
-        } catch (_) {}
       }
     }
 
@@ -3809,8 +3805,8 @@
                 }
 
                 .header-close {
-                    width: 32px;
-                    height: 32px;
+                    width: 44px;
+                    height: 44px;
                     display: flex;
                     align-items: center;
                     justify-content: center;
@@ -3834,8 +3830,8 @@
                 }
 
                 .header-back {
-                    width: 32px;
-                    height: 32px;
+                    width: 44px;
+                    height: 44px;
                     display: flex;
                     align-items: center;
                     justify-content: center;
@@ -4132,8 +4128,8 @@
                 .qp-nav {
                     flex-shrink: 0;
                     align-self: center;
-                    width: 22px;
-                    height: 22px;
+                    width: 32px;
+                    height: 32px;
                     border-radius: 50%;
                     border: 1px solid var(--border);
                     background: var(--bg-card, #121212);
@@ -4794,8 +4790,10 @@
                         right: 0;
                         left: 0;
                         width: 100%;
-                        height: 100%;
+                        height: 100vh;
+                        height: 100dvh;
                         max-height: 100vh;
+                        max-height: 100dvh;
                         border-radius: 0;
                         border: none;
                         z-index: 10000;

@@ -91,18 +91,15 @@ export function CommandPalette() {
     <>
       <button
         onClick={() => setOpen(true)}
-        className="hidden sm:inline-flex items-center gap-2 h-8 rounded-lg border border-border bg-background px-3 text-xs text-muted-foreground hover:border-primary/40 hover:text-foreground transition-colors cursor-pointer"
+        className="hidden md:inline-flex h-9 w-28 lg:w-36 shrink-0 items-center gap-2 rounded-lg border border-border bg-background px-3 text-xs text-muted-foreground hover:border-primary/40 hover:text-foreground transition-colors cursor-pointer"
         aria-label="Open command menu"
       >
-        <Search className="size-3.5" />
-        <span>Search…</span>
-        <kbd className="pointer-events-none inline-flex h-5 select-none items-center gap-0.5 rounded border border-border bg-secondary px-1.5 font-mono text-[10px] font-medium">
-          Ctrl K
-        </kbd>
+        <Search className="size-3.5 shrink-0" />
+        <span className="hidden lg:inline min-w-0 flex-1 truncate text-left">Search…</span>
       </button>
       <button
         onClick={() => setOpen(true)}
-        className="sm:hidden inline-flex items-center justify-center size-8 rounded-lg border border-border bg-background text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+        className="md:hidden inline-flex items-center justify-center size-9 shrink-0 rounded-lg border border-border bg-background text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
         aria-label="Open command menu"
       >
         <Search className="size-4" />

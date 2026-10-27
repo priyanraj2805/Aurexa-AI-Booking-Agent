@@ -226,7 +226,7 @@ export default function NotificationsPage() {
 
   return (
     <div>
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">Broadcasts</h1>
           <p className="mt-1 text-sm text-slate-400">
@@ -237,7 +237,7 @@ export default function NotificationsPage() {
         {can("notifications.manage") && (
           <button
             onClick={openCreate}
-            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+            className="min-h-11 shrink-0 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
           >
             New broadcast
           </button>
@@ -252,7 +252,7 @@ export default function NotificationsPage() {
             setPage(1);
           }}
           placeholder="Search title or body…"
-          className="w-64"
+          className="w-full sm:w-64"
         />
         <DateFilter
           label="Created"
@@ -342,7 +342,7 @@ export default function NotificationsPage() {
                   <td className="px-4 py-3 text-xs text-slate-400">{fmtDate(b.sent_at)}</td>
                   <td className="px-4 py-3 text-xs text-slate-400">{fmtDate(b.created_at)}</td>
                   <td className="px-4 py-3">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       {can("notifications.manage") && (
                         <>
                           {b.status === "draft" && (
@@ -350,19 +350,19 @@ export default function NotificationsPage() {
                               <button
                                 onClick={() => setReviewing(b)}
                                 disabled={reviewingBusy}
-                                className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+                                className="min-h-10 rounded border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-50"
                               >
                                 Review
                               </button>
                               <button
                                 onClick={() => setEditing(b)}
-                                className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
+                                className="min-h-10 rounded border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800"
                               >
                                 Edit
                               </button>
                               <button
                                 onClick={() => openDuplicate(b)}
-                                className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
+                                className="min-h-10 rounded border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800"
                               >
                                 Duplicate
                               </button>
@@ -372,7 +372,7 @@ export default function NotificationsPage() {
                             <button
                               onClick={() => setSending(b)}
                               disabled={sendingBusy}
-                              className="rounded bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+                              className="min-h-10 rounded bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
                             >
                               Send
                             </button>
@@ -381,7 +381,7 @@ export default function NotificationsPage() {
                             <button
                               onClick={() => setCancelling(b)}
                               disabled={cancellingBusy}
-                              className="rounded border border-red-600 bg-red-950/50 px-2 py-1 text-xs text-red-300 hover:bg-red-950 disabled:opacity-50"
+                              className="min-h-10 rounded border border-red-600 bg-red-950/50 px-3 py-2 text-xs text-red-300 hover:bg-red-950 disabled:opacity-50"
                             >
                               Cancel
                             </button>

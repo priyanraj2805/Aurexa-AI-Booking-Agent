@@ -71,18 +71,22 @@ export default function SchedulesPage() {
           <option key={p.id} value={p.id}>{p.full_name}</option>
         ))}
       </select>
-      <div className="flex gap-2">
-        <input value={tz} onChange={(e) => setTz(e.target.value)} placeholder="Timezone, e.g. Asia/Kolkata" className="flex-1 px-3 py-2 bg-background border border-border rounded-lg text-sm" />
-        <input value={dur} onChange={(e) => setDur(e.target.value)} placeholder="Minutes, e.g. 30" className="w-40 px-3 py-2 bg-background border border-border rounded-lg text-sm" />
+      <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_10rem]">
+        <input value={tz} onChange={(e) => setTz(e.target.value)} placeholder="Timezone, e.g. Asia/Kolkata" className="w-full min-w-0 px-3 py-2 bg-background border border-border rounded-lg text-sm" />
+        <input value={dur} onChange={(e) => setDur(e.target.value)} placeholder="Minutes, e.g. 30" className="w-full min-w-0 px-3 py-2 bg-background border border-border rounded-lg text-sm" />
       </div>
       <div className="grid gap-2">
         {days.map((d, i) => (
-          <div key={d.day_of_week} className="flex items-center gap-2 border border-border rounded-lg p-2 bg-card text-sm">
-            <span className="w-12 font-medium">{NAMES[d.day_of_week]}</span>
-            <input type="checkbox" checked={d.is_active} onChange={(e) => setDays(days.map((x, j) => (j === i ? { ...x, is_active: e.target.checked } : x)))} />
-            <input value={d.open_time || ""} onChange={(e) => setDays(days.map((x, j) => (j === i ? { ...x, open_time: e.target.value } : x)))} placeholder="10:00" className="w-20 px-2 py-1 bg-background border border-border rounded text-sm" />
-            <span>to</span>
-            <input value={d.close_time || ""} onChange={(e) => setDays(days.map((x, j) => (j === i ? { ...x, close_time: e.target.value } : x)))} placeholder="14:00" className="w-20 px-2 py-1 bg-background border border-border rounded text-sm" />
+          <div key={d.day_of_week} className="grid min-w-0 grid-cols-1 items-center gap-2 border border-border rounded-lg p-2 bg-card text-sm sm:grid-cols-[5rem_minmax(0,1fr)]">
+            <div className="flex items-center gap-2">
+              <span className="w-12 font-medium">{NAMES[d.day_of_week]}</span>
+              <input type="checkbox" checked={d.is_active} onChange={(e) => setDays(days.map((x, j) => (j === i ? { ...x, is_active: e.target.checked } : x)))} />
+            </div>
+            <div className="flex min-w-0 items-center gap-2">
+              <input value={d.open_time || ""} onChange={(e) => setDays(days.map((x, j) => (j === i ? { ...x, open_time: e.target.value } : x)))} placeholder="10:00" className="w-20 min-w-0 px-2 py-1 bg-background border border-border rounded text-sm" />
+              <span className="shrink-0">to</span>
+              <input value={d.close_time || ""} onChange={(e) => setDays(days.map((x, j) => (j === i ? { ...x, close_time: e.target.value } : x)))} placeholder="14:00" className="w-20 min-w-0 px-2 py-1 bg-background border border-border rounded text-sm" />
+            </div>
             {d.is_override && <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">custom</span>}
           </div>
         ))}

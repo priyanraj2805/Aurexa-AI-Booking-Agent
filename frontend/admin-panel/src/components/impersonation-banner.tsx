@@ -87,7 +87,7 @@ export function ImpersonationBanner() {
   if (notice) {
     return (
       <div
-        className="fixed inset-x-0 top-0 z-50 border-b border-amber-700 bg-amber-950/90 px-4 py-2 text-sm text-amber-100 backdrop-blur sm:px-6"
+        className="border-b border-amber-700 bg-amber-950/90 px-4 py-2 text-sm text-amber-100 backdrop-blur sm:px-6"
         role="status"
       >
         <span className="inline-flex items-center gap-2">
@@ -102,10 +102,10 @@ export function ImpersonationBanner() {
 
   return (
     <div
-      className="fixed inset-x-0 top-0 z-50 flex items-center justify-between gap-4 border-b border-red-800 bg-red-950/90 px-4 py-2 text-sm text-red-100 backdrop-blur sm:px-6"
+      className="flex flex-wrap items-center justify-between gap-2 border-b border-red-800 bg-red-950/90 px-4 py-2 text-sm text-red-100 backdrop-blur sm:px-6"
       role="status"
     >
-      <div className="flex min-w-0 items-center gap-2">
+      <div className="flex min-w-0 flex-1 items-center gap-2">
         <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-red-500" />
         <span className="truncate">
           <strong>Impersonation session</strong> — you are viewing this account
@@ -115,7 +115,7 @@ export function ImpersonationBanner() {
       <button
         onClick={exit}
         disabled={exiting}
-        className="shrink-0 rounded-md border border-red-700 bg-red-900 px-3 py-1 font-medium hover:bg-red-800 disabled:opacity-50"
+        className="shrink-0 rounded-md border border-red-700 bg-red-900 px-3 py-2 font-medium hover:bg-red-800 disabled:opacity-50"
       >
         {exiting ? "Exiting…" : "Exit impersonation"}
       </button>

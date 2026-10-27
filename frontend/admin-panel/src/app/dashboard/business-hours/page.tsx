@@ -333,9 +333,9 @@ function WeeklyScheduleTab() {
         </div>
         <div className="divide-y divide-border">
           {schedule.days.map((day, idx) => (
-            <div key={day.day_of_week} className={`px-4 sm:px-5 py-4 flex flex-col gap-3 transition-colors ${day.is_active ? "" : "opacity-50"}`}>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-3 sm:gap-x-4">
-                {/* Toggle */}
+            <div key={day.day_of_week} className={`grid min-w-0 grid-cols-1 gap-3 px-3 py-4 sm:px-5 xl:grid-cols-[7rem_minmax(0,1fr)] xl:items-center xl:gap-4 transition-colors ${day.is_active ? "" : "opacity-50"}`}>
+              {/* Toggle + Day (always left-aligned group) */}
+              <div className="flex min-w-0 items-center gap-3 md:w-28">
                 <button
                   aria-label={day.is_active ? `Deactivate ${DAY_NAMES[day.day_of_week]}` : `Activate ${DAY_NAMES[day.day_of_week]}`}
                   onClick={() => updateDay(idx, "is_active", !day.is_active)}
@@ -345,51 +345,29 @@ function WeeklyScheduleTab() {
                 >
                   <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${day.is_active ? "translate-x-4" : "translate-x-0"}`} />
                 </button>
-                {/* Day name */}
-                <span className="w-20 shrink-0 truncate text-sm font-medium sm:w-24">{DAY_NAMES[day.day_of_week]}</span>
-                {/* Times — own grid columns on mobile so open/close sit side-by-side full-width */}
-                {day.is_active && (
-                  <>
-                    <div className="grid min-w-[168px] flex-1 grid-cols-[1fr_auto_1fr] items-center gap-2">
-                      <TimeSelect
-                        value={day.open_time ?? ""}
-                        onChange={(v) => updateDay(idx, "open_time", v)}
-                        label="Open"
-                      />
-                      <span className="text-center text-sm text-muted-foreground">–</span>
-                      <TimeSelect
-                        value={day.close_time ?? ""}
-                        onChange={(v) => updateDay(idx, "close_time", v)}
-                        label="Close"
-                      />
-                    </div>
-                    {/* Break */}
-                    <div className="flex min-w-[210px] flex-1 flex-wrap items-center gap-2">
-                      <span className="shrink-0 text-xs text-muted-foreground">Break:</span>
-                      <div className="min-w-[96px] flex-1">
-                        <TimeSelect
-                          value={day.break_start ?? ""}
-                          onChange={(v) => updateDay(idx, "break_start", v || null)}
-                          label="Start"
-                          placeholder="—"
-                        />
-                      </div>
-                      <span className="shrink-0 text-xs text-muted-foreground">–</span>
-                      <div className="min-w-[96px] flex-1">
-                        <TimeSelect
-                          value={day.break_end ?? ""}
-                          onChange={(v) => updateDay(idx, "break_end", v || null)}
-                          label="End"
-                          placeholder="—"
-                        />
-                      </div>
-                    </div>
-                  </>
-                )}
-                {!day.is_active && (
-                  <span className="text-xs text-muted-foreground italic">Closed</span>
-                )}
+                <span className="truncate text-sm font-medium">{DAY_NAMES[day.day_of_week]}</span>
               </div>
+
+              {/* Active content: times + break — stacks on mobile, single row desktop */}
+              {day.is_active ? (
+                <div className="grid min-w-0 grid-cols-1 gap-3 xl:grid-cols-2 xl:gap-4">
+                  {/* Open / Close */}
+                  <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
+                    <TimeSelect value={day.open_time ?? ""} onChange={(v) => updateDay(idx, "open_time", v)} label="Open" />
+                    <span className="text-sm text-muted-foreground shrink-0">–</span>
+                    <TimeSelect value={day.close_time ?? ""} onChange={(v) => updateDay(idx, "close_time", v)} label="Close" />
+                  </div>
+                  {/* Break */}
+                  <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
+                    <span className="text-xs text-muted-foreground shrink-0">Break:</span>
+                    <TimeSelect value={day.break_start ?? ""} onChange={(v) => updateDay(idx, "break_start", v || null)} label="Start" placeholder="—" />
+                    <span className="text-xs text-muted-foreground shrink-0">–</span>
+                    <TimeSelect value={day.break_end ?? ""} onChange={(v) => updateDay(idx, "break_end", v || null)} label="End" placeholder="—" />
+                  </div>
+                </div>
+              ) : (
+                <span className="text-xs text-muted-foreground italic">Closed</span>
+              )}
             </div>
           ))}
         </div>
@@ -686,10 +664,10 @@ function PreviewTab() {
               aria-label="Preview Days"
               value={days}
               onChange={(e) => setDays(Number(e.target.value))}
-              className="w-full sm:w-auto bg-secondary border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+              className="w-[70px] bg-secondary border border-border rounded-sm px-1 py-0.5 text-[9px] focus:outline-none focus:ring-1 focus:ring-primary"
             >
               {[7, 14, 28].map((d) => (
-                <option key={d} value={d}>{d} days</option>
+                <option key={d} value={d}>{d}d</option>
               ))}
             </select>
           </div>

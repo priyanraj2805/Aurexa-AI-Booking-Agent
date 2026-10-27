@@ -2,13 +2,13 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
-import { Loader2, AlertCircle, ArrowLeft, User, Bot, Globe, MessageCircle, Headset, Bot as BotIcon, Send, Search, ChevronDown, ChevronUp, Calendar, ArrowUpDown } from "lucide-react";
+import { Loader2, AlertCircle, ArrowLeft, User, Bot, Globe, MessageCircle, Headset, Bot as BotIcon, Send, Search, ChevronDown, ChevronUp, Calendar, ArrowUpDown, SlidersHorizontal } from "lucide-react";
 import { useConversations, useTranscript, takeoverConversation, releaseConversation, sendHumanMessage } from "@/hooks/use-dashboard";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
 import { Pagination } from "@/components/pagination";
 import { toast } from "sonner";
-import { SearchInput, CheckboxFilter, DateFilter, SortableTh } from "@/components/filter-bar";
+import { SearchInput, CheckboxFilter, DateFilter, FilterSelect, SortableTh } from "@/components/filter-bar";
 
 function statusBadge(status: string) {
   switch (status) {
@@ -541,6 +541,7 @@ function TranscriptPanel({
 export default function ConversationsPage() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [statusFilters, setStatusFilters] = useState<string[]>([]);
   const [channelFilters, setChannelFilters] = useState<string[]>([]);
   const [fromDate, setFromDate] = useState("");
@@ -638,13 +639,18 @@ export default function ConversationsPage() {
     updated_at: "desc",
     created_at: "desc",
     session_status: "asc",
-    current_intent: "asc",
     channel: "asc",
   };
 
-  const handleSort = (column: string, order: "asc" | "desc") => {
-    setSortBy(column);
-    setSortOrder(order);
+  const handleSort = (column: string, order: "asc" | "desc" | null) => {
+    if (order === null) {
+      // Third click on a sorted column — undo back to the default (Last Active, newest first).
+      setSortBy("updated_at");
+      setSortOrder("desc");
+    } else {
+      setSortBy(column);
+      setSortOrder(order);
+    }
     setPage(1);
   };
 
@@ -659,16 +665,33 @@ export default function ConversationsPage() {
           </p>
         </div>
 
-        <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="mt-4 flex min-w-0 items-center gap-2">
           <SearchInput
             value={search}
             onChange={(v) => {
               setSearch(v);
               setPage(1);
             }}
-            placeholder="Search email, phone, name, session ID…"
-            className="w-64"
+            placeholder="Search conversations…"
+            className="min-w-0 flex-1 xl:hidden"
           />
+          <button
+            type="button"
+            onClick={() => setFiltersOpen((open) => !open)}
+            aria-expanded={filtersOpen}
+            className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-md border px-3 text-sm transition-colors xl:hidden ${
+              filtersOpen || statusFilters.length || channelFilters.length || fromDate || toDate || unitFilter || providerFilter
+                ? "border-primary/40 bg-primary/5 text-primary"
+                : "border-border bg-background text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <SlidersHorizontal className="size-4" />
+            <span>Filters</span>
+            <ChevronDown className={`size-4 transition-transform ${filtersOpen ? "rotate-180" : ""}`} />
+          </button>
+        </div>
+        <div className={`mt-3 min-w-0 grid-cols-2 items-center gap-2 xl:flex xl:flex-wrap xl:items-center xl:gap-3 2xl:flex-nowrap ${filtersOpen ? "grid" : "hidden xl:flex"}`}>
+          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Search…" className="hidden w-52 shrink-0 xl:block" />
           <CheckboxFilter
             label="Status"
             options={STATUS_OPTIONS}
@@ -677,6 +700,7 @@ export default function ConversationsPage() {
               setStatusFilters(v);
               setPage(1);
             }}
+            className="w-full min-w-0 xl:w-32 xl:shrink-0"
           />
           <CheckboxFilter
             label="Channel"
@@ -686,6 +710,7 @@ export default function ConversationsPage() {
               setChannelFilters(v);
               setPage(1);
             }}
+            className="w-full min-w-0 xl:w-32 xl:shrink-0"
           />
           <DateFilter
             label="Created"
@@ -693,32 +718,28 @@ export default function ConversationsPage() {
             toDate={toDate}
             onFromChange={setFromDate}
             onToChange={setToDate}
+            className="col-span-2 min-w-0 xl:w-auto xl:shrink-0"
           />
           {!!filterUnits.length && (
-            <select
+            <FilterSelect
               value={unitFilter}
-              onChange={(e) => { setUnitFilter(e.target.value); setPage(1); }}
-              className="h-9 rounded-md border border-border bg-background px-3 text-xs"
-            >
-              <option value="">All departments</option>
-              {filterUnits.map((u) => (
-                <option key={u.id} value={u.id}>{u.name}</option>
-              ))}
-            </select>
+              onChange={(value) => { setUnitFilter(value); setPage(1); }}
+              options={[
+                { value: "", label: "All departments" },
+                ...filterUnits.map((u) => ({ value: u.id, label: u.name })),
+              ]}
+            />
           )}
           {!!filterProviders.length && (
-            <select
+            <FilterSelect
               value={providerFilter}
-              onChange={(e) => { setProviderFilter(e.target.value); setPage(1); }}
-              className="h-9 rounded-md border border-border bg-background px-3 text-xs"
-            >
-              <option value="">All members</option>
-              {visibleProviders.map((p) => (
-                <option key={p.id} value={p.id}>{p.full_name}</option>
-              ))}
-            </select>
+              onChange={(value) => { setProviderFilter(value); setPage(1); }}
+              options={[
+                { value: "", label: "All members" },
+                ...visibleProviders.map((p) => ({ value: p.id, label: p.full_name })),
+              ]}
+            />
           )}
-          <span className="text-sm text-muted-foreground">{total} conversations</span>
         </div>
       </div>
 
@@ -745,7 +766,7 @@ export default function ConversationsPage() {
         ) : (
           <div className="w-full overflow-x-auto">
             {/* Mobile card view */}
-            <div className="md:hidden divide-y divide-border">
+            <div className="xl:hidden divide-y divide-border">
               {sessions.map((s) => {
                 const ident = customerIdentity(s);
                 const isHighlighted = highlightedId === s.id;
@@ -754,10 +775,10 @@ export default function ConversationsPage() {
                   key={s.id}
                   data-conversation-id={s.id}
                   onClick={() => setSelectedId(s.id)}
-                  className={`p-4 hover:bg-secondary/50 transition-colors cursor-pointer space-y-2 ${isHighlighted ? "bg-primary/10 ring-2 ring-primary/30 animate-pulse" : ""}`}
+                  className={`min-w-0 p-3 sm:p-4 hover:bg-secondary/50 transition-colors cursor-pointer space-y-2 ${isHighlighted ? "bg-primary/10 ring-2 ring-primary/30 animate-pulse" : ""}`}
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="text-[13px] font-medium">
+                  <div className="flex min-w-0 items-start justify-between gap-2">
+                    <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
                       {ident.title}
                       {ident.subtitle && (
                         <span className="ml-2 font-mono text-muted-foreground text-[11px]">
@@ -765,7 +786,7 @@ export default function ConversationsPage() {
                         </span>
                       )}
                     </span>
-                    <ChannelBadge channel={s.channel} />
+                    <span className="shrink-0"><ChannelBadge channel={s.channel} /></span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-muted-foreground text-[11px]">{formatDate(s.created_at)}</span>
@@ -774,7 +795,6 @@ export default function ConversationsPage() {
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">{s.current_intent || "—"}</span>
                     <span className={s.missing_fields.length > 0 ? "text-yellow-500" : "text-green-500"}>
                       {s.missing_fields.length > 0 ? `${s.missing_fields.length} missing` : "Complete"}
                     </span>
@@ -793,7 +813,7 @@ export default function ConversationsPage() {
               })}
             </div>
             {/* Desktop table view */}
-            <table className="hidden md:table w-full border-collapse">
+            <table className="hidden xl:table w-full border-collapse">
               <thead>
                 <tr>
                   <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted-foreground uppercase border-b border-border">
@@ -808,16 +828,6 @@ export default function ConversationsPage() {
                     className="border-b border-border"
                   >
                     Channel
-                  </SortableTh>
-                  <SortableTh
-                    column="current_intent"
-                    sortBy={sortBy}
-                    sortOrder={sortOrder}
-                    onSort={handleSort}
-                    defaultOrder={SORT_DEFAULTS.current_intent}
-                    className="border-b border-border"
-                  >
-                    Intent
                   </SortableTh>
                   <SortableTh
                     column="session_status"
@@ -879,9 +889,6 @@ export default function ConversationsPage() {
                           {s.provider_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">{s.provider_name}</span>}
                         </span>
                       )}
-                    </td>
-                    <td className="px-4 py-4 text-[13px] border-b border-border">
-                      {s.current_intent || "—"}
                     </td>
                     <td className="px-4 py-4 border-b border-border">
                       <span className={`text-[11px] font-semibold uppercase px-2 py-1 rounded ${statusBadge(s.session_status)}`}>

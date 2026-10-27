@@ -27,6 +27,7 @@ import {
   ChevronRight,
   Users,
   Workflow,
+  Menu,
   Video,
   CreditCard,
   QrCode,
@@ -45,6 +46,7 @@ import {
   type AgentConfig,
   type MeetingProviderType,
 } from "@/hooks/use-dashboard";
+import { useSidebar } from "@/components/ui/sidebar";
 import { api } from "@/lib/api";
 import { PaymentsConnectCard } from "@/components/payments-connect-card";
 import {
@@ -137,6 +139,7 @@ interface MeetingProviderUiState {
 
 export default function IntegrationsPage() {
   const router = useRouter();
+  const { state: sidebarState, isMobile, openMobile } = useSidebar();
   const searchParams = useSearchParams();
   const [activeTab, setActiveTab] = useState<"overview" | "widget" | "whatsapp" | "calendar" | "providers" | "payments">("overview");
   const [copied, setCopied] = useState(false);
@@ -923,7 +926,7 @@ export default function IntegrationsPage() {
         if(s==="UNDER_REVIEW") return "bg-amber-500/10 text-amber-600";
         if(s==="SUSPENDED"||s==="FAILED") return "bg-red-500/10 text-red-600";
         if(s!=="NOT_STARTED") return "bg-sky-500/10 text-sky-600";
-        return "bg-muted text-muted-foreground";
+        return "bg-muted/10 text-muted-foreground";
       })(),
       description: "Receive automatic payouts to your bank account.",
     },
@@ -984,15 +987,15 @@ export default function IntegrationsPage() {
 
   return (
     <div className="flex flex-col h-full space-y-6">
-      <div>
+      <div className="pt-14 lg:pt-0">
         <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">Integrations</h1>
         <p className="text-muted-foreground text-xs sm:text-sm mt-1">
           Connect your booking agent across multiple channels and synchronize availability.
         </p>
       </div>
 
-      <div className="flex flex-col md:flex-row gap-8">
-        <div className="w-full md:w-64 shrink-0 space-y-1">
+      <div className="flex flex-col lg:flex-row gap-6 lg:gap-8">
+        <div className="hidden lg:block w-64 shrink-0 space-y-1">
           <button
             onClick={() => setActiveTab("overview")}
             className={`w-full flex items-center justify-between px-4 py-3 rounded-lg text-sm font-medium transition-all duration-200 ${
@@ -1087,17 +1090,50 @@ export default function IntegrationsPage() {
           </button>
         </div>
 
-        <div className="flex-1 max-w-4xl min-h-[500px]">
+        {/* Mobile tab selector — hidden when sidebar drawer is open so nothing clashes */}
+        <div
+          className={`lg:hidden fixed right-0 top-16 z-40 border-b border-border bg-background shadow-sm transition-[transform,opacity] duration-200 ${openMobile ? "-translate-y-full opacity-0 pointer-events-none" : "translate-y-0 opacity-100"}`}
+          style={{
+            left: isMobile ? 0 : sidebarState === "expanded" ? "var(--sidebar-width)" : 48,
+          }}
+        >
+          <div className="px-3 py-2">
+            <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none snap-x snap-mandatory">
+              {[
+                { id: "overview", label: "Overview" },
+                { id: "widget", label: "Widget" },
+                { id: "payments", label: "Payouts" },
+                { id: "whatsapp", label: "WhatsApp" },
+                { id: "calendar", label: "Calendar" },
+                { id: "providers", label: "Meeting" },
+              ].map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id as typeof activeTab)}
+                  className={`snap-start shrink-0 rounded-xl px-3 py-2 text-[11px] font-medium transition-all duration-200 ${
+                    activeTab === tab.id
+                      ? "bg-primary text-primary-foreground shadow-[0_8px_24px_rgba(59,130,246,0.35)] ring-1 ring-primary/50"
+                      : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="min-w-0 w-full max-w-4xl flex-1 min-h-[500px]">
           {activeTab === "overview" && (
             <div className="space-y-8 animate-in fade-in duration-500 slide-in-from-bottom-2">
               <div className="space-y-4">
                 <h3 className="text-lg font-semibold tracking-tight">Active Channels & Sync</h3>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 sm:gap-5 items-start">
                   {activeIntegrations.map((item) => (
                     <div 
                       key={item.title} 
                       onClick={() => setActiveTab(item.id as any)}
-                      className="group cursor-pointer bg-card border border-border/60 hover:border-border rounded-xl p-5 flex flex-col transition-all duration-300 hover:shadow-lg hover:-translate-y-1 relative overflow-hidden"
+                      className="group cursor-pointer h-full bg-card border border-border/60 hover:border-border rounded-xl p-5 flex flex-col transition-all duration-300 hover:shadow-lg hover:-translate-y-1 relative overflow-hidden"
                     >
                       <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none" />
                       <div className="flex items-center justify-between mb-4 relative z-10">
@@ -1122,7 +1158,7 @@ export default function IntegrationsPage() {
                   <Rocket className="size-4 text-primary" />
                   Coming Soon
                 </h3>
-                <div className="flex flex-wrap gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
                   {comingSoonIntegrations.map((item) => (
                     <div 
                       key={item.title} 
@@ -1689,8 +1725,8 @@ export default function IntegrationsPage() {
                           <svg xmlns="http://w3.org/2000/svg" viewBox="0 0 48 48" width="20" height="20">
                             <defs>
                               <linearGradient id="outlookBlue" x1="10%" y1="10%" x2="90%" y2="90%">
-                                <stop offset="0%" stop-color="#00a1f1"/>
-                                <stop offset="100%" stop-color="#0078d4"/>
+                                <stop offset="0%" stopColor="#00a1f1"/>
+                                <stop offset="100%" stopColor="#0078d4"/>
                               </linearGradient>
                             </defs>
                             <rect x="12" y="12" width="30" height="30" rx="4" fill="url(#outlookBlue)"/>
@@ -1702,7 +1738,7 @@ export default function IntegrationsPage() {
                             <circle cx="26" cy="33" r="1.5" fill="#fff" opacity="0.8"/>
                             <circle cx="34" cy="33" r="1.5" fill="#fff" opacity="0.8"/>
                             <rect x="6" y="16" width="16" height="16" rx="3" fill="#0078d4"/>
-                            <text x="14" y="29" fill="#fff" font-family="'Segoe UI', sans-serif" font-weight="bold" font-size="15" text-anchor="middle">O</text>
+                            <text x="14" y="29" fill="#fff" fontFamily="'Segoe UI', sans-serif" fontWeight="bold" fontSize="15" textAnchor="middle">O</text>
                           </svg>
                         </div>
                         <div>
@@ -1764,8 +1800,15 @@ export default function IntegrationsPage() {
                 </div>
               )}
 
-              {/* Migration Confirmation Dialog */}
-              <AlertDialog open={showMigrationDialog} onOpenChange={setShowMigrationDialog}>
+            </div>
+          )}
+
+          {/* Confirmation dialogs live at page ROOT (never inside a tab
+              block): their triggers render on different tabs —
+              regenerate-token → Widget tab, disconnect-calendar → Calendar
+              tab, meeting-policy → Providers tab — so keeping them here
+              guarantees they mount regardless of activeTab. */}
+          <AlertDialog open={showMigrationDialog} onOpenChange={setShowMigrationDialog}>
                 <AlertDialogContent>
                   <AlertDialogHeader>
                     <AlertDialogTitle>Switch Calendar Provider?</AlertDialogTitle>
@@ -1784,7 +1827,7 @@ export default function IntegrationsPage() {
                 </AlertDialogContent>
               </AlertDialog>
 
-              <AlertDialog open={Boolean(confirmAction)} onOpenChange={(open) => !open && setConfirmAction(null)}>
+          <AlertDialog open={Boolean(confirmAction)} onOpenChange={(open) => !open && setConfirmAction(null)}>
                 <AlertDialogContent>
                   <AlertDialogHeader>
                     <AlertDialogTitle>
@@ -1810,7 +1853,7 @@ export default function IntegrationsPage() {
                 </AlertDialogContent>
               </AlertDialog>
 
-              <AlertDialog open={showMeetingPolicyWarning} onOpenChange={setShowMeetingPolicyWarning}>
+          <AlertDialog open={showMeetingPolicyWarning} onOpenChange={setShowMeetingPolicyWarning}>
                 <AlertDialogContent>
                   <AlertDialogHeader>
                     <AlertDialogTitle>Apply impactful meeting policy change?</AlertDialogTitle>
@@ -1842,8 +1885,6 @@ export default function IntegrationsPage() {
                   </AlertDialogFooter>
                 </AlertDialogContent>
               </AlertDialog>
-            </div>
-          )}
 
           {activeTab === "providers" && (
             <div className="bg-card border border-border rounded-2xl overflow-hidden shadow-sm animate-in fade-in duration-500 slide-in-from-bottom-2">

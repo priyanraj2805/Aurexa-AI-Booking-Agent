@@ -17,6 +17,8 @@ import {
   Megaphone,
   PanelLeftClose,
   PanelLeftOpen,
+  Menu,
+  X,
   ScrollText,
   Settings,
   Users,
@@ -176,6 +178,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [counts, setCounts] = useState<Record<string, number>>({});
 
   const POLL_MS = 30000;
@@ -274,21 +277,29 @@ function Shell({ children }: { children: React.ReactNode }) {
   const visibleModules = MODULES.filter((m) =>
     m.permissions.some((p) => can(p))
   );
+  const navCollapsed = collapsed && !mobileNavOpen;
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      <ImpersonationBanner />
+    <div className="flex h-dvh overflow-hidden">
+      {mobileNavOpen && (
+        <button
+          type="button"
+          aria-label="Close navigation"
+          className="fixed inset-0 z-40 bg-black/60 md:hidden"
+          onClick={() => setMobileNavOpen(false)}
+        />
+      )}
       <aside
-        className={`shrink-0 border-r border-slate-800 bg-slate-900 pt-16 transition-[width] duration-200 flex flex-col ${
-          collapsed ? "w-16" : "w-60"
-        }`}
+        className={`fixed inset-y-0 left-0 z-50 flex w-60 shrink-0 flex-col border-r border-slate-800 bg-slate-900 pt-16 transition-transform duration-200 md:relative md:z-auto md:translate-x-0 md:transition-[width] ${
+          collapsed ? "md:w-16" : "md:w-60"
+        } ${mobileNavOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"}`}
       >
         <div
           className={`flex items-center pb-4 ${
-            collapsed ? "justify-center px-2" : "justify-between px-4"
+            navCollapsed ? "justify-center px-2" : "justify-between px-4"
           }`}
         >
-          {!collapsed && (
+          {!navCollapsed && (
             <div className="flex items-center gap-2.5 min-w-0">
               <span className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 shadow-md shadow-indigo-600/30">
                 <Sparkles className="size-4 text-white" />
@@ -301,7 +312,7 @@ function Shell({ children }: { children: React.ReactNode }) {
               </div>
             </div>
           )}
-          {collapsed && (
+          {navCollapsed && (
             <span className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 shadow-md shadow-indigo-600/30">
               <Sparkles className="size-4 text-white" />
             </span>
@@ -310,7 +321,7 @@ function Shell({ children }: { children: React.ReactNode }) {
             onClick={toggleCollapsed}
             title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            className="rounded-md p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+            className="hidden rounded-md p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-200 md:block"
           >
             {collapsed ? (
               <PanelLeftOpen className="h-4 w-4" />
@@ -331,9 +342,10 @@ function Shell({ children }: { children: React.ReactNode }) {
               <Link
                 key={m.path}
                 href={m.path}
-                title={collapsed ? m.name : undefined}
-                className={`relative flex items-center rounded-lg text-sm transition-all duration-200 ${
-                  collapsed ? "justify-center px-0 py-2" : "gap-3 px-3 py-2"
+                onClick={() => setMobileNavOpen(false)}
+                title={navCollapsed ? m.name : undefined}
+                className={`relative flex min-h-11 items-center rounded-lg text-sm transition-all duration-200 ${
+                  navCollapsed ? "justify-center px-0 py-2" : "gap-3 px-3 py-2"
                 } ${
                   active
                     ? "bg-gradient-to-r from-indigo-600 to-indigo-500 font-medium text-white shadow-md shadow-indigo-600/25"
@@ -341,17 +353,17 @@ function Shell({ children }: { children: React.ReactNode }) {
                 }`}
               >
                 <Icon
-                  className={`shrink-0 ${collapsed ? "h-5 w-5" : "h-4 w-4"}`}
+                  className={`shrink-0 ${navCollapsed ? "h-5 w-5" : "h-4 w-4"}`}
                 />
-                {!collapsed && <span className="truncate">{m.name}</span>}
+                {!navCollapsed && <span className="truncate">{m.name}</span>}
                 {badge > 0 && (
                   <>
-                    {!collapsed && (
+                    {!navCollapsed && (
                       <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-red-600 px-1.5 text-xs font-bold text-white">
                         {badge > 99 ? "99+" : badge}
                       </span>
                     )}
-                    {collapsed && (
+                    {navCollapsed && (
                       <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500" />
                     )}
                   </>
@@ -361,14 +373,24 @@ function Shell({ children }: { children: React.ReactNode }) {
           })}
         </nav>
         <div className="mt-6 border-t border-slate-800 pt-4 px-4 shrink-0">
-          <UserMenu collapsed={collapsed} />
+          <UserMenu collapsed={navCollapsed} />
         </div>
       </aside>
-      <main className="flex-1 overflow-y-auto">
-        <div className="sticky top-0 z-30 flex items-center justify-end gap-3 border-b border-slate-800 bg-slate-950/80 px-6 py-2 backdrop-blur">
+      <main className="min-w-0 flex-1 overflow-y-auto">
+        <ImpersonationBanner />
+        <div className="sticky top-0 z-30 flex items-center justify-between gap-3 border-b border-slate-800 bg-slate-950/80 px-4 py-2 backdrop-blur sm:px-6">
+          <button
+            type="button"
+            aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"}
+            aria-expanded={mobileNavOpen}
+            onClick={() => setMobileNavOpen((open) => !open)}
+            className="rounded-md p-2 text-slate-300 hover:bg-slate-800 md:hidden"
+          >
+            {mobileNavOpen ? <X className="size-5" /> : <Menu className="size-5" />}
+          </button>
           <NotificationBell />
         </div>
-        <div className="p-8">{children}</div>
+        <div className="min-w-0 p-4 sm:p-6 lg:p-8">{children}</div>
       </main>
     </div>
   );

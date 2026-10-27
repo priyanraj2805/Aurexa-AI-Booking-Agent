@@ -876,7 +876,7 @@ export default function AgentCorePage() {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
           <div>
             <label className="text-[13px] text-muted-foreground font-medium mb-2 block">Agent Name</label>
             <input
@@ -903,7 +903,7 @@ export default function AgentCorePage() {
             </select>
           </div>
 
-          <div className="col-span-2">
+          <div className="sm:col-span-2">
             <label className="text-[13px] text-muted-foreground font-medium mb-2 block">
               Greeting Message
             </label>
@@ -925,19 +925,6 @@ export default function AgentCorePage() {
               value={persona.industry_context || ""}
               onChange={(e) => updatePersona("industry_context", e.target.value)}
               placeholder="e.g. dental clinic, hair salon, consulting firm"
-              className="w-full bg-background border border-border text-foreground px-3.5 py-2.5 rounded-md text-[13px] font-sans focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
-            />
-          </div>
-
-          <div>
-            <label className="text-[13px] text-muted-foreground font-medium mb-2 block flex items-center gap-1.5">
-              <Sparkles className="size-3.5" /> Custom Instructions
-            </label>
-            <input
-              type="text"
-              value={persona.custom_instructions || ""}
-              onChange={(e) => updatePersona("custom_instructions", e.target.value)}
-              placeholder="e.g. Always ask about insurance provider first"
               className="w-full bg-background border border-border text-foreground px-3.5 py-2.5 rounded-md text-[13px] font-sans focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
             />
           </div>
@@ -975,6 +962,29 @@ export default function AgentCorePage() {
           </div>
 
           <div>
+            <label className="text-[13px] text-muted-foreground font-medium mb-2 block">
+              Brand Color
+            </label>
+            <div className="flex items-center gap-3">
+              <input
+                type="color"
+                value={brandColor}
+                onChange={(e) => setBrandColor(e.target.value)}
+                className="size-10 rounded-md border border-border cursor-pointer"
+              />
+              <input
+                type="text"
+                value={brandColor}
+                onChange={(e) => setBrandColor(e.target.value)}
+                className="w-28 bg-background border border-border text-foreground px-3.5 py-2.5 rounded-md text-[13px] font-mono focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+              />
+            </div>
+            <p className="text-[11px] text-muted-foreground mt-1.5">
+              Widget theme color.
+            </p>
+          </div>
+
+          <div className="sm:col-span-2">
             <label className="text-[13px] text-muted-foreground font-medium mb-2 block flex items-center gap-1.5">
               <ImageIcon className="size-3.5" /> Chatbot Logo
             </label>
@@ -1045,29 +1055,7 @@ export default function AgentCorePage() {
               </div>
             </div>
             {logoError && <p className="text-xs text-red-500 mt-1.5">{logoError}</p>}
-            <p className="text-[11px] text-muted-foreground mt-1.5">Shows in chatbot header, left of brand color.</p>
-          </div>
-          <div>
-            <label className="text-[13px] text-muted-foreground font-medium mb-2 block">
-              Brand Color
-            </label>
-            <div className="flex items-center gap-3">
-              <input
-                type="color"
-                value={brandColor}
-                onChange={(e) => setBrandColor(e.target.value)}
-                className="size-10 rounded-md border border-border cursor-pointer"
-              />
-              <input
-                type="text"
-                value={brandColor}
-                onChange={(e) => setBrandColor(e.target.value)}
-                className="w-28 bg-background border border-border text-foreground px-3.5 py-2.5 rounded-md text-[13px] font-mono focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
-              />
-            </div>
-            <p className="text-[11px] text-muted-foreground mt-1.5">
-              Widget theme color.
-            </p>
+            <p className="text-[11px] text-muted-foreground mt-1.5">Shows in chatbot header.</p>
           </div>
           <div>
             <label className="text-[13px] text-muted-foreground font-medium mb-2 block">
@@ -1099,14 +1087,10 @@ export default function AgentCorePage() {
               className="w-full max-w-56"
             />
           </div>
-          <div className="flex items-center gap-6">
+          <div className="flex items-start gap-6 pt-0.5">
             <label className="flex items-center gap-2 text-[13px] cursor-pointer">
               <input type="checkbox" checked={darkMode} onChange={(e) => setDarkMode(e.target.checked)} className="size-4" />
               Dark mode
-            </label>
-            <label className="flex items-center gap-2 text-[13px] cursor-pointer">
-              <input type="checkbox" checked={showBranding} onChange={(e) => setShowBranding(e.target.checked)} className="size-4" />
-              Show branding
             </label>
           </div>
         </div>
@@ -1119,7 +1103,7 @@ export default function AgentCorePage() {
             <h3 className="text-base font-semibold">Quick Prompts</h3>
             <p className="text-[13px] text-muted-foreground">
               Tappable suggestion buttons in chat, so visitors tap instead of typing. 
-              Max 8 — 3 to 4 best.
+              Max 8 .
             </p>
           </div>
           <button
@@ -1334,7 +1318,7 @@ export default function AgentCorePage() {
             <div className="flex-1 min-w-0">
               <p className="text-[13px] font-semibold">Booking Reminders</p>
               <p className="text-[12px] text-muted-foreground mt-0.5">
-                Automatic email reminders before appointments. Reduces no-shows.
+                Automatic email reminders before appointments.
               </p>
               <div className="flex flex-wrap gap-5 mt-3">
                 <label className="flex items-center gap-2 text-[13px] cursor-pointer">
@@ -1362,7 +1346,7 @@ export default function AgentCorePage() {
             <p className="text-[13px] text-muted-foreground">Control which meeting types are allowed in booking flows.</p>
           </div>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label className="text-[13px] font-semibold text-foreground mb-1.5 block">Meeting Mode</label>
             <select
@@ -1381,7 +1365,7 @@ export default function AgentCorePage() {
           </div>
           <div>
             <label className="text-[13px] font-semibold text-foreground mb-1.5 block">
-              Default Online Provider {meetingMode === "OFFLINE_ONLY" && <span className="text-[11px] font-normal text-muted-foreground">(disabled for Offline)</span>}
+              Default Online Provider {meetingMode === "OFFLINE_ONLY" && <span className="text-[11px] font-normal text-muted-foreground"></span>}
             </label>
             <select
               value={meetingMode === "OFFLINE_ONLY" ? "NONE" : meetingProviderDefault}
@@ -1397,18 +1381,6 @@ export default function AgentCorePage() {
               <p className="text-[11px] text-muted-foreground mt-1">Provider selection is disabled for Offline-only bookings.</p>
             )}
           </div>
-        </div>
-        <div className="flex items-center justify-between border border-border rounded-lg px-4 py-3">
-          <div>
-            <p className="text-sm font-medium">Allow hybrid user selection</p>
-            <p className="text-xs text-muted-foreground">When disabled in HYBRID mode, booking flow is restricted to a single deterministic option.</p>
-          </div>
-          <button
-            onClick={() => setAllowHybridSelection((v) => !v)}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${allowHybridSelection ? "bg-green-500" : "bg-muted"}`}
-          >
-            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${allowHybridSelection ? "translate-x-6" : "translate-x-1"}`} />
-          </button>
         </div>
       </div>
 

@@ -18,6 +18,8 @@ import {
   TrendingDown,
   Activity,
   Target,
+  Building2,
+  UserRound,
 } from "lucide-react";
 import Link from "next/link";
 import { useTheme } from "next-themes";
@@ -207,20 +209,20 @@ function StatCard({
   return (
     <Link
       href={href}
-      className="group relative overflow-hidden rounded-2xl border border-border bg-card p-5 transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40"
+      className="group relative min-w-0 overflow-hidden rounded-2xl border border-border bg-card p-4 sm:p-5 transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40"
     >
       <div className="absolute inset-x-0 top-0 h-[3px] bg-gradient-to-r from-transparent via-primary/60 to-transparent opacity-0 transition-opacity group-hover:opacity-100" />
-      <div className="flex flex-wrap items-center gap-3 gap-y-1">
-        <span className={`flex items-center justify-center size-9 sm:size-11 rounded-xl shrink-0 ${chipClass}`}>
+      <div className="flex min-w-0 items-center gap-3">
+        <span className={`flex size-10 shrink-0 items-center justify-center rounded-xl ${chipClass}`}>
           <Icon className="size-4 sm:size-5" />
         </span>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <div className="text-[13px] font-medium text-muted-foreground truncate">{title}</div>
-          <div className="flex flex-wrap items-baseline gap-1.5">
-            <span className="text-[26px] lg:text-[28px] font-bold tracking-tight leading-none tabular-nums whitespace-nowrap">{shown}</span>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[11px] sm:text-[12px] font-medium leading-tight text-muted-foreground">{title}</div>
+          <div className="mt-1 flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-1">
+            <span className="whitespace-nowrap text-[22px] sm:text-[26px] lg:text-[28px] font-bold tracking-tight leading-none tabular-nums">{shown}</span>
             {trend !== null && trend !== 0 && (
               <span
-                className={`inline-flex items-center gap-0.5 text-[11px] font-semibold whitespace-nowrap ${
+                className={`inline-flex shrink-0 items-center gap-0.5 text-[11px] font-semibold whitespace-nowrap ${
                   trend > 0 ? "text-green-500" : "text-red-500"
                 }`}
               >
@@ -230,9 +232,9 @@ function StatCard({
               </span>
             )}
           </div>
-          {badge && <div className="text-[11px] text-amber-500 mt-0.5 truncate">{badge}</div>}
+          {badge && <div className="mt-0.5 truncate text-[10px] sm:text-[11px] text-amber-500">{badge}</div>}
         </div>
-        <span className="hidden sm:inline-flex shrink-0"><Sparkline data={spark} color={sparkColor} /></span>
+        <span className="hidden 2xl:inline-flex shrink-0"><Sparkline data={spark} color={sparkColor} /></span>
       </div>
     </Link>
   );
@@ -340,18 +342,18 @@ function RevenueStrip() {
 
   return (
     <div className="mt-4 rounded-2xl border border-border bg-card p-5">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="min-w-0 truncate text-sm font-semibold">
             Revenue{selectedUnit ? ` — ${selectedUnit.name}` : ""}
           </h3>
           <select
             value={range}
             onChange={(e) => onRange(Number(e.target.value))}
-            className="rounded-md border border-border bg-background px-2 py-1 text-xs text-muted-foreground outline-none focus:border-primary"
+            className="min-w-24 rounded-md border border-border bg-background px-2 py-1 text-xs text-muted-foreground outline-none focus:border-primary"
             aria-label="Revenue range"
           >
             {REVENUE_RANGES.map((d) => (
-              <option key={d} value={d}>Last {d} days</option>
+              <option key={d} value={d}>{d} days</option>
             ))}
           </select>
         </div>
@@ -375,7 +377,8 @@ function RevenueStrip() {
           </div>
         </div>
         <p className="mt-2 text-[11px] text-muted-foreground">
-          Gross = booked amount (provider fee / appointment price) of non-cancelled bookings. Collected = payments actually received.
+          Gross = booked amount of non-cancelled bookings.
+          Collected = payments actually received.
         </p>
 
       {loading && !data ? (
@@ -561,7 +564,7 @@ function ChannelPerformance({
   const share = (n: number) => (channelTotal > 0 ? Math.round((n / channelTotal) * 100) : 0);
 
   return (
-    <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
+    <div className="min-w-0 bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
       <CardHeader
         icon={MessageSquare}
         title="Channel Performance"
@@ -571,7 +574,7 @@ function ChannelPerformance({
           <select
             value={scope}
             onChange={(e) => setScope(e.target.value as ChannelScope)}
-            className="rounded-md border border-border bg-background px-2 py-1 text-xs text-muted-foreground outline-none focus:border-primary"
+            className="w-auto max-w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-muted-foreground outline-none focus:border-primary"
             aria-label="Channel"
           >
             <option value="all">All channels</option>
@@ -596,7 +599,7 @@ function ChannelPerformance({
       ) : (
         <>
           {/* Headline: one number, left-aligned, so the card reads top-down */}
-          <div className="flex items-baseline gap-2">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
             <span className="text-3xl font-bold leading-none tracking-tight tabular-nums">
               {scopedTotal}
             </span>
@@ -606,7 +609,6 @@ function ChannelPerformance({
                 : `${scope === "web" ? "web" : "WhatsApp"} confirmed`}
             </span>
           </div>
-          <p className="mt-1 text-[11px] text-muted-foreground">Last 7 days</p>
           <div className="mt-2">
             <MiniTrendArea
               data={last7.map((d) => ({ date: d.date, count: d.count }))}
@@ -625,7 +627,7 @@ function ChannelPerformance({
             ].map((m) => (
               <div
                 key={m.label}
-                className="rounded-lg border border-border bg-background/60 px-2 py-1.5 text-center"
+                className="min-w-0 rounded-lg border border-border bg-background/60 px-1.5 sm:px-2 py-1.5 text-center"
               >
                 <div className="text-lg font-bold leading-tight tabular-nums">{m.value}</div>
                 <div className="text-[10px] text-muted-foreground">{m.label}</div>
@@ -647,7 +649,7 @@ function ChannelPerformance({
                 { label: "Web", value: web, color: chartColors.blue },
                 { label: "WhatsApp", value: wa, color: chartColors.green },
               ].map((ch) => (
-                <div key={ch.label} className="flex items-center gap-2">
+                <div key={ch.label} className="flex min-w-0 items-center gap-2">
                   <span className="w-16 shrink-0 text-xs text-muted-foreground">{ch.label}</span>
                   <div className="h-1.5 flex-1 rounded-full bg-secondary overflow-hidden">
                     <div
@@ -656,7 +658,7 @@ function ChannelPerformance({
                     />
                   </div>
                   <span className="w-20 shrink-0 text-right text-xs tabular-nums font-semibold">
-                    {ch.value} · {share(ch.value)}%
+                    {ch.value}%
                   </span>
                 </div>
               ))}
@@ -781,17 +783,17 @@ function CardHeader({
 }) {
   const Icon = icon;
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-      <div className="flex items-center gap-3">
+    <div className="mb-4 flex min-w-0 items-start justify-between gap-2">
+      <div className="flex min-w-0 flex-1 items-center gap-3">
         <span className={`flex items-center justify-center size-9 rounded-lg shrink-0 ${iconClass}`}>
           <Icon className="size-4" />
         </span>
-        <div>
-          <h3 className="text-sm font-semibold leading-tight">{title}</h3>
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold leading-tight truncate">{title}</h3>
           {subtitle && <p className="text-[11px] text-muted-foreground truncate">{subtitle}</p>}
         </div>
       </div>
-      {action && <div className="flex items-center">{action}</div>}
+      {action && <div className="flex shrink-0 items-center">{action}</div>}
     </div>
   );
 }
@@ -830,11 +832,20 @@ export default function DashboardPage() {
   const { user, isDoctor } = useAuth();
   const isOrg = (user as unknown as { org_type?: string } | null)?.org_type === "organization";
   const dark = resolvedTheme !== "light";
+  const [hasCoarsePointer, setHasCoarsePointer] = useState(false);
   const [range, setRange] = useState(7);
   const MAX_FETCH_DAYS = 30;
   const { data: stats, loading: statsLoading, error: statsError } = useStats(MAX_FETCH_DAYS);
   const { data: bookings, loading: bookingsLoading, error: bookingsError } = useRecentBookings(10);
   const { data: onboarding, loading: onboardingLoading } = useOnboardingStatus();
+
+  useEffect(() => {
+    const pointerQuery = window.matchMedia("(pointer: coarse)");
+    const updatePointer = () => setHasCoarsePointer(pointerQuery.matches);
+    updatePointer();
+    pointerQuery.addEventListener("change", updatePointer);
+    return () => pointerQuery.removeEventListener("change", updatePointer);
+  }, []);
 
   const chartColors = dark
     ? {
@@ -901,19 +912,26 @@ export default function DashboardPage() {
     <>
       <div className="flex flex-wrap items-end justify-between gap-3 mb-6">
         <div>
-          <div className="flex items-center gap-2 mb-1">
-            <h1 className="text-[22px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-none">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-2 mb-1">
+            <h1 className="text-[20px] sm:text-[26px] md:text-[28px] font-semibold tracking-tight leading-tight">
               {greeting()}, welcome back
             </h1>
             <span
               className={[
-                "text-[11px] font-bold uppercase tracking-wider px-2 py-1 rounded-full",
+                "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[10px] sm:text-[11px] font-bold uppercase tracking-wider",
                 isOrg ? "bg-primary/15 text-primary" : "bg-secondary text-muted-foreground",
               ].join(" ")}
             >
-              {isDoctor ? "👤 My bookings" : isOrg ? "🏥 Organization" : "🧍 Individual"}
+              {isDoctor ? (
+                <CalendarCheck className="size-3.5 shrink-0" aria-hidden="true" />
+              ) : isOrg ? (
+                <Building2 className="size-3.5 shrink-0" aria-hidden="true" />
+              ) : (
+                <UserRound className="size-3.5 shrink-0" aria-hidden="true" />
+              )}
+              {isDoctor ? "My bookings" : isOrg ? "Organization" : "Individual"}
             </span>
-            <span className="relative flex size-2.5 mb-2">
+            <span className="relative flex size-2.5 shrink-0" aria-label="Online">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
               <span className="relative inline-flex rounded-full size-2.5 bg-green-500" />
             </span>
@@ -978,7 +996,7 @@ export default function DashboardPage() {
 
       {/* Stats Grid */}
       {statsLoading ? (
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 animate-pulse py-4">
+        <div className="grid grid-cols-1 min-[420px]:grid-cols-2 2xl:grid-cols-4 gap-3 sm:gap-4 animate-pulse py-4">
           {[...Array(4)].map((_, i) => (
             <div key={i} className="bg-card border border-border rounded-2xl p-5 h-[118px]">
               <div className="flex items-center gap-3">
@@ -996,7 +1014,7 @@ export default function DashboardPage() {
           <AlertCircle className="size-4" /> {statsError}
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 min-[420px]:grid-cols-2 2xl:grid-cols-4 gap-3 sm:gap-4">
           <StatCard
             title="Total Bookings"
             value={stats?.total_bookings ?? 0}
@@ -1045,15 +1063,15 @@ export default function DashboardPage() {
       {isOrg && <RevenueStrip />}
 
       {/* Activity overview + channel performance */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
-        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col lg:col-span-2 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
+      <div className="grid min-w-0 grid-cols-1 xl:grid-cols-[1.1fr_0.9fr] gap-4 mt-4">
+        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col min-w-0 transition-all duration-200 sm:hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
           <CardHeader
             icon={Activity}
             title="Activity Overview"
-            subtitle={`Bookings vs cancellations — ${range}-day window`}
+            subtitle={`Bookings vs cancellations `}
             iconClass={indigoIcon}
             action={
-              <div className="flex items-center gap-3">
+              <div className="flex w-auto max-w-full flex-wrap items-center justify-start gap-2 sm:justify-end">
                 <span className="hidden sm:flex items-center gap-3 text-[11px] text-muted-foreground">
                   <span className="inline-flex items-center gap-1.5">
                     <span className="size-2 rounded-full" style={{ backgroundColor: chartColors.indigo }} />
@@ -1069,18 +1087,21 @@ export default function DashboardPage() {
                   onChange={(e) => {
                     setRange(Number(e.target.value));
                   }}
-                  className="rounded-md border border-border bg-background px-2 py-1 text-xs text-muted-foreground outline-none focus:border-primary"
+                  className="w-[78px] rounded-md border border-border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none focus:border-primary"
                   aria-label="Chart range"
                 >
                   {WINDOW_SIZES.map((d) => (
-                    <option key={d} value={d}>
-                      {d} days
-                    </option>
+                    <option key={d} value={d}>{d} days</option>
                   ))}
                 </select>
               </div>
             }
           />
+          {hasCoarsePointer && !statsLoading && !statsError && hasActivity && (
+            <p className="mb-2 text-[11px] text-muted-foreground sm:hidden">
+              Tap a chart point to view its details.
+            </p>
+          )}
           {/* Every state takes the remaining card height (min keeps the chart
               readable) so the card bottoms line up with Channel Performance
               without leaving dead space below the chart. */}
@@ -1098,7 +1119,8 @@ export default function DashboardPage() {
               <p className="text-muted-foreground text-sm">No booking activity yet.</p>
             </div>
           ) : (
-            <div className="flex-1 min-h-[14rem]">
+            <div className="flex-1 min-h-[14rem] w-full max-w-full overflow-x-auto scrollbar-thin">
+              <div className="h-full" style={{ width: `${(range / 7) * 100}%`, minWidth: "100%" }}>
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={areaData} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
                   <defs>
@@ -1129,7 +1151,7 @@ export default function DashboardPage() {
                     axisLine={false}
                     allowDecimals={false}
                   />
-                  <Tooltip {...chartTooltip} />
+                  <Tooltip {...chartTooltip} trigger={hasCoarsePointer ? "click" : "hover"} />
                   <Area
                     type="monotone"
                     dataKey="Bookings"
@@ -1146,6 +1168,7 @@ export default function DashboardPage() {
                   />
                 </AreaChart>
               </ResponsiveContainer>
+              </div>
             </div>
           )}
         </div>
@@ -1166,17 +1189,17 @@ export default function DashboardPage() {
           loading={statsLoading}
           error={statsError}
         />
-        <div className="bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
-          <div className="flex items-center justify-between mb-4">
+        <div className="min-w-0 bg-card border border-border rounded-2xl p-4 sm:p-6 flex flex-col transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/5 dark:hover:shadow-black/40">
+          <div className="flex min-w-0 items-start justify-between gap-2 mb-4 [&>div]:min-w-0 [&>div]:flex-1 [&>div]:mb-0">
             <CardHeader
               icon={CalendarCheck}
               title="Recent Appointments"
               subtitle="Latest confirmed bookings"
               iconClass={confirmedIcon}
             />
-<Link
+            <Link
               href="/dashboard/bookings?status=CONFIRMED"
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+              className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors whitespace-nowrap"
             >
               View all <ArrowRight className="size-3.5" />
             </Link>
@@ -1214,7 +1237,7 @@ export default function DashboardPage() {
             <div className="flex-1 min-h-0 overflow-y-auto pr-1 scrollbar-thin max-h-[340px]">
               <div className="space-y-2">
                 {bookings.map((b) => (
-                  <div key={b.id} className="group flex items-center gap-3 p-3 border border-border rounded-lg bg-background/50 hover:bg-secondary/30 transition-colors">
+                  <div key={b.id} className="group flex min-w-0 items-center gap-2.5 sm:gap-3 p-2.5 sm:p-3 border border-border rounded-lg bg-background/50 hover:bg-secondary/30 transition-colors">
                     <HoverCard>
                       <HoverCardTrigger render={<div className="cursor-default" />}>
                         <AvatarInitials name={b.customer_name} tone={nameTone(b.customer_name)} />
@@ -1240,16 +1263,14 @@ export default function DashboardPage() {
                     </HoverCard>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
-                        <span className="font-medium text-[13px] truncate group-hover:text-primary transition-colors">{b.customer_name}</span>
-                        <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-green-500/10 px-1.5 py-px text-[10px] font-semibold text-green-600 dark:text-green-400 shrink-0">
+                        <span className="min-w-0 flex-1 font-medium text-[13px] truncate group-hover:text-primary transition-colors">{b.customer_name}</span>
+                        <span className="inline-flex items-center gap-1 rounded-full bg-green-500/10 px-1.5 py-px text-[10px] font-semibold text-green-600 dark:text-green-400 shrink-0">
                           <span className="size-1 rounded-full bg-green-500" />
                           Confirmed
                         </span>
                       </div>
-                      <div className="text-[11px] text-muted-foreground truncate">{b.customer_email}</div>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <div className="text-[11px] text-muted-foreground">
+                      <div className="hidden sm:block text-[11px] text-muted-foreground truncate">{b.customer_email}</div>
+                      <div className="text-[11px] text-muted-foreground truncate">
                         {formatDateTime(b.slot_start)}
                       </div>
                     </div>

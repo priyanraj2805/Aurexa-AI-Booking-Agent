@@ -433,7 +433,53 @@ async def compute_available_slots(
     inventory, _ = await compute_slot_inventory(
         db, org_id, target_date, org_config, provider_id=provider_id
     )
-    return [item["start_utc"].time() for item in inventory if item["available"]]
+    if not inventory:
+        return []
+
+    # Return NAIVE LOCAL start times (business timezone) — not raw UTC — because
+    # callers (chat slot offers, admin /schedule/preview, booking lock, provider
+    # previews) all treat returned values as local business times. Raw UTC values
+    # previously surfaced as AM/PM labels like "4:30 AM" for IST businesses.
+    schedule_res = await db.execute(
+        select(BusinessSchedule).where(BusinessSchedule.org_id == org_id)
+    )
+    sched = schedule_res.scalars().first()
+    tz_str = (getattr(sched, "timezone", None) or "UTC").strip() if sched is not None else "UTC"
+    if provider_id:
+        try:
+            from app.models.service_unit import Provider as _Provider
+
+            _pid = (
+                provider_id
+                if isinstance(provider_id, uuid.UUID)
+                else uuid.UUID(str(provider_id))
+            )
+            prov = (
+                await db.execute(
+                    select(_Provider).where(
+                        _Provider.id == _pid, _Provider.org_id == org_id
+                    )
+                )
+            ).scalars().first()
+            if prov is not None and getattr(prov, "timezone", None):
+                from app.core.org_mode import effective_timezone as _eff_tz
+
+                tz_str = _eff_tz(prov, tz_str)
+        except Exception:
+            pass
+    tz_str = (tz_str or "UTC").strip()
+    try:
+        zone = ZoneInfo(tz_str)
+    except Exception:
+        zone = ZoneInfo("UTC")
+
+    times: List[time] = []
+    for item in inventory:
+        if not item.get("available"):
+            continue
+        start_local = item["start_utc"].astimezone(zone)
+        times.append(start_local.replace(tzinfo=None).time())
+    return times
 
 
 async def create_timeslot_lock(

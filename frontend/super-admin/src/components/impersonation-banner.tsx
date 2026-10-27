@@ -58,10 +58,10 @@ export function ImpersonationBanner() {
 
   return (
     <div
-      className="fixed inset-x-0 top-0 z-50 flex items-center justify-between gap-4 border-b border-red-800 bg-red-950/90 px-6 py-2 text-sm text-red-100 backdrop-blur"
+      className="flex flex-wrap items-center justify-between gap-2 border-b border-red-800 bg-red-950/90 px-4 py-2 text-sm text-red-100 backdrop-blur sm:px-6"
       role="status"
     >
-      <div className="flex items-center gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
         <span className="font-semibold">
           You are impersonating {active.user_email}
@@ -73,7 +73,7 @@ export function ImpersonationBanner() {
       <button
         onClick={stop}
         disabled={stopping}
-        className="rounded-md border border-red-700 bg-red-900 px-3 py-1 font-medium hover:bg-red-800 disabled:opacity-50"
+        className="shrink-0 rounded-md border border-red-700 bg-red-900 px-3 py-2 font-medium hover:bg-red-800 disabled:opacity-50"
       >
         {stopping ? "Ending…" : "Stop impersonation"}
       </button>

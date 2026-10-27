@@ -138,6 +138,10 @@ async def _member_provider_id(db, user: User):
         row = (await db.execute(select(Provider.id).where(Provider.user_id==user.id, Provider.org_id==user.org_id))).scalars().first()
         return row
     except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         return None
 
 
@@ -159,6 +163,10 @@ async def _member_scope(db, user: User) -> tuple:
         ).all()
         unit_ids = [r[0] for r in rows]
     except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         unit_ids = []
     return provider_id, unit_ids
 MAX_SELECT_OPTIONS = 50
@@ -1847,6 +1855,8 @@ async def list_cancelled_bookings(
             pass
     if search:
         like = f"%{search}%"
+        from app.models.service_unit import Provider as _Provider, ServiceUnit as _ServiceUnit
+
         predicates.append(
             or_(
                 ChatSession.state_data["name"].astext.ilike(like),
@@ -1854,6 +1864,18 @@ async def list_cancelled_bookings(
                 ChatSession.state_data["email"].astext.ilike(like),
                 ChatSession.state_data["customer_email"].astext.ilike(like),
                 ChatSession.state_data["phone"].astext.ilike(like),
+                ChatSession.unit_id.in_(
+                    select(_ServiceUnit.id).where(
+                        _ServiceUnit.org_id == user.org_id,
+                        _ServiceUnit.name.ilike(like),
+                    )
+                ),
+                ChatSession.provider_id.in_(
+                    select(_Provider.id).where(
+                        _Provider.org_id == user.org_id,
+                        _Provider.full_name.ilike(like),
+                    )
+                ),
             )
         )
     if from_date:
@@ -4320,12 +4342,16 @@ async def get_upcoming_bookings(
     limit: int = Query(10, ge=1, le=50),
     offset: int = Query(0, ge=0),
     from_date: Optional[str] = Query(None, description="YYYY-MM-DD, defaults to today"),
+    unit_id: Optional[str] = Query(default=None, description="Filter by department"),
+    provider_id: Optional[str] = Query(default=None, description="Filter by team member"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """
     Paginated list of upcoming confirmed bookings from `from_date` forward.
     Defaults to today. Used by the upcoming bookings panel in the calendar UI.
+    Optional unit_id/provider_id narrow further (same pattern as /bookings),
+    so the calendar's Agenda view respects the department/member filters.
     """
     if from_date:
         try:
@@ -4352,6 +4378,20 @@ async def get_upcoming_bookings(
         _preds.append(Booking.provider_id == _sp)
     elif _su:
         _preds.append(Booking.unit_id.in_(_su))
+    if unit_id:
+        try:
+            import uuid as _uuid
+
+            _preds.append(Booking.unit_id == _uuid.UUID(str(unit_id)))
+        except Exception:
+            pass
+    if provider_id:
+        try:
+            import uuid as _uuid2
+
+            _preds.append(Booking.provider_id == _uuid2.UUID(str(provider_id)))
+        except Exception:
+            pass
     stmt = (
         select(Booking, TimeSlot, ChatSession)
         .join(TimeSlot, Booking.slot_id == TimeSlot.id)
