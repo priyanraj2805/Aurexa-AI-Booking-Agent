@@ -349,11 +349,11 @@ function RevenueStrip() {
           <select
             value={range}
             onChange={(e) => onRange(Number(e.target.value))}
-            className="min-w-24 rounded-md border border-border bg-background px-2 py-1 text-xs text-muted-foreground outline-none focus:border-primary"
+            className="w-[60px] rounded-md border border-border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none focus:border-primary"
             aria-label="Revenue range"
           >
             {REVENUE_RANGES.map((d) => (
-              <option key={d} value={d}>{d} days</option>
+              <option key={d} value={d}>{d}</option>
             ))}
           </select>
         </div>
@@ -1091,7 +1091,7 @@ export default function DashboardPage() {
                   aria-label="Chart range"
                 >
                   {WINDOW_SIZES.map((d) => (
-                    <option key={d} value={d}>{d} days</option>
+                    <option key={d} value={d}>{d}</option>
                   ))}
                 </select>
               </div>

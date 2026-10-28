@@ -296,7 +296,7 @@ export default function CalendarPage() {
       {(filterUnits.length > 0 || filterProviders.length > 0) && (
         <div className="flex flex-wrap gap-2 px-1">
           {!!filterUnits.length && (
-            <select value={unitFilter} onChange={(e) => setUnitFilter(e.target.value)} className="px-3 py-2 bg-background border border-border rounded-lg text-sm">
+            <select value={unitFilter} onChange={(e) => setUnitFilter(e.target.value)} className="w-[120px] px-2 py-1 bg-background border border-border rounded-md text-[11px]">
               <option value="">All departments</option>
               {filterUnits.map((u) => (
                 <option key={u.id} value={u.id}>{u.name}</option>
@@ -304,7 +304,7 @@ export default function CalendarPage() {
             </select>
           )}
           {!!filterProviders.length && (
-            <select value={providerFilter} onChange={(e) => setProviderFilter(e.target.value)} className="px-3 py-2 bg-background border border-border rounded-lg text-sm">
+            <select value={providerFilter} onChange={(e) => setProviderFilter(e.target.value)} className="w-[120px] px-2 py-1 bg-background border border-border rounded-md text-[11px]">
               <option value="">All members</option>
               {visibleProviders.map((p) => (
                 <option key={p.id} value={p.id}>{p.full_name}</option>
