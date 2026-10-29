@@ -1119,7 +1119,7 @@ export default function DashboardPage() {
               <p className="text-muted-foreground text-sm">No booking activity yet.</p>
             </div>
           ) : (
-            <div className="flex-1 min-h-[14rem] w-full max-w-full overflow-x-auto scrollbar-thin">
+            <div className="flex-1 min-h-[14rem] w-full max-w-full overflow-x-scroll scrollbar-thin">
               <div className="h-full" style={{ width: `${(range / 7) * 100}%`, minWidth: "100%" }}>
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={areaData} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
